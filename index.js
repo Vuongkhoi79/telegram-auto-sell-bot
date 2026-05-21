@@ -56,7 +56,7 @@ bot.on("message", (msg) => {
 
     bot.sendPhoto(
       chatId,
-      "https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=ACB-157181829",
+      "https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=ACB-157181829",
       {
         caption: `💰 NẠP TIỀN
 
