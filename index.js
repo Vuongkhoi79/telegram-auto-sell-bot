@@ -18,8 +18,8 @@ app.get("/", (req, res) => {
 const mainMenu = {
   reply_markup: {
     keyboard: [
-      ["🛍 Sản Phẩm", "💰 Nạp tiền"],
-      ["👤 TÀI KHOẢN", "📦 Đơn hàng"],
+      ["🛍 Sản Phẩm", "💳 Thanh toán"],
+      ["📦 Đơn hàng"],
       ["🌐 Đổi ngôn ngữ", "💬 Hỗ trợ"],
       ["❌ Đóng"]
     ],
@@ -51,14 +51,14 @@ bot.on("message", (msg) => {
 5. Gemini - liên hệ`);
   }
 
-  // NẠP TIỀN
-  if (text === "💰 Nạp tiền") {
+  // THANH TOÁN
+  if (text === "💳 Thanh toán") {
 
     bot.sendPhoto(
       chatId,
       "https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=ACB-157181829",
       {
-        caption: `💰 NẠP TIỀN
+        caption: `💳 THANH TOÁN
 
 🏦 Ngân hàng: ACB
 💳 STK: 157181829
@@ -70,22 +70,6 @@ ${chatId}
 ⚡ Sau khi chuyển khoản hệ thống sẽ tự kiểm tra.`
       }
     );
-  }
-
-  // TÀI KHOẢN
-  if (text === "👤 TÀI KHOẢN") {
-    bot.sendMessage(chatId, `👤 TÀI KHOẢN
-
-🆔 ID của bạn: ${chatId}
-
-💰 Số dư: 0đ
-
-✅ Trạng thái: Đang hoạt động
-
-🏦 Tài khoản nhận tiền:
-Ngân hàng: ACB
-STK: 157181829
-Chủ TK: PHAM NGUYEN VUONG KHOI`);
   }
 
   // ĐƠN HÀNG
