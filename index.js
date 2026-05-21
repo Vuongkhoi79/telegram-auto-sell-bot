@@ -4,7 +4,7 @@ const express = require('express');
 const token = process.env.BOT_TOKEN;
 
 // THAY SỐ NÀY BẰNG TELEGRAM CHAT ID CỦA MÀY
-const ADMIN_CHAT_ID = "NHAP_CHAT_ID_CUA_MAY";
+const ADMIN_CHAT_ID = "8703946647";
 
 const bot = new TelegramBot(token, { polling: true });
 const app = express();
