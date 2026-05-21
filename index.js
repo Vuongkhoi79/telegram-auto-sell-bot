@@ -20,15 +20,53 @@ app.listen(PORT, () => {
 bot.onText(/\/start/, (msg) => {
   bot.sendMessage(
     msg.chat.id,
-    `🔥 Chào mừng tới AI Store
+    "🔥 Chào mừng tới AI Store",
+    {
+      reply_markup: {
+        keyboard: [
+          ["📦 Xem sản phẩm"],
+          ["💰 Thanh toán"],
+          ["👤 Liên hệ admin"]
+        ],
+        resize_keyboard: true
+      }
+    }
+  );
+});
 
-📦 Sản phẩm:
-- Prompt viral Reel
+bot.on("message", (msg) => {
+
+  if (msg.text === "📦 Xem sản phẩm") {
+    bot.sendMessage(
+      msg.chat.id,
+      `📦 Danh sách sản phẩm:
+
+- Prompt Viral Reel
 - Tool AI
 - ChatGPT Plus
-- Claude
-- Gemini
+- Claude Pro
+- Gemini`
+    );
+  }
 
-💰 Liên hệ admin để mua`
-  );
+  if (msg.text === "💰 Thanh toán") {
+    bot.sendMessage(
+      msg.chat.id,
+      `💳 Thông tin thanh toán
+
+MB Bank
+STK: 123456789
+Tên: AI STORE
+
+⚡ Gửi bill sau khi chuyển khoản`
+    );
+  }
+
+  if (msg.text === "👤 Liên hệ admin") {
+    bot.sendMessage(
+      msg.chat.id,
+      "📩 Telegram admin: @yourusername"
+    );
+  }
+
 });
