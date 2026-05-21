@@ -3,7 +3,7 @@ const express = require('express');
 
 const token = process.env.BOT_TOKEN;
 
-// THAY SỐ NÀY BẰNG TELEGRAM CHAT ID CỦA MÀY
+// ID Telegram admin
 const ADMIN_CHAT_ID = "8703946647";
 
 const bot = new TelegramBot(token, { polling: true });
@@ -36,9 +36,11 @@ bot.onText(/\/start|Menu/, (msg) => {
 });
 
 bot.on("message", (msg) => {
+
   const chatId = msg.chat.id;
   const text = msg.text;
 
+  // SẢN PHẨM
   if (text === "🛍 Sản Phẩm") {
     bot.sendMessage(chatId, `🛍 DANH SÁCH SẢN PHẨM
 
@@ -49,38 +51,59 @@ bot.on("message", (msg) => {
 5. Gemini - liên hệ`);
   }
 
+  // NẠP TIỀN
   if (text === "💰 Nạp tiền") {
-    bot.sendMessage(chatId, `💰 NẠP TIỀN
 
-Ngân hàng: ACB
-STK: 157181829
-Tên: PHAM NGUYEN VUONG KHOI
+    bot.sendPhoto(
+      chatId,
+      "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=ACB-157181829",
+      {
+        caption: `💰 NẠP TIỀN
 
-Nội dung CK: ${chatId}
+🏦 Ngân hàng: ACB
+💳 STK: 157181829
+👤 Tên: PHAM NGUYEN VUONG KHOI
 
-Sau khi chuyển khoản, hệ thống sẽ kiểm tra tự động.`);
+📝 Nội dung CK:
+${chatId}
+
+⚡ Sau khi chuyển khoản hệ thống sẽ tự kiểm tra.`
+      }
+    );
   }
 
+  // TÀI KHOẢN
   if (text === "👤 TÀI KHOẢN") {
     bot.sendMessage(chatId, `👤 TÀI KHOẢN
 
-ID của bạn: ${chatId}
-Số dư: 0đ
-Trạng thái: Đang hoạt động`);
+🆔 ID của bạn: ${chatId}
+
+💰 Số dư: 0đ
+
+✅ Trạng thái: Đang hoạt động
+
+🏦 Tài khoản nhận tiền:
+Ngân hàng: ACB
+STK: 157181829
+Chủ TK: PHAM NGUYEN VUONG KHOI`);
   }
 
+  // ĐƠN HÀNG
   if (text === "📦 Đơn hàng") {
     bot.sendMessage(chatId, "📦 Bạn chưa có đơn hàng nào.");
   }
 
+  // ĐỔI NGÔN NGỮ
   if (text === "🌐 Đổi ngôn ngữ") {
     bot.sendMessage(chatId, "🌐 Hiện bot đang dùng Tiếng Việt.");
   }
 
+  // HỖ TRỢ
   if (text === "💬 Hỗ trợ") {
-    bot.sendMessage(chatId, "💬 Liên hệ admin: @yourusername");
+    bot.sendMessage(chatId, "💬 Telegram admin: @yourusername");
   }
 
+  // ĐÓNG MENU
   if (text === "❌ Đóng") {
     bot.sendMessage(chatId, "❌ Đã đóng menu.", {
       reply_markup: {
@@ -88,21 +111,22 @@ Trạng thái: Đang hoạt động`);
       }
     });
   }
+
 });
 
+// WEBHOOK TỪ SEPAY
 app.post("/webhook", (req, res) => {
+
   console.log("Webhook received:", req.body);
 
   const amount =
     req.body.transferAmount ||
     req.body.amount ||
-    req.body.money ||
     "Không rõ";
 
   const content =
     req.body.content ||
     req.body.description ||
-    req.body.transferContent ||
     "Không rõ";
 
   bot.sendMessage(
@@ -110,12 +134,15 @@ app.post("/webhook", (req, res) => {
     `💸 CÓ THANH TOÁN MỚI!
 
 💰 Số tiền: ${amount}
-📝 Nội dung: ${content}
 
-✅ SePay đã gửi webhook về bot.`
+📝 Nội dung:
+${content}
+
+✅ SePay đã gửi webhook thành công.`
   );
 
   res.sendStatus(200);
+
 });
 
 const PORT = process.env.PORT || 3000;
