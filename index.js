@@ -2,18 +2,17 @@ const TelegramBot = require('node-telegram-bot-api');
 const express = require('express');
 
 const token = process.env.BOT_TOKEN;
-const bot = new TelegramBot(token, { polling: true });
 
+// THAY SỐ NÀY BẰNG TELEGRAM CHAT ID CỦA MÀY
+const ADMIN_CHAT_ID = "NHAP_CHAT_ID_CUA_MAY";
+
+const bot = new TelegramBot(token, { polling: true });
 const app = express();
+
+app.use(express.json());
 
 app.get("/", (req, res) => {
   res.send("Telegram Bot Running");
-});
-
-const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, () => {
-  console.log("Server running on port " + PORT);
 });
 
 const mainMenu = {
@@ -53,13 +52,13 @@ bot.on("message", (msg) => {
   if (text === "💰 Nạp tiền") {
     bot.sendMessage(chatId, `💰 NẠP TIỀN
 
-Ngân hàng: MB Bank
-STK: 123456789
-Tên: AI STORE
+Ngân hàng: ACB
+STK: 157181829
+Tên: PHAM NGUYEN VUONG KHOI
 
 Nội dung CK: ${chatId}
 
-Sau khi chuyển khoản, gửi bill tại đây.`);
+Sau khi chuyển khoản, hệ thống sẽ kiểm tra tự động.`);
   }
 
   if (text === "👤 TÀI KHOẢN") {
@@ -89,4 +88,38 @@ Trạng thái: Đang hoạt động`);
       }
     });
   }
+});
+
+app.post("/webhook", (req, res) => {
+  console.log("Webhook received:", req.body);
+
+  const amount =
+    req.body.transferAmount ||
+    req.body.amount ||
+    req.body.money ||
+    "Không rõ";
+
+  const content =
+    req.body.content ||
+    req.body.description ||
+    req.body.transferContent ||
+    "Không rõ";
+
+  bot.sendMessage(
+    ADMIN_CHAT_ID,
+    `💸 CÓ THANH TOÁN MỚI!
+
+💰 Số tiền: ${amount}
+📝 Nội dung: ${content}
+
+✅ SePay đã gửi webhook về bot.`
+  );
+
+  res.sendStatus(200);
+});
+
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log("Server running on port " + PORT);
 });
