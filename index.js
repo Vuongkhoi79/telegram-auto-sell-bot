@@ -2,7 +2,6 @@ const TelegramBot = require('node-telegram-bot-api');
 const express = require('express');
 
 const token = process.env.BOT_TOKEN;
-
 const bot = new TelegramBot(token, { polling: true });
 
 const app = express();
@@ -17,56 +16,77 @@ app.listen(PORT, () => {
   console.log("Server running on port " + PORT);
 });
 
-bot.onText(/\/start/, (msg) => {
+const mainMenu = {
+  reply_markup: {
+    keyboard: [
+      ["🛍 Sản Phẩm", "💰 Nạp tiền"],
+      ["👤 TÀI KHOẢN", "📦 Đơn hàng"],
+      ["🌐 Đổi ngôn ngữ", "💬 Hỗ trợ"],
+      ["❌ Đóng"]
+    ],
+    resize_keyboard: true
+  }
+};
+
+bot.onText(/\/start|Menu/, (msg) => {
   bot.sendMessage(
     msg.chat.id,
-    "🔥 Chào mừng tới AI Store",
-    {
-      reply_markup: {
-        keyboard: [
-          ["📦 Xem sản phẩm"],
-          ["💰 Thanh toán"],
-          ["👤 Liên hệ admin"]
-        ],
-        resize_keyboard: true
-      }
-    }
+    "✅ Ngôn ngữ của bạn đã được chuyển sang Tiếng Việt.",
+    mainMenu
   );
 });
 
 bot.on("message", (msg) => {
+  const chatId = msg.chat.id;
+  const text = msg.text;
 
-  if (msg.text === "📦 Xem sản phẩm") {
-    bot.sendMessage(
-      msg.chat.id,
-      `📦 Danh sách sản phẩm:
+  if (text === "🛍 Sản Phẩm") {
+    bot.sendMessage(chatId, `🛍 DANH SÁCH SẢN PHẨM
 
-- Prompt Viral Reel
-- Tool AI
-- ChatGPT Plus
-- Claude Pro
-- Gemini`
-    );
+1. Prompt Viral Reel - 99k
+2. Tool AI giá rẻ - 199k
+3. ChatGPT Plus - liên hệ
+4. Claude Pro - liên hệ
+5. Gemini - liên hệ`);
   }
 
-  if (msg.text === "💰 Thanh toán") {
-    bot.sendMessage(
-      msg.chat.id,
-      `💳 Thông tin thanh toán
+  if (text === "💰 Nạp tiền") {
+    bot.sendMessage(chatId, `💰 NẠP TIỀN
 
-MB Bank
+Ngân hàng: MB Bank
 STK: 123456789
 Tên: AI STORE
 
-⚡ Gửi bill sau khi chuyển khoản`
-    );
+Nội dung CK: ${chatId}
+
+Sau khi chuyển khoản, gửi bill tại đây.`);
   }
 
-  if (msg.text === "👤 Liên hệ admin") {
-    bot.sendMessage(
-      msg.chat.id,
-      "📩 Telegram admin: @yourusername"
-    );
+  if (text === "👤 TÀI KHOẢN") {
+    bot.sendMessage(chatId, `👤 TÀI KHOẢN
+
+ID của bạn: ${chatId}
+Số dư: 0đ
+Trạng thái: Đang hoạt động`);
   }
 
+  if (text === "📦 Đơn hàng") {
+    bot.sendMessage(chatId, "📦 Bạn chưa có đơn hàng nào.");
+  }
+
+  if (text === "🌐 Đổi ngôn ngữ") {
+    bot.sendMessage(chatId, "🌐 Hiện bot đang dùng Tiếng Việt.");
+  }
+
+  if (text === "💬 Hỗ trợ") {
+    bot.sendMessage(chatId, "💬 Liên hệ admin: @yourusername");
+  }
+
+  if (text === "❌ Đóng") {
+    bot.sendMessage(chatId, "❌ Đã đóng menu.", {
+      reply_markup: {
+        remove_keyboard: true
+      }
+    });
+  }
 });
