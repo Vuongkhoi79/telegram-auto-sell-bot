@@ -21,52 +21,62 @@ const products = {
     category: "CHATGPT",
     price: 210000,
     file: "kho_chatgpt_bhf.txt",
-    desc: "Tài khoản cá nhân riêng tư, đổi pass thoải mái\nBảo hành 30 ngày - Hàng pay xịn\nKHÔNG BẢO HÀNH LOGIN CODEX\nĐịnh dạng: TK|Pass|2FA"
+    desc:
+      "🔝 Tài khoản cá nhân riêng tư, đổi pass thoải mái\n" +
+      "❤️ Bảo hành 30 ngày - Hàng pay xịn\n" +
+      "💔 KHÔNG BẢO HÀNH LOGIN CODEX\n" +
+      "📦 Định dạng: TK|Pass|2FA",
   },
   chatgpt_gmail: {
     name: "CHATGPT PLUS 1 tháng BH48H GMAIL",
     category: "CHATGPT",
     price: 35000,
     file: "kho_chatgpt_gmail.txt",
-    desc: "Tài khoản Gmail đăng nhập ChatGPT Plus\nBảo hành 48H\nĐịnh dạng: TK|Pass"
+    desc:
+      "🔝 Tài khoản Gmail đăng nhập ChatGPT Plus\n" +
+      "❤️ Bảo hành 48H\n" +
+      "📦 Định dạng: TK|Pass",
   },
   grok_super: {
     name: "GROK SUPER",
     category: "GROK SUPER",
     price: 120000,
     file: "kho_grok_super.txt",
-    desc: "Tài khoản Grok Super\nĐịnh dạng: TK|Pass hoặc TK|Pass|2FA"
+    desc:
+      "🔝 Tài khoản Grok Super\n" +
+      "📦 Định dạng: TK|Pass hoặc TK|Pass|2FA",
   },
   veo3_5k: {
     name: "SLOT 5k FAM VEO3 ULTRA 1 tháng",
     category: "VEO3 ULTRA",
     price: 400000,
     file: "kho_veo3_5k.txt",
-    desc: "Slot FAM VEO3 ULTRA 1 tháng\nĐịnh dạng giao: mail|pass hoặc mail|pass|2fa"
+    desc:
+      "🔝 Slot FAM VEO3 ULTRA 1 tháng\n" +
+      "📦 Định dạng giao: mail|pass hoặc mail|pass|2fa",
   },
   veo3_12k5: {
     name: "SLOT 12k5 FAM VEO3 ULTRA 1 tháng",
     category: "VEO3 ULTRA",
     price: 500000,
     file: "kho_veo3_12k5.txt",
-    desc: "Slot FAM VEO3 ULTRA 1 tháng\nĐịnh dạng giao: mail|pass hoặc mail|pass|2fa"
+    desc:
+      "🔝 Slot FAM VEO3 ULTRA 1 tháng\n" +
+      "📦 Định dạng giao: mail|pass hoặc mail|pass|2fa",
   },
   veo3_25k: {
     name: "SLOT 25K FAM VEO3 ULTRA 1 tháng",
     category: "VEO3 ULTRA",
     price: 850000,
     file: "kho_veo3_25k.txt",
-    desc: "Slot FAM VEO3 ULTRA 1 tháng\nĐịnh dạng giao: mail|pass hoặc mail|pass|2fa"
-  }
+    desc:
+      "🔝 Slot FAM VEO3 ULTRA 1 tháng\n" +
+      "📦 Định dạng giao: mail|pass hoặc mail|pass|2fa",
+  },
 };
 
-const categories = [
-  "CHATGPT",
-  "GROK SUPER",
-  "VEO3 ULTRA"
-];
-
-const pending = {};
+const categories = ["CHATGPT", "GROK SUPER", "VEO3 ULTRA"];
+const waitingManualQty = {};
 
 function money(n) {
   return Number(n).toLocaleString("vi-VN") + "đ";
@@ -74,9 +84,10 @@ function money(n) {
 
 function readLines(file) {
   if (!fs.existsSync(file)) return [];
-  return fs.readFileSync(file, "utf8")
+  return fs
+    .readFileSync(file, "utf8")
     .split(/\r?\n/)
-    .map(x => x.trim())
+    .map((x) => x.trim())
     .filter(Boolean);
 }
 
@@ -91,6 +102,7 @@ function stockCount(pid) {
 function takeStock(pid, qty) {
   const file = products[pid].file;
   const lines = readLines(file);
+
   if (lines.length < qty) return null;
 
   const delivered = lines.slice(0, qty);
@@ -128,7 +140,7 @@ function createOrder(user, pid, qty) {
     qty,
     total,
     status: "pending",
-    createdAt: Date.now()
+    createdAt: Date.now(),
   };
 
   saveOrders(orders);
@@ -142,36 +154,36 @@ function mainMenu() {
         ["🛍 Sản Phẩm", "💰 Nạp tiền"],
         ["👤 TÀI KHOẢN", "📦 Đơn hàng"],
         ["🌐 Đổi ngôn ngữ", "💬 Hỗ trợ"],
-        ["❌ Đóng"]
+        ["❌ Đóng"],
       ],
-      resize_keyboard: true
-    }
+      resize_keyboard: true,
+    },
   };
 }
 
 function categoryKeyboard() {
   return {
     reply_markup: {
-      inline_keyboard: categories.map(c => [
-        { text: c, callback_data: "cat:" + c }
-      ])
-    }
+      inline_keyboard: categories.map((c) => [{ text: c, callback_data: "cat:" + c }]),
+    },
   };
 }
 
 function productKeyboard(cat) {
   const rows = [];
 
-  Object.keys(products).forEach(pid => {
+  Object.keys(products).forEach((pid) => {
     const p = products[pid];
+
     if (p.category === cat) {
       const stock = stockCount(pid);
       const status = stock > 0 ? `[${stock}]` : "[❌ Hết]";
+
       rows.push([
         {
           text: `${p.name} - ${money(p.price)} ${status}`,
-          callback_data: stock > 0 ? `prod:${pid}` : "none"
-        }
+          callback_data: stock > 0 ? `prod:${pid}` : "none",
+        },
       ]);
     }
   });
@@ -184,15 +196,19 @@ function productKeyboard(cat) {
 
 function qtyKeyboard(pid) {
   const stock = stockCount(pid);
-  const nums = [1, 2, 3, 5, 10].filter(n => n <= stock);
-
+  const nums = [1, 2, 3, 5, 10].filter((n) => n <= stock);
   const rows = [];
+
   if (nums.length) {
-    rows.push(nums.map(n => ({ text: String(n), callback_data: `qty:${pid}:${n}` })));
+    rows.push(nums.map((n) => ({ text: String(n), callback_data: `qty:${pid}:${n}` })));
   }
 
   rows.push([{ text: "📝 Nhập số khác", callback_data: `manualqty:${pid}` }]);
-  rows.push([{ text: "🔙 Quay lại", callback_data: "cat:" + products[pid].category }]);
+
+  rows.push([
+    { text: "🔙 Quay lại", callback_data: "cat:" + products[pid].category },
+    { text: "❌ Đóng", callback_data: "close" },
+  ]);
 
   return { reply_markup: { inline_keyboard: rows } };
 }
@@ -201,14 +217,10 @@ function payKeyboard(orderId) {
   return {
     reply_markup: {
       inline_keyboard: [
-        [
-          { text: "🏦 Chuyển khoản ACB", callback_data: "bank:" + orderId }
-        ],
-        [
-          { text: "🔙 Quay lại Sản Phẩm", callback_data: "back:categories" }
-        ]
-      ]
-    }
+        [{ text: "🏦 Chuyển khoản ACB", callback_data: "bank:" + orderId }],
+        [{ text: "🔙 Quay lại Sản Phẩm", callback_data: "back:categories" }],
+      ],
+    },
   };
 }
 
@@ -259,6 +271,24 @@ Số lượng: ${order.qty}`
   return { ok: true };
 }
 
+function showOrders(chatId, userId) {
+  const orders = loadOrders();
+  const mine = Object.values(orders).filter((o) => String(o.userId) === String(userId));
+
+  if (!mine.length) {
+    bot.sendMessage(chatId, "📦 Bạn chưa có đơn hàng nào.");
+    return;
+  }
+
+  let text = "📦 ĐƠN HÀNG CỦA BẠN\n\n";
+
+  mine.slice(-5).forEach((o) => {
+    text += `${o.orderId} - ${o.productName} - ${money(o.total)} - ${o.status}\n`;
+  });
+
+  bot.sendMessage(chatId, text);
+}
+
 app.get("/", (req, res) => {
   res.send("Telegram Auto Sell Bot Running");
 });
@@ -268,6 +298,8 @@ bot.onText(/\/start|Menu/, (msg) => {
     msg.chat.id,
     `👋 Chào mừng ${msg.from.first_name || ""} đến với @Phuong_AI_bot
 
+👋 Chào mừng đến với Tài Khoản AI Giá Rẻ!
+
 🛍 Mua gói dịch vụ số — thanh toán nhanh — giao hàng tự động.
 
 ⚡ Lệnh nhanh
@@ -276,6 +308,7 @@ bot.onText(/\/start|Menu/, (msg) => {
 • /topup — Nạp tiền ví VNĐ
 • /orders — Đơn hàng của bạn
 • /support — Liên hệ hỗ trợ
+• /change_language — Thay đổi ngôn ngữ
 • /me — Thông tin tài khoản`,
     mainMenu()
   );
@@ -297,6 +330,10 @@ bot.onText(/\/support/, (msg) => {
   bot.sendMessage(msg.chat.id, "💬 Hỗ trợ: nhắn trực tiếp admin.");
 });
 
+bot.onText(/\/change_language/, (msg) => {
+  bot.sendMessage(msg.chat.id, "🌐 Hiện bot đang dùng Tiếng Việt.");
+});
+
 bot.onText(/\/me/, (msg) => {
   bot.sendMessage(msg.chat.id, `👤 Tài khoản\nID: ${msg.from.id}\nTên: ${msg.from.first_name || ""}`);
 });
@@ -315,15 +352,17 @@ Tên: ${BANK_OWNER}
 Nội dung CK:
 ${msg.from.id}
 
-Sau khi chuyển khoản, hệ thống sẽ tự kiểm tra.`
+Sau khi chuyển khoản, hệ thống sẽ tự kiểm tra.`,
     }
   );
 });
 
 bot.onText(/\/done (.+)/, async (msg, match) => {
   if (String(msg.from.id) !== ADMIN_CHAT_ID) return;
+
   const orderId = match[1].trim();
   const result = await deliverOrder(orderId);
+
   bot.sendMessage(msg.chat.id, result.ok ? "✅ Đã giao hàng." : "❌ " + result.msg);
 });
 
@@ -331,7 +370,7 @@ bot.onText(/\/stock/, (msg) => {
   if (String(msg.from.id) !== ADMIN_CHAT_ID) return;
 
   let text = "📦 TỒN KHO\n\n";
-  Object.keys(products).forEach(pid => {
+  Object.keys(products).forEach((pid) => {
     text += `${pid}: ${stockCount(pid)} - ${products[pid].name}\n`;
   });
 
@@ -341,7 +380,7 @@ bot.onText(/\/stock/, (msg) => {
 bot.onText(/\/addstock ([\s\S]+)/, (msg, match) => {
   if (String(msg.from.id) !== ADMIN_CHAT_ID) return;
 
-  const lines = match[1].split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+  const lines = match[1].split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
   const pid = lines[0];
 
   if (!products[pid]) {
@@ -349,9 +388,9 @@ bot.onText(/\/addstock ([\s\S]+)/, (msg, match) => {
     return;
   }
 
-  const items = lines.slice(1).filter(line => {
+  const items = lines.slice(1).filter((line) => {
     const parts = line.split("|");
-    return (parts.length === 2 || parts.length === 3) && parts.every(x => x.trim());
+    return (parts.length === 2 || parts.length === 3) && parts.every((x) => x.trim());
   });
 
   if (!items.length) {
@@ -368,27 +407,48 @@ bot.onText(/\/addstock ([\s\S]+)/, (msg, match) => {
   );
 });
 
-function showOrders(chatId, userId) {
-  const orders = loadOrders();
-  const mine = Object.values(orders).filter(o => String(o.userId) === String(userId));
-
-  if (!mine.length) {
-    bot.sendMessage(chatId, "📦 Bạn chưa có đơn hàng nào.");
-    return;
-  }
-
-  let text = "📦 ĐƠN HÀNG CỦA BẠN\n\n";
-  mine.slice(-5).forEach(o => {
-    text += `${o.orderId} - ${o.productName} - ${money(o.total)} - ${o.status}\n`;
-  });
-
-  bot.sendMessage(chatId, text);
-}
-
 bot.on("message", (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
   if (!text) return;
+
+  if (waitingManualQty[msg.from.id]) {
+    const pid = waitingManualQty[msg.from.id];
+    const qty = Number(text);
+
+    if (!Number.isInteger(qty) || qty <= 0) {
+      bot.sendMessage(chatId, "❌ Số lượng không hợp lệ. Nhập số nguyên lớn hơn 0.");
+      return;
+    }
+
+    if (qty > stockCount(pid)) {
+      bot.sendMessage(chatId, "❌ Kho không đủ số lượng.");
+      return;
+    }
+
+    delete waitingManualQty[msg.from.id];
+
+    const order = createOrder(msg.from, pid, qty);
+    const p = products[pid];
+
+    bot.sendMessage(
+      chatId,
+      `🧾 Chi tiết đơn
+
+📦 Sản phẩm: ${p.category}
+🛒 Gói: ${p.name}
+🔢 Số lượng: ${qty}
+💵 Đơn giá: ${money(p.price)}
+
+🛒 Tổng thanh toán: ${money(order.total)}
+💰 Số dư: 0đ
+
+Chọn cách thanh toán`,
+      payKeyboard(order.orderId)
+    );
+
+    return;
+  }
 
   if (text === "🛍 Sản Phẩm") {
     bot.sendMessage(chatId, "🛍 Chọn danh mục để xem gói 👇", categoryKeyboard());
@@ -408,7 +468,7 @@ Tên: ${BANK_OWNER}
 Nội dung CK:
 ${msg.from.id}
 
-Sau khi chuyển khoản, hệ thống sẽ tự kiểm tra.`
+Sau khi chuyển khoản, hệ thống sẽ tự kiểm tra.`,
       }
     );
   }
@@ -431,7 +491,7 @@ Sau khi chuyển khoản, hệ thống sẽ tự kiểm tra.`
 
   if (text === "❌ Đóng") {
     bot.sendMessage(chatId, "❌ Đã đóng menu.", {
-      reply_markup: { remove_keyboard: true }
+      reply_markup: { remove_keyboard: true },
     });
   }
 });
@@ -446,21 +506,27 @@ bot.on("callback_query", async (query) => {
     return;
   }
 
+  if (data === "close") {
+    bot.deleteMessage(chatId, msgId).catch(() => {});
+    return;
+  }
+
   if (data === "back:categories") {
     bot.editMessageText("🛍 Chọn danh mục để xem gói 👇", {
       chat_id: chatId,
       message_id: msgId,
-      ...categoryKeyboard()
+      ...categoryKeyboard(),
     });
     return;
   }
 
   if (data.startsWith("cat:")) {
     const cat = data.split(":")[1];
+
     bot.editMessageText(`${cat}\n\nChọn gói 👇`, {
       chat_id: chatId,
       message_id: msgId,
-      ...productKeyboard(cat)
+      ...productKeyboard(cat),
     });
     return;
   }
@@ -473,8 +539,9 @@ bot.on("callback_query", async (query) => {
     bot.editMessageText(
       `✅ ${p.category} ${p.name}
 
-🔝 ${p.desc}
+${p.desc}
 
+━━━━━━━━━━━━━━
 📊 Còn lại: ${stock}
 💵 Giá: ${money(p.price)} / tài khoản
 
@@ -482,9 +549,17 @@ bot.on("callback_query", async (query) => {
       {
         chat_id: chatId,
         message_id: msgId,
-        ...qtyKeyboard(pid)
+        ...qtyKeyboard(pid),
       }
     );
+    return;
+  }
+
+  if (data.startsWith("manualqty:")) {
+    const pid = data.split(":")[1];
+    waitingManualQty[query.from.id] = pid;
+
+    bot.sendMessage(chatId, `📝 Nhập số lượng muốn mua cho gói:\n${products[pid].name}`);
     return;
   }
 
@@ -498,9 +573,6 @@ bot.on("callback_query", async (query) => {
       return;
     }
 
-    pending[query.from.id] = { pid, qty };
-    const total = p.price * qty;
-
     const order = createOrder(query.from, pid, qty);
 
     bot.editMessageText(
@@ -511,14 +583,14 @@ bot.on("callback_query", async (query) => {
 🔢 Số lượng: ${qty}
 💵 Đơn giá: ${money(p.price)}
 
-🛒 Tổng thanh toán: ${money(total)}
+🛒 Tổng thanh toán: ${money(order.total)}
 💰 Số dư: 0đ
 
 Chọn cách thanh toán`,
       {
         chat_id: chatId,
         message_id: msgId,
-        ...payKeyboard(order.orderId)
+        ...payKeyboard(order.orderId),
       }
     );
     return;
@@ -550,36 +622,37 @@ STK: ${BANK_ACCOUNT}
 Tên: ${BANK_OWNER}
 Nội dung CK: ${orderId}
 
-Sau khi chuyển khoản đúng nội dung, bot sẽ tự giao hàng.`
+Sau khi chuyển khoản đúng nội dung, bot sẽ tự giao hàng.`,
       }
     );
     return;
   }
 });
 
-// WEBHOOK TỪ SEPAY
 app.post("/webhook", async (req, res) => {
   console.log("Webhook received:", req.body);
 
   const amount = Number(
     req.body.transferAmount ||
-    req.body.amount ||
-    req.body.transfer_amount ||
-    0
+      req.body.amount ||
+      req.body.transfer_amount ||
+      0
   );
 
   const content = String(
     req.body.content ||
-    req.body.description ||
-    req.body.transferContent ||
-    ""
+      req.body.description ||
+      req.body.transferContent ||
+      ""
   );
 
   const orders = loadOrders();
-  const order = Object.values(orders).find(o =>
-    o.status === "pending" &&
-    content.includes(o.orderId) &&
-    Number(amount) >= Number(o.total)
+
+  const order = Object.values(orders).find(
+    (o) =>
+      o.status === "pending" &&
+      content.includes(o.orderId) &&
+      Number(amount) >= Number(o.total)
   );
 
   await bot.sendMessage(
@@ -600,6 +673,7 @@ ${order ? "✅ Khớp đơn: " + order.orderId : "⚠️ Chưa khớp đơn nào
 });
 
 const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => {
   console.log("Server running on port " + PORT);
 });
