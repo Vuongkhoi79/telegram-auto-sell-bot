@@ -7,7 +7,11 @@ import subprocess
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-import winreg
+
+if platform.system() == "Windows":
+    import winreg
+else:
+    winreg = None
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
@@ -39,11 +43,12 @@ def _run_wmic(args: list[str]) -> str:
 
 def get_machine_id() -> str:
     machine_guid = ""
-    try:
-        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography")
-        machine_guid = winreg.QueryValueEx(key, "MachineGuid")[0]
-    except Exception:
-        machine_guid = ""
+    if winreg is not None:
+        try:
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography")
+            machine_guid = winreg.QueryValueEx(key, "MachineGuid")[0]
+        except Exception:
+            machine_guid = ""
 
     parts = [
         machine_guid,
