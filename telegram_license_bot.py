@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from dotenv import load_dotenv
+from telegram.error import BadRequest
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
@@ -123,6 +124,40 @@ def _format_license_record(record: dict | None) -> str:
 
 def _is_admin(user_id: int, admin_ids: set[int]) -> bool:
     return int(user_id) in admin_ids
+
+
+def _is_message_not_modified(exc: BadRequest) -> bool:
+    return "message is not modified" in str(exc).lower()
+
+
+async def _safe_edit_message_text(query, *args, **kwargs) -> bool:
+    try:
+        await query.edit_message_text(*args, **kwargs)
+        return True
+    except BadRequest as exc:
+        if _is_message_not_modified(exc):
+            return False
+        raise
+
+
+async def _safe_edit_message_caption(query, *args, **kwargs) -> bool:
+    try:
+        await query.edit_message_caption(*args, **kwargs)
+        return True
+    except BadRequest as exc:
+        if _is_message_not_modified(exc):
+            return False
+        raise
+
+
+async def _safe_edit_message_reply_markup(query, *args, **kwargs) -> bool:
+    try:
+        await query.edit_message_reply_markup(*args, **kwargs)
+        return True
+    except BadRequest as exc:
+        if _is_message_not_modified(exc):
+            return False
+        raise
 
 
 def _main_menu_keyboard() -> InlineKeyboardMarkup:
@@ -619,6 +654,55 @@ async def _send_free_help(update: Update, context: ContextTypes.DEFAULT_TYPE, *,
         await update.callback_query.edit_message_text(text, reply_markup=_ai_daily_keyboard())
     else:
         await update.effective_message.reply_text(text, reply_markup=_ai_daily_keyboard())
+
+
+async def _handle_free_license_click(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    print("FREE_LICENSE_CLICKED", flush=True)
+    user = update.effective_user
+    license_service: LicenseService = context.application.bot_data["license_service"]
+    payment_service: PaymentService = context.application.bot_data["payment_service"]
+    user_record = license_service.db.latest_user(user.id) if user else None
+    machine_id = str((user_record or {}).get("machine_id", "")).strip().upper()
+
+    if not machine_id:
+        await update.effective_message.reply_text(
+            "Chưa có Machine ID để cấp license.\n\n"
+            "Vui lòng mở tool -> tab Kích Hoạt -> bấm Nhận License Free 90 Ngày, "
+            "hoặc vào bot bằng link:\n"
+            "https://t.me/Aidaily79_bot?start=<MACHINE_ID>",
+            reply_markup=_ai_daily_keyboard(),
+        )
+        return
+
+    license_service.touch_user(user.id, _user_label(user), machine_id=machine_id, source="free_button", reminder_state="active")
+    if license_service.can_grant_free(user.id, machine_id):
+        result = license_service.issue_free_license(user.id, _user_label(user), machine_id, customer=_user_label(user))
+        if not result.ok:
+            await update.effective_message.reply_text(result.message, reply_markup=_ai_daily_keyboard())
+            return
+        print("LICENSE_CREATED", flush=True)
+        license_service.update_user_from_license(result.record or {}, source="free_button")
+        record = result.record or {}
+        await update.effective_message.reply_text(
+            "Bạn được tặng 90 ngày miễn phí.\n"
+            f"Machine ID: {machine_id}\n"
+            f"Hạn dùng: {record.get('expire_date', '')}\n"
+            "Bot đã gửi file license bên dưới.\n"
+            "Mở tool tab Kích Hoạt dán license hoặc nạp file license.",
+            reply_markup=_ai_daily_keyboard(),
+        )
+        await _send_license_file(update, result.license_path or record.get("license_file"))
+        print("LICENSE_SENT", flush=True)
+        return
+
+    order = license_service.create_pending_order(user.id, _user_label(user), machine_id, customer=_user_label(user))
+    payment_text = payment_service.build_payment_text(order.get("price", DEFAULT_PAID_PRICE), order["order_id"], machine_id)
+    await update.effective_message.reply_text(
+        "Machine ID này đã nhận 90 ngày miễn phí.\n"
+        "Để dùng vĩnh viễn, phí kích hoạt là 450.000đ.\n\n"
+        f"{payment_text}",
+        reply_markup=_ai_daily_keyboard(),
+    )
 
 
 async def _send_help(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
@@ -1147,7 +1231,7 @@ async def post_init(application: Application) -> None:
     sepay_webhook.start_sepay_webhook_server(application, _fulfill, host=host, port=port)
 
 
-async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query:
         return
@@ -1206,7 +1290,7 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     elif data == "menu_download":
         await _send_download(update, context, edit=True)
     elif data == "menu_free":
-        await _send_free_help(update, context, edit=True)
+        await _handle_free_license_click(update, context)
     elif data == "menu_help":
         await _send_help(update, context, edit=True)
     elif data == "menu_upgrade":
@@ -1215,6 +1299,15 @@ async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _send_support(update, context, edit=True)
     else:
         await query.edit_message_text("Menu khong hop le.", reply_markup=_main_menu_keyboard())
+
+
+async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        await _on_menu_impl(update, context)
+    except BadRequest as exc:
+        if _is_message_not_modified(exc):
+            return
+        raise
 
 
 def _load_config() -> dict[str, str]:
