@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import uuid
@@ -195,6 +196,9 @@ class LicenseService:
         self.paid_price = paid_price
 
     def _load_private_key(self):
+        private_key_pem = os.environ.get("PRIVATE_KEY_PEM", "").strip()
+        if private_key_pem:
+            return serialization.load_pem_private_key(private_key_pem.encode("utf-8"), password=None)
         if not self.private_key_path.exists():
             raise FileNotFoundError(f"Missing private key: {self.private_key_path}")
         return serialization.load_pem_private_key(self.private_key_path.read_bytes(), password=None)
