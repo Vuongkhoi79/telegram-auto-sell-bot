@@ -1,0 +1,21 @@
+{
+  "ADOBE": { "stock": 10, "active": true },
+  "ARTLIST": { "stock": 10, "active": true },
+  "CANVA": { "stock": 10, "active": true },
+  "CAPCUT PRO": { "stock": 10, "active": true },
+  "CHATGPT": { "stock": 10, "active": true },
+  "CLAUDE AI": { "stock": 0, "active": true },
+  "CURSOR AI": { "stock": 10, "active": true },
+  "ELEVEN": { "stock": 10, "active": true },
+  "GAMMA AI": { "stock": 10, "active": true },
+  "GEMINI AI": { "stock": 10, "active": true },
+  "GROK SUPER": { "stock": 10, "active": true },
+  "HEYGEN AI": { "stock": 10, "active": true },
+  "HIGGFIELD": { "stock": 10, "active": true },
+  "KLING": { "stock": 10, "active": true },
+  "KREA AI": { "stock": 10, "active": true },
+  "OPENART AI": { "stock": 10, "active": true },
+  "SUNO AI": { "stock": 10, "active": true },
+  "VEO3 ULTRA": { "stock": 10, "active": true },
+  "VIEWMAX": { "stock": 10, "active": true }
+}

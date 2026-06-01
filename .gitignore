@@ -1,0 +1,10 @@
+.env
+private_key.pem
+licenses_db.json
+issued_licenses/
+user_data/
+__pycache__/
+*.pyc
+output/
+dist/
+build/
