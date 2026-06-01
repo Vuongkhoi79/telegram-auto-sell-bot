@@ -811,7 +811,7 @@ async def cmd_license(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     args = context.args or []
     machine_id = _machine_arg(args)
     if not machine_id:
-        await update.effective_message.reply_text("Dung: /license <MACHINE_ID>")
+        await update.effective_message.reply_text("Dung: /license MACHINE_ID_CUA_BAN")
         return
 
     user = update.effective_user
