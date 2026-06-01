@@ -644,12 +644,13 @@ async def _send_free_help(update: Update, context: ContextTypes.DEFAULT_TYPE, *,
 
     text = (
         "Mở tool -> tab Kích Hoạt -> bấm Nhận License Free 90 Ngày.\n\n"
-        "Nếu vào bot bằng deep-link:\n"
-        "https://t.me/Aidaily79_bot?start=<MACHINE_ID>\n\n"
-        "Bot sẽ tự cấp license ngay nếu đủ điều kiện."
+        "Bot sẽ tự cấp license ngay nếu link từ tool có Machine ID hợp lệ."
     )
     if machine_id:
-        text += f"\n\nMachine ID hiện tại:\n{machine_id}"
+        text += (
+            f"\n\nMachine ID hiện tại:\n{machine_id}\n"
+            f"Link nhận license:\nhttps://t.me/Aidaily79_bot?start={quote(machine_id, safe='')}"
+        )
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=_ai_daily_keyboard())
     else:
@@ -668,8 +669,7 @@ async def _handle_free_license_click(update: Update, context: ContextTypes.DEFAU
         await update.effective_message.reply_text(
             "Chưa có Machine ID để cấp license.\n\n"
             "Vui lòng mở tool -> tab Kích Hoạt -> bấm Nhận License Free 90 Ngày, "
-            "hoặc vào bot bằng link:\n"
-            "https://t.me/Aidaily79_bot?start=<MACHINE_ID>",
+            "hoặc copy link nhận license free trong tab Kích Hoạt.",
             reply_markup=_ai_daily_keyboard(),
         )
         return
