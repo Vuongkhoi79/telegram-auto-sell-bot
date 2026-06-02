@@ -200,6 +200,17 @@ def _upgrade_permanent_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def _upgrade_permanent_keyboard_for_machine(machine_id: str) -> InlineKeyboardMarkup:
+    machine_id = str(machine_id or "").strip().upper()
+    if not machine_id:
+        return _upgrade_permanent_keyboard()
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("💎 Nâng cấp vĩnh viễn", callback_data=f"upgrade_machine:{machine_id}")],
+        ]
+    )
+
+
 def _load_inventory() -> dict[str, dict[str, object]]:
     if not INVENTORY_PATH.exists():
         return {}
@@ -676,7 +687,7 @@ async def _handle_free_license_click(update: Update, context: ContextTypes.DEFAU
             "Chưa có Machine ID để cấp license.\n\n"
             "Vui lòng mở tool -> tab Kích Hoạt -> bấm Nhận License Free 90 Ngày, "
             "hoặc copy link nhận license free trong tab Kích Hoạt.",
-            reply_markup=_ai_daily_keyboard(),
+            reply_markup=_upgrade_permanent_keyboard_for_machine(machine_id),
         )
         return
 
@@ -695,7 +706,7 @@ async def _handle_free_license_click(update: Update, context: ContextTypes.DEFAU
             f"Hạn dùng: {record.get('expire_date', '')}\n"
             "Bot đã gửi file license bên dưới.\n"
             "Mở tool tab Kích Hoạt dán license hoặc nạp file license.",
-            reply_markup=_ai_daily_keyboard(),
+            reply_markup=_upgrade_permanent_keyboard_for_machine(machine_id),
         )
         await _send_license_file(update, result.license_path or record.get("license_file"))
         print("LICENSE_SENT", flush=True)
@@ -703,7 +714,7 @@ async def _handle_free_license_click(update: Update, context: ContextTypes.DEFAU
 
     await update.effective_message.reply_text(
         "Machine ID này đã nhận free 90 ngày.",
-        reply_markup=_upgrade_permanent_keyboard(),
+        reply_markup=_upgrade_permanent_keyboard_for_machine(machine_id),
     )
 
 
@@ -757,13 +768,52 @@ async def _send_upgrade(update: Update, context: ContextTypes.DEFAULT_TYPE, *, e
     if payment_service.config.qr_url:
         if edit and update.callback_query:
             await update.callback_query.edit_message_text("Đã tạo đơn nâng cấp vĩnh viễn.")
-        await update.effective_message.reply_photo(photo=payment_service.config.qr_url, caption=text, reply_markup=_ai_daily_keyboard())
+        await update.effective_message.reply_photo(photo=payment_service.config.qr_url, caption=text, reply_markup=_upgrade_permanent_keyboard_for_machine(machine_id))
         return
 
     if edit and update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=_ai_daily_keyboard())
+        await update.callback_query.edit_message_text(text, reply_markup=_upgrade_permanent_keyboard_for_machine(machine_id))
     else:
-        await update.effective_message.reply_text(text, reply_markup=_ai_daily_keyboard())
+        await update.effective_message.reply_text(text, reply_markup=_upgrade_permanent_keyboard_for_machine(machine_id))
+
+
+async def _create_upgrade_order(update: Update, context: ContextTypes.DEFAULT_TYPE, machine_id: str, *, edit: bool = False) -> None:
+    user = update.effective_user
+    license_service: LicenseService = context.application.bot_data["license_service"]
+    payment_service: PaymentService = context.application.bot_data["payment_service"]
+    machine_id = str(machine_id or "").strip().upper()
+
+    if not machine_id:
+        text = (
+            "Chưa có Machine ID để tạo đơn nâng cấp.\n\n"
+            "Vui lòng gửi Machine ID hoặc mở tool -> tab Kích Hoạt -> bấm Nhận License Free 90 Ngày trước."
+        )
+        if edit and update.callback_query:
+            await update.callback_query.edit_message_text(text, reply_markup=_ai_daily_keyboard())
+        else:
+            await update.effective_message.reply_text(text, reply_markup=_ai_daily_keyboard())
+        return
+
+    license_service.touch_user(
+        user.id,
+        _user_label(user),
+        machine_id=machine_id,
+        source="upgrade_permanent",
+        reminder_state="pending",
+    )
+    order = license_service.create_pending_order(user.id, _user_label(user), machine_id, customer=_user_label(user))
+    text = payment_service.build_payment_text(order.get("price", DEFAULT_PAID_PRICE), order["order_id"], machine_id)
+
+    if payment_service.config.qr_url:
+        if edit and update.callback_query:
+            await update.callback_query.edit_message_text("Đã tạo đơn nâng cấp vĩnh viễn.")
+        await update.effective_message.reply_photo(photo=payment_service.config.qr_url, caption=text, reply_markup=_upgrade_permanent_keyboard_for_machine(machine_id))
+        return
+
+    if edit and update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=_upgrade_permanent_keyboard_for_machine(machine_id))
+    else:
+        await update.effective_message.reply_text(text, reply_markup=_upgrade_permanent_keyboard_for_machine(machine_id))
 
 
 async def _send_support(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
@@ -792,7 +842,7 @@ async def _maybe_issue_deeplink_license(update: Update, context: ContextTypes.DE
                 f"Hạn dùng: {record.get('expire_date', '')}\n"
                 "Bot đã gửi file license bên dưới.\n"
                 "Mở tool tab Kích Hoạt dán license hoặc nạp file license.",
-                reply_markup=_ai_daily_keyboard(),
+                reply_markup=_upgrade_permanent_keyboard_for_machine(machine_id),
             )
             await _send_license_file(update, result.license_path or record.get("license_file"))
             return True
@@ -808,7 +858,7 @@ async def _maybe_issue_deeplink_license(update: Update, context: ContextTypes.DE
     )
     await update.effective_message.reply_text(
         "Machine ID này đã nhận free 90 ngày.",
-        reply_markup=_upgrade_permanent_keyboard(),
+        reply_markup=_upgrade_permanent_keyboard_for_machine(machine_id),
     )
     return True
 
@@ -853,7 +903,7 @@ async def cmd_license(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "Bot đã gửi file license bên dưới.\n"
             "Mở tool tab Kích Hoạt dán license hoặc nạp file license."
         )
-        await update.effective_message.reply_text(message, reply_markup=_ai_daily_keyboard())
+        await update.effective_message.reply_text(message, reply_markup=_upgrade_permanent_keyboard_for_machine(machine_id))
         await _send_license_file(update, result.license_path or record.get("license_file"))
         return
 
@@ -866,7 +916,7 @@ async def cmd_license(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
     await update.effective_message.reply_text(
         "Machine ID này đã nhận free 90 ngày.",
-        reply_markup=_upgrade_permanent_keyboard(),
+        reply_markup=_upgrade_permanent_keyboard_for_machine(machine_id),
     )
 
 
@@ -1306,6 +1356,9 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await _handle_free_license_click(update, context)
     elif data == "menu_help":
         await _send_help(update, context, edit=True)
+    elif data.startswith("upgrade_machine:"):
+        machine_id = data.split(":", 1)[1].strip().upper()
+        await _create_upgrade_order(update, context, machine_id, edit=True)
     elif data == "menu_upgrade":
         await _send_upgrade(update, context, edit=True)
     elif data == "menu_support":

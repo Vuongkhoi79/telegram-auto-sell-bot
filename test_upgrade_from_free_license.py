@@ -12,7 +12,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 from license_service import LicenseService
 from payment_service import PaymentConfig, PaymentService
-from telegram_license_bot import _send_upgrade
+from telegram_license_bot import _handle_free_license_click, _on_menu_impl
 
 
 class FakeMessage:
@@ -26,13 +26,26 @@ class FakeMessage:
     async def reply_photo(self, photo, caption=None, reply_markup=None, **kwargs):
         self.photos.append({"photo": photo, "caption": caption, "reply_markup": reply_markup})
 
+    async def reply_document(self, document=None, **kwargs):
+        self.texts.append({"text": "DOCUMENT", "reply_markup": None})
+
 
 class FakeQuery:
     def __init__(self) -> None:
         self.edits: list[dict[str, object]] = []
+        self.answered = False
+        self.data = ""
+
+    async def answer(self):
+        self.answered = True
 
     async def edit_message_text(self, text, reply_markup=None, **kwargs):
         self.edits.append({"text": text, "reply_markup": reply_markup})
+
+
+def first_callback_data(reply_markup) -> str:
+    button = reply_markup.inline_keyboard[0][0]
+    return button.callback_data
 
 
 def make_private_key_pem() -> str:
@@ -45,7 +58,7 @@ def make_private_key_pem() -> str:
 
 
 class UpgradeFromFreeLicenseTest(unittest.TestCase):
-    def test_upgrade_uses_recent_license_machine_id(self) -> None:
+    def test_free_success_button_contains_machine_id_and_upgrades_immediately(self) -> None:
         previous_private_key = os.environ.get("PRIVATE_KEY_PEM")
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -56,19 +69,13 @@ class UpgradeFromFreeLicenseTest(unittest.TestCase):
                 db_path=root / "licenses_db.json",
                 output_dir=root / "issued_licenses",
             )
-            license_result = license_service.issue_free_license(
-                123456,
-                "Test User",
-                "F461FE60-342ADFEF-C1AE4E7B-A5FC9744",
-                customer="Test User",
-            )
-            self.assertTrue(license_result.ok)
+            machine_id = "F461FE60-342ADFEF-C1AE4E7B-A5FC9744"
             license_service.db.upsert_user(
                 {
                     "telegram_user_id": 123456,
                     "username": "Test User",
-                    "machine_id": "",
-                    "source": "manual_blank_state",
+                    "machine_id": machine_id,
+                    "source": "free_ready",
                     "reminder_state": "active",
                     "last_seen_at": "2026-06-02T00:00:00+00:00",
                     "last_command_at": "2026-06-02T00:00:00+00:00",
@@ -91,18 +98,35 @@ class UpgradeFromFreeLicenseTest(unittest.TestCase):
             )
             app = SimpleNamespace(bot_data={"license_service": license_service, "payment_service": payment_service})
             user = SimpleNamespace(id=123456, username="testuser", full_name="Test User")
-            update = SimpleNamespace(effective_user=user, effective_message=FakeMessage(), callback_query=FakeQuery())
+            message = FakeMessage()
+            update = SimpleNamespace(effective_user=user, effective_message=message, callback_query=None)
             context = SimpleNamespace(application=app)
 
-            asyncio.run(_send_upgrade(update, context, edit=True))
+            asyncio.run(_handle_free_license_click(update, context))
 
+            self.assertGreaterEqual(len(message.texts), 1)
+            button_markup = message.texts[0]["reply_markup"]
+            callback_data = first_callback_data(button_markup)
+            self.assertEqual(callback_data, f"upgrade_machine:{machine_id}")
+            self.assertEqual(len(license_service.db.data["licenses"]), 1)
+
+            upgrade_query = FakeQuery()
+            upgrade_query.data = callback_data
+            upgrade_update = SimpleNamespace(
+                effective_user=user,
+                effective_message=FakeMessage(),
+                callback_query=upgrade_query,
+            )
+            asyncio.run(_on_menu_impl(upgrade_update, context))
+
+            self.assertTrue(upgrade_query.answered)
             self.assertEqual(len(license_service.db.data["orders"]), 1)
             order = license_service.db.data["orders"][0]
-            self.assertEqual(order["machine_id"], "F461FE60-342ADFEF-C1AE4E7B-A5FC9744")
+            self.assertEqual(order["machine_id"], machine_id)
             self.assertEqual(order["price"], 450000)
             self.assertEqual(order["payment_status"], "pending")
-            self.assertTrue(update.callback_query.edits)
-            self.assertEqual(len(update.effective_message.photos), 1)
+            self.assertEqual(len(upgrade_update.effective_message.photos), 1)
+            self.assertNotIn("Chưa có Machine ID", "".join(item["text"] for item in upgrade_query.edits))
 
         if previous_private_key is None:
             os.environ.pop("PRIVATE_KEY_PEM", None)
