@@ -19,6 +19,7 @@ ORDERS_DB_PATH = PROJECT_ROOT / "orders_db.json"
 PROCESSED_TRANSACTIONS_PATH = PROJECT_ROOT / "processed_transactions.json"
 UNMATCHED_TRANSACTIONS_PATH = PROJECT_ROOT / "unmatched_transactions.json"
 WEBHOOK_PATH = "/sepay-webhook"
+HEALTH_PATH = "/health"
 
 FulfillOrder = Callable[[str], Awaitable[dict[str, Any]]]
 
@@ -148,6 +149,9 @@ def start_sepay_webhook_server(application, fulfill_order: FulfillOrder, *, host
 
     class SePayHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
+            if self.path.split("?", 1)[0] == HEALTH_PATH:
+                self._send_json(200, {"ok": True, "bot": "Aidaily79", "time": utc_now_iso()})
+                return
             if self.path == "/":
                 self._send_json(200, {"ok": True, "service": "telegram-auto-sell-bot"})
                 return
@@ -189,5 +193,7 @@ def start_sepay_webhook_server(application, fulfill_order: FulfillOrder, *, host
     thread.start()
     application.bot_data["sepay_webhook_server"] = server
     application.bot_data["sepay_webhook_url_path"] = WEBHOOK_PATH
+    application.bot_data["health_url_path"] = HEALTH_PATH
     print(f"[SEPAY] webhook server listening on {host}:{port}{WEBHOOK_PATH}", flush=True)
+    print(f"[HEALTH] health endpoint listening on {host}:{port}{HEALTH_PATH}", flush=True)
     return server
