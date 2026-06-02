@@ -192,6 +192,14 @@ def _ai_daily_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def _upgrade_permanent_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("💎 Nâng cấp vĩnh viễn", callback_data="menu_upgrade")],
+        ]
+    )
+
+
 def _load_inventory() -> dict[str, dict[str, object]]:
     if not INVENTORY_PATH.exists():
         return {}
@@ -661,7 +669,6 @@ async def _handle_free_license_click(update: Update, context: ContextTypes.DEFAU
     print("FREE_LICENSE_CLICKED", flush=True)
     user = update.effective_user
     license_service: LicenseService = context.application.bot_data["license_service"]
-    payment_service: PaymentService = context.application.bot_data["payment_service"]
     user_record = license_service.db.latest_user(user.id) if user else None
     machine_id = str((user_record or {}).get("machine_id", "")).strip().upper()
 
@@ -695,13 +702,9 @@ async def _handle_free_license_click(update: Update, context: ContextTypes.DEFAU
         print("LICENSE_SENT", flush=True)
         return
 
-    order = license_service.create_pending_order(user.id, _user_label(user), machine_id, customer=_user_label(user))
-    payment_text = payment_service.build_payment_text(order.get("price", DEFAULT_PAID_PRICE), order["order_id"], machine_id)
     await update.effective_message.reply_text(
-        "Machine ID này đã nhận 90 ngày miễn phí.\n"
-        "Để dùng vĩnh viễn, phí kích hoạt là 450.000đ.\n\n"
-        f"{payment_text}",
-        reply_markup=_ai_daily_keyboard(),
+        "Machine ID này đã nhận free 90 ngày.",
+        reply_markup=_upgrade_permanent_keyboard(),
     )
 
 
@@ -726,11 +729,39 @@ async def _send_help(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit
 
 
 async def _send_upgrade(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
-    text = (
-        "Giá:\n450.000 VNĐ\n\n"
-        "License:\nVĩnh viễn\n\n"
-        "Sau khi thanh toán:\nBot tự cấp license permanent."
+    user = update.effective_user
+    license_service: LicenseService = context.application.bot_data["license_service"]
+    payment_service: PaymentService = context.application.bot_data["payment_service"]
+    user_record = license_service.db.latest_user(user.id) if user else None
+    machine_id = str((user_record or {}).get("machine_id", "")).strip().upper()
+
+    if not machine_id:
+        text = (
+            "Chưa có Machine ID để tạo đơn nâng cấp.\n\n"
+            "Vui lòng mở tool -> tab Kích Hoạt -> bấm Nhận License Free 90 Ngày trước."
+        )
+        if edit and update.callback_query:
+            await update.callback_query.edit_message_text(text, reply_markup=_ai_daily_keyboard())
+        else:
+            await update.effective_message.reply_text(text, reply_markup=_ai_daily_keyboard())
+        return
+
+    license_service.touch_user(
+        user.id,
+        _user_label(user),
+        machine_id=machine_id,
+        source="upgrade_permanent",
+        reminder_state="pending",
     )
+    order = license_service.create_pending_order(user.id, _user_label(user), machine_id, customer=_user_label(user))
+    text = payment_service.build_payment_text(order.get("price", DEFAULT_PAID_PRICE), order["order_id"], machine_id)
+
+    if payment_service.config.qr_url:
+        if edit and update.callback_query:
+            await update.callback_query.edit_message_text("Đã tạo đơn nâng cấp vĩnh viễn.")
+        await update.effective_message.reply_photo(photo=payment_service.config.qr_url, caption=text, reply_markup=_ai_daily_keyboard())
+        return
+
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=_ai_daily_keyboard())
     else:
@@ -749,7 +780,6 @@ async def _send_support(update: Update, context: ContextTypes.DEFAULT_TYPE, *, e
 async def _maybe_issue_deeplink_license(update: Update, context: ContextTypes.DEFAULT_TYPE, machine_id: str) -> bool:
     user = update.effective_user
     license_service: LicenseService = context.application.bot_data["license_service"]
-    payment_service: PaymentService = context.application.bot_data["payment_service"]
 
     license_service.touch_user(user.id, _user_label(user), machine_id=machine_id, source="deeplink", reminder_state="active")
 
@@ -771,24 +801,17 @@ async def _maybe_issue_deeplink_license(update: Update, context: ContextTypes.DE
         await update.effective_message.reply_text(result.message, reply_markup=_ai_daily_keyboard())
         return True
 
-    order = license_service.create_pending_order(user.id, _user_label(user), machine_id, customer=_user_label(user))
     license_service.touch_user(
         user.id,
         _user_label(user),
         machine_id=machine_id,
-        source="deeplink_pending",
-        reminder_state="pending",
+        source="deeplink_free_already_used",
+        reminder_state="active",
     )
-    text = (
-        "Machine ID này đã nhận 90 ngày miễn phí.\n"
-        "Để dùng vĩnh viễn, phí kích hoạt là 450.000d.\n"
-        "Vui lòng thanh toán theo thông tin bên dưới."
+    await update.effective_message.reply_text(
+        "Machine ID này đã nhận free 90 ngày.",
+        reply_markup=_upgrade_permanent_keyboard(),
     )
-    payment_text = payment_service.build_payment_text(order.get("price", DEFAULT_PAID_PRICE), order["order_id"], machine_id)
-    if payment_service.config.qr_url:
-        await update.effective_message.reply_photo(photo=payment_service.config.qr_url, caption=f"{text}\n\n{payment_text}")
-    else:
-        await update.effective_message.reply_text(f"{text}\n\n{payment_text}", reply_markup=_ai_daily_keyboard())
     return True
 
 
@@ -816,7 +839,6 @@ async def cmd_license(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     user = update.effective_user
     license_service: LicenseService = context.application.bot_data["license_service"]
-    payment_service: PaymentService = context.application.bot_data["payment_service"]
     license_service.touch_user(user.id, _user_label(user), machine_id=machine_id, source="license_command", reminder_state="active")
 
     if license_service.can_grant_free(user.id, machine_id):
@@ -837,24 +859,17 @@ async def cmd_license(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _send_license_file(update, result.license_path or record.get("license_file"))
         return
 
-    order = license_service.create_pending_order(user.id, _user_label(user), machine_id, customer=_user_label(user))
     license_service.touch_user(
         user.id,
         _user_label(user),
         machine_id=machine_id,
-        source="license_command_pending",
-        reminder_state="pending",
+        source="license_command_free_already_used",
+        reminder_state="active",
     )
-    text = (
-        "Machine ID này đã nhận 90 ngày miễn phí.\n"
-        "Để dùng vĩnh viễn, phí kích hoạt là 450.000d.\n"
-        "Vui lòng thanh toán theo thông tin bên dưới."
+    await update.effective_message.reply_text(
+        "Machine ID này đã nhận free 90 ngày.",
+        reply_markup=_upgrade_permanent_keyboard(),
     )
-    payment_text = payment_service.build_payment_text(order.get("price", DEFAULT_PAID_PRICE), order["order_id"], machine_id)
-    if payment_service.config.qr_url:
-        await update.effective_message.reply_photo(photo=payment_service.config.qr_url, caption=f"{text}\n\n{payment_text}")
-    else:
-        await update.effective_message.reply_text(f"{text}\n\n{payment_text}", reply_markup=_ai_daily_keyboard())
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
