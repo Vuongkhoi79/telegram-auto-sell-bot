@@ -669,8 +669,7 @@ async def _handle_free_license_click(update: Update, context: ContextTypes.DEFAU
     print("FREE_LICENSE_CLICKED", flush=True)
     user = update.effective_user
     license_service: LicenseService = context.application.bot_data["license_service"]
-    user_record = license_service.db.latest_user(user.id) if user else None
-    machine_id = str((user_record or {}).get("machine_id", "")).strip().upper()
+    machine_id = license_service.recent_machine_id_for_user(user.id) if user else ""
 
     if not machine_id:
         await update.effective_message.reply_text(
@@ -732,8 +731,7 @@ async def _send_upgrade(update: Update, context: ContextTypes.DEFAULT_TYPE, *, e
     user = update.effective_user
     license_service: LicenseService = context.application.bot_data["license_service"]
     payment_service: PaymentService = context.application.bot_data["payment_service"]
-    user_record = license_service.db.latest_user(user.id) if user else None
-    machine_id = str((user_record or {}).get("machine_id", "")).strip().upper()
+    machine_id = license_service.recent_machine_id_for_user(user.id) if user else ""
 
     if not machine_id:
         text = (

@@ -424,6 +424,19 @@ class LicenseService:
     def list_licenses(self) -> list[dict[str, Any]]:
         return list(self.db.data.get("licenses", []))
 
+    def recent_machine_id_for_user(self, telegram_user_id: int) -> str:
+        user_record = self.db.latest_user(telegram_user_id) or {}
+        machine_id = str(user_record.get("machine_id", "")).strip().upper()
+        if machine_id:
+            return machine_id
+
+        license_record = self.db.latest_license_by_user(telegram_user_id) or {}
+        machine_id = str(license_record.get("machine_id", "")).strip().upper()
+        if machine_id:
+            return machine_id
+
+        return ""
+
     def touch_user(
         self,
         telegram_user_id: int,
