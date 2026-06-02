@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -53,6 +54,7 @@ PRODUCT_ORDER = [
 ]
 
 logger = logging.getLogger(__name__)
+MACHINE_ID_RE = re.compile(r"^[A-Z0-9-]{16,128}$")
 
 
 def _parse_admin_ids(raw: str | None) -> set[int]:
@@ -79,10 +81,7 @@ def _machine_arg(args: list[str]) -> str | None:
 
 def _looks_like_machine_id(value: str) -> bool:
     value = str(value or "").strip().upper()
-    if len(value) < 16:
-        return False
-    allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-")
-    return all(ch in allowed for ch in value)
+    return bool(MACHINE_ID_RE.fullmatch(value))
 
 
 def _utc_now() -> datetime:
