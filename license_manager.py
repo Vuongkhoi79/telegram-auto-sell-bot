@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 from datetime import date, datetime, timedelta, timezone
@@ -41,7 +42,27 @@ def _run_wmic(args: list[str]) -> str:
     return lines[1] if len(lines) >= 2 else ""
 
 
+def _normalize_machine_fragment(value: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", value.strip().upper())
+
+
+def _legacy_machine_id() -> str:
+    fragments = [
+        _run_wmic(["path", "win32_processor", "get", "processorid"]),
+        _run_wmic(["path", "win32_operatingsystem", "get", "serialnumber"]),
+        _run_wmic(["path", "win32_computersystemproduct", "get", "uuid"]),
+    ]
+    raw = "".join(_normalize_machine_fragment(fragment) for fragment in fragments if fragment)
+    if not raw:
+        return ""
+    return re.sub(r"(.)\1{4,}", r"\1\1\1\1", raw)
+
+
 def get_machine_id() -> str:
+    legacy = _legacy_machine_id()
+    if legacy:
+        return legacy
+
     machine_guid = ""
     if winreg is not None:
         try:

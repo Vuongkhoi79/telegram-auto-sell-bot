@@ -131,6 +131,44 @@ class LicenseDatabase:
         self.save()
         return record
 
+    def purge_machine(self, machine_id: str) -> dict[str, int]:
+        normalized = machine_id.strip().upper()
+        removed_users = 0
+        removed_licenses = 0
+        removed_orders = 0
+
+        kept_users = []
+        for record in self.data["users"]:
+            if str(record.get("machine_id", "")).strip().upper() == normalized:
+                removed_users += 1
+                continue
+            kept_users.append(record)
+        self.data["users"] = kept_users
+
+        kept_licenses = []
+        for record in self.data["licenses"]:
+            if str(record.get("machine_id", "")).strip().upper() == normalized:
+                removed_licenses += 1
+                continue
+            kept_licenses.append(record)
+        self.data["licenses"] = kept_licenses
+
+        kept_orders = []
+        for record in self.data["orders"]:
+            if str(record.get("machine_id", "")).strip().upper() == normalized:
+                removed_orders += 1
+                continue
+            kept_orders.append(record)
+        self.data["orders"] = kept_orders
+
+        if removed_users or removed_licenses or removed_orders:
+            self.save()
+        return {
+            "users": removed_users,
+            "licenses": removed_licenses,
+            "orders": removed_orders,
+        }
+
     def update_order(self, order_id: str, **changes: Any) -> dict[str, Any] | None:
         for order in reversed(self.data["orders"]):
             if order.get("order_id") == order_id:
@@ -276,13 +314,6 @@ class LicenseService:
         *,
         customer: str | None = None,
     ) -> LicenseIssueResult:
-        if self.db.has_free_license_for_user(telegram_user_id):
-            existing = self.db.latest_license_by_user(telegram_user_id)
-            return LicenseIssueResult(
-                ok=False,
-                message="Telegram user nay da nhan free 90 ngay.",
-                record=existing,
-            )
         if self.db.has_free_license_for_machine(machine_id):
             existing = self.db.latest_license_by_machine(machine_id)
             return LicenseIssueResult(
@@ -485,10 +516,13 @@ class LicenseService:
         return self.db.upsert_user(user_record)
 
     def can_grant_free(self, telegram_user_id: int, machine_id: str) -> bool:
-        return not self.db.has_free_license_for_user(telegram_user_id) and not self.db.has_free_license_for_machine(machine_id)
+        return not self.db.has_free_license_for_machine(machine_id)
 
     def free_or_paid_status(self, machine_id: str) -> dict[str, Any] | None:
         return self.db.latest_license_by_machine(machine_id)
+
+    def purge_machine(self, machine_id: str) -> dict[str, int]:
+        return self.db.purge_machine(machine_id)
 
     def verify_license_file(self, license_file: Path | str) -> tuple[bool, str, str]:
         path = Path(license_file)

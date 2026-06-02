@@ -1,6 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,7 +10,7 @@ from urllib.parse import quote
 from dotenv import load_dotenv
 from telegram.error import BadRequest
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 import bank_checker
 import sepay_webhook
@@ -51,6 +52,8 @@ PRODUCT_ORDER = [
     "VIEWMAX",
 ]
 
+logger = logging.getLogger(__name__)
+
 
 def _parse_admin_ids(raw: str | None) -> set[int]:
     if not raw:
@@ -70,7 +73,16 @@ def _parse_admin_ids(raw: str | None) -> set[int]:
 def _machine_arg(args: list[str]) -> str | None:
     if not args:
         return None
-    return args[0].strip().upper()
+    candidate = args[0].strip().upper()
+    return candidate if _looks_like_machine_id(candidate) else None
+
+
+def _looks_like_machine_id(value: str) -> bool:
+    value = str(value or "").strip().upper()
+    if len(value) < 16:
+        return False
+    allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-")
+    return all(ch in allowed for ch in value)
 
 
 def _utc_now() -> datetime:
@@ -825,6 +837,44 @@ async def _send_support(update: Update, context: ContextTypes.DEFAULT_TYPE, *, e
         await update.effective_message.reply_text(text, reply_markup=_main_menu_keyboard())
 
 
+async def _handle_machine_id_free_license(update: Update, context: ContextTypes.DEFAULT_TYPE, machine_id: str, *, source: str) -> bool:
+    user = update.effective_user
+    license_service: LicenseService = context.application.bot_data["license_service"]
+
+    license_service.touch_user(user.id, _user_label(user), machine_id=machine_id, source=source, reminder_state="active")
+
+    if license_service.can_grant_free(user.id, machine_id):
+        result = license_service.issue_free_license(user.id, _user_label(user), machine_id, customer=_user_label(user))
+        if result.ok:
+            license_service.update_user_from_license(result.record or {}, source=f"{source}_free")
+            record = result.record or {}
+            await update.effective_message.reply_text(
+                "Bạn được tặng 90 ngày miễn phí.\n"
+                f"Machine ID: {machine_id}\n"
+                f"Hạn dùng: {record.get('expire_date', '')}\n"
+                "Bot đã gửi file license bên dưới.\n"
+                "Mở tool tab Kích Hoạt dán license hoặc nạp file license.",
+                reply_markup=_upgrade_permanent_keyboard_for_machine(machine_id),
+            )
+            await _send_license_file(update, result.license_path or record.get("license_file"))
+            return True
+        await update.effective_message.reply_text(result.message, reply_markup=_ai_daily_keyboard())
+        return True
+
+    license_service.touch_user(
+        user.id,
+        _user_label(user),
+        machine_id=machine_id,
+        source=f"{source}_free_already_used",
+        reminder_state="active",
+    )
+    await update.effective_message.reply_text(
+        "Machine ID này đã nhận free 90 ngày.",
+        reply_markup=_upgrade_permanent_keyboard_for_machine(machine_id),
+    )
+    return True
+
+
 async def _maybe_issue_deeplink_license(update: Update, context: ContextTypes.DEFAULT_TYPE, machine_id: str) -> bool:
     user = update.effective_user
     license_service: LicenseService = context.application.bot_data["license_service"]
@@ -871,7 +921,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     license_service.touch_user(user.id, _user_label(user), machine_id=machine_id, source="start", reminder_state="new")
 
     if machine_id:
-        handled = await _maybe_issue_deeplink_license(update, context, machine_id)
+        handled = await _handle_machine_id_free_license(update, context, machine_id, source="start")
         if handled:
             return
 
@@ -888,36 +938,18 @@ async def cmd_license(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user = update.effective_user
     license_service: LicenseService = context.application.bot_data["license_service"]
     license_service.touch_user(user.id, _user_label(user), machine_id=machine_id, source="license_command", reminder_state="active")
+    await _handle_machine_id_free_license(update, context, machine_id, source="license_command")
 
-    if license_service.can_grant_free(user.id, machine_id):
-        result = license_service.issue_free_license(user.id, _user_label(user), machine_id, customer=_user_label(user))
-        if not result.ok:
-            await update.effective_message.reply_text(result.message)
-            return
-        license_service.update_user_from_license(result.record or {}, source="license_command_free")
-        record = result.record or {}
-        message = (
-            "Bạn được tặng 90 ngày miễn phí.\n"
-            f"Machine ID: {machine_id}\n"
-            f"Hạn dùng: {record.get('expire_date', '')}\n"
-            "Bot đã gửi file license bên dưới.\n"
-            "Mở tool tab Kích Hoạt dán license hoặc nạp file license."
-        )
-        await update.effective_message.reply_text(message, reply_markup=_upgrade_permanent_keyboard_for_machine(machine_id))
-        await _send_license_file(update, result.license_path or record.get("license_file"))
+
+async def on_text_machine_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if not message or not message.text:
         return
-
-    license_service.touch_user(
-        user.id,
-        _user_label(user),
-        machine_id=machine_id,
-        source="license_command_free_already_used",
-        reminder_state="active",
-    )
-    await update.effective_message.reply_text(
-        "Machine ID này đã nhận free 90 ngày.",
-        reply_markup=_upgrade_permanent_keyboard_for_machine(machine_id),
-    )
+    text = message.text.strip().upper()
+    if not _looks_like_machine_id(text):
+        return
+    logger.info("text_machine_id telegram_user_id=%s machine_id=%s", getattr(update.effective_user, "id", None), text)
+    await _handle_machine_id_free_license(update, context, text, source="text_machine")
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1439,6 +1471,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("revoke", cmd_revoke))
     app.add_handler(CommandHandler("list_licenses", cmd_list_licenses))
     app.add_handler(CommandHandler("find", cmd_find))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text_machine_id))
     app.add_handler(CallbackQueryHandler(on_menu))
     if app.job_queue:
         app.job_queue.run_repeating(bank_checker_job, interval=15, first=5, name="bank_checker")
