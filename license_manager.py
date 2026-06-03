@@ -42,15 +42,39 @@ def _run_wmic(args: list[str]) -> str:
     return lines[1] if len(lines) >= 2 else ""
 
 
+def _run_powershell_cim(class_name: str, property_name: str) -> str:
+    try:
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                f"(Get-CimInstance {class_name} | Select-Object -First 1 -ExpandProperty {property_name})",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+    except Exception:
+        return ""
+    return result.stdout.strip().splitlines()[0].strip() if result.stdout.strip() else ""
+
+
 def _normalize_machine_fragment(value: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", value.strip().upper())
 
 
 def _legacy_machine_id() -> str:
     fragments = [
-        _run_wmic(["path", "win32_processor", "get", "processorid"]),
-        _run_wmic(["path", "win32_operatingsystem", "get", "serialnumber"]),
-        _run_wmic(["path", "win32_computersystemproduct", "get", "uuid"]),
+        _run_powershell_cim("Win32_Processor", "ProcessorId")
+        or _run_wmic(["path", "win32_processor", "get", "processorid"]),
+        _run_powershell_cim("Win32_OperatingSystem", "SerialNumber")
+        or _run_wmic(["path", "win32_operatingsystem", "get", "serialnumber"]),
+        _run_powershell_cim("Win32_ComputerSystemProduct", "UUID")
+        or _run_wmic(["path", "win32_computersystemproduct", "get", "uuid"]),
     ]
     raw = "".join(_normalize_machine_fragment(fragment) for fragment in fragments if fragment)
     if not raw:
