@@ -215,9 +215,12 @@ def _upgrade_permanent_keyboard_for_machine(machine_id: str) -> InlineKeyboardMa
     machine_id = str(machine_id or "").strip().upper()
     if not machine_id:
         return _upgrade_permanent_keyboard()
+    callback_data = f"upgrade_machine:{machine_id}"
+    if len(callback_data.encode("utf-8")) > 64:
+        callback_data = "menu_upgrade"
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("💎 Nâng cấp vĩnh viễn", callback_data=f"upgrade_machine:{machine_id}")],
+            [InlineKeyboardButton("💎 Nâng cấp vĩnh viễn", callback_data=callback_data)],
         ]
     )
 

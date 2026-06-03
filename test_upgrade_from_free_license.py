@@ -12,7 +12,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 from license_service import LicenseService
 from payment_service import PaymentConfig, PaymentService
-from telegram_license_bot import _handle_free_license_click, _on_menu_impl
+from telegram_license_bot import _handle_free_license_click, _on_menu_impl, _upgrade_permanent_keyboard_for_machine
 
 
 class FakeMessage:
@@ -127,6 +127,73 @@ class UpgradeFromFreeLicenseTest(unittest.TestCase):
             self.assertEqual(order["payment_status"], "pending")
             self.assertEqual(len(upgrade_update.effective_message.photos), 1)
             self.assertNotIn("Chưa có Machine ID", "".join(item["text"] for item in upgrade_query.edits))
+
+        if previous_private_key is None:
+            os.environ.pop("PRIVATE_KEY_PEM", None)
+        else:
+            os.environ["PRIVATE_KEY_PEM"] = previous_private_key
+
+    def test_long_machine_id_upgrade_button_uses_recent_machine_id(self) -> None:
+        previous_private_key = os.environ.get("PRIVATE_KEY_PEM")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            os.environ["PRIVATE_KEY_PEM"] = make_private_key_pem()
+            license_service = LicenseService(
+                private_key_path=root / "unused.pem",
+                db_path=root / "licenses_db.json",
+                output_dir=root / "issued_licenses",
+            )
+            machine_id = "BFEB" + "A" * 124
+            license_service.db.upsert_user(
+                {
+                    "telegram_user_id": 123456,
+                    "username": "Test User",
+                    "machine_id": machine_id,
+                    "source": "free_ready",
+                    "reminder_state": "active",
+                    "last_seen_at": "2026-06-02T00:00:00+00:00",
+                    "last_command_at": "2026-06-02T00:00:00+00:00",
+                    "last_license_type": "",
+                    "last_license_expire_date": "",
+                    "last_license_path": "",
+                    "next_reminder_at": "",
+                    "created_at": "2026-06-02T00:00:00+00:00",
+                    "updated_at": "2026-06-02T00:00:01+00:00",
+                }
+            )
+
+            payment_service = PaymentService(
+                PaymentConfig(
+                    bank_name="ACB",
+                    bank_account="123456789",
+                    bank_account_name="TEST ACCOUNT",
+                    qr_url="https://example.com/qr.png",
+                )
+            )
+            app = SimpleNamespace(bot_data={"license_service": license_service, "payment_service": payment_service})
+            user = SimpleNamespace(id=123456, username="testuser", full_name="Test User")
+            context = SimpleNamespace(application=app)
+
+            callback_data = first_callback_data(_upgrade_permanent_keyboard_for_machine(machine_id))
+            self.assertEqual(callback_data, "menu_upgrade")
+            self.assertLessEqual(len(callback_data.encode("utf-8")), 64)
+
+            upgrade_query = FakeQuery()
+            upgrade_query.data = callback_data
+            upgrade_update = SimpleNamespace(
+                effective_user=user,
+                effective_message=FakeMessage(),
+                callback_query=upgrade_query,
+            )
+            asyncio.run(_on_menu_impl(upgrade_update, context))
+
+            self.assertTrue(upgrade_query.answered)
+            self.assertEqual(len(license_service.db.data["orders"]), 1)
+            order = license_service.db.data["orders"][0]
+            self.assertEqual(order["machine_id"], machine_id)
+            self.assertEqual(order["price"], 450000)
+            self.assertEqual(order["payment_status"], "pending")
 
         if previous_private_key is None:
             os.environ.pop("PRIVATE_KEY_PEM", None)
