@@ -513,13 +513,19 @@ def _qr_caption(order: dict[str, object], payment_service: PaymentService) -> st
 
 async def _send_license_file(update: Update, license_path: str | None) -> None:
     if not license_path:
+        logger.error("send_license_file skipped: empty license_path")
         return
     path = Path(license_path)
     if not path.exists():
+        logger.error("send_license_file skipped: file not found path=%s", license_path)
         await update.effective_message.reply_text(f"Khong tim thay file license: {license_path}")
         return
-    with path.open("rb") as handle:
-        await update.effective_message.reply_document(document=InputFile(handle, filename=path.name))
+    try:
+        with open(path, "rb") as handle:
+            await update.effective_message.reply_document(document=handle, filename=path.name)
+    except Exception:
+        logger.exception("send_license_file failed path=%s", path)
+        raise
 
 
 async def _send_products(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
