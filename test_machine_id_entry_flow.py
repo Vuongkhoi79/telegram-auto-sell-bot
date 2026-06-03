@@ -55,7 +55,7 @@ class MachineIdEntryFlowTest(unittest.TestCase):
         payload = json.loads(license_path.read_text(encoding="utf-8"))
         self.assertEqual(payload["payload"]["machine_id"], MACHINE_ID)
 
-    def test_start_with_machine_id_sends_license(self) -> None:
+    def test_start_with_machine_id_issues_free_license_and_sends_file(self) -> None:
         previous_private_key = os.environ.get("PRIVATE_KEY_PEM")
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -73,6 +73,8 @@ class MachineIdEntryFlowTest(unittest.TestCase):
 
                 self.assertEqual(len(update.effective_message.documents), 1)
                 self.assertTrue(update.effective_message.texts)
+                self.assertIn("Bạn được tặng 90 ngày miễn phí", update.effective_message.texts[0]["text"])
+                self.assertIn(MACHINE_ID, update.effective_message.texts[0]["text"])
                 record = license_service.db.latest_license_by_machine(MACHINE_ID)
                 self.assertIsNotNone(record)
                 license_file = Path(record["license_file"])
@@ -132,7 +134,8 @@ class MachineIdEntryFlowTest(unittest.TestCase):
                 asyncio.run(cmd_start(update, context))
 
                 self.assertEqual(len(message.documents), 0)
-                self.assertTrue(message.texts)
+                self.assertEqual(len(message.texts), 1)
+                self.assertIn("Chọn chức năng bên dưới", message.texts[0]["text"])
         finally:
             if previous_private_key is None:
                 os.environ.pop("PRIVATE_KEY_PEM", None)

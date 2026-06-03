@@ -923,13 +923,17 @@ async def _maybe_issue_deeplink_license(update: Update, context: ContextTypes.DE
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     args = context.args or []
-    machine_id = _machine_arg(args)
+    machine_id = ""
+    if args:
+        candidate = str(args[0]).strip().upper()
+        if _looks_like_machine_id(candidate):
+            machine_id = candidate
     user = update.effective_user
     license_service: LicenseService = context.application.bot_data["license_service"]
     license_service.touch_user(user.id, _user_label(user), machine_id=machine_id, source="start", reminder_state="new")
 
     if machine_id:
-        handled = await _handle_machine_id_free_license(update, context, machine_id, source="start")
+        handled = await _maybe_issue_deeplink_license(update, context, machine_id)
         if handled:
             return
 
