@@ -21,7 +21,6 @@ from license_service import (
     LIFETIME_PLAN,
     YEAR_365_PLAN,
     LicenseService,
-    get_license_plan,
 )
 from payment_service import PaymentConfig, PaymentService
 
@@ -37,7 +36,27 @@ PRODUCT_PACKAGES = {
     "30D": 199000,
     "90D": 499000,
 }
-pending_license_plan_by_user: dict[int, str] = {}
+TOOL_LICENSE_PRODUCTS = {
+    "TOOL_YEAR_365": {
+        "display_name": "💎 Gia hạn 1 năm - 450.000đ",
+        "price": 450000,
+        "delivery_type": "license",
+        "plan": YEAR_365_PLAN,
+        "duration_days": 365,
+        "lifetime": False,
+        "expire_date": "",
+    },
+    "TOOL_LIFETIME": {
+        "display_name": "🚀 Vĩnh viễn - 990.000đ",
+        "price": 990000,
+        "delivery_type": "license",
+        "plan": LIFETIME_PLAN,
+        "duration_days": None,
+        "lifetime": True,
+        "expire_date": "2099-12-31",
+    },
+}
+pending_license_product_by_user: dict[int, str] = {}
 QUANTITY_OPTIONS = [1, 2, 3, 5, 10]
 PRODUCT_ORDER = [
     "ADOBE",
@@ -206,8 +225,8 @@ def _ai_daily_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("📖 HƯỚNG DẪN", callback_data="menu_help"),
                 InlineKeyboardButton("🔥 NÂNG CẤP VĨNH VIỄN", callback_data="menu_upgrade"),
             ],
-            [InlineKeyboardButton("💎 Gia hạn 1 năm - 450.000đ", callback_data=f"license_plan:{YEAR_365_PLAN}")],
-            [InlineKeyboardButton("🚀 Vĩnh viễn - 990.000đ", callback_data=f"license_plan:{LIFETIME_PLAN}")],
+            [InlineKeyboardButton("💎 Gia hạn 1 năm - 450.000đ", callback_data="license_product:TOOL_YEAR_365")],
+            [InlineKeyboardButton("🚀 Vĩnh viễn - 990.000đ", callback_data="license_product:TOOL_LIFETIME")],
             [InlineKeyboardButton("↩️ Quay lại", callback_data="menu_main")],
         ]
     )
@@ -225,29 +244,19 @@ def _upgrade_permanent_keyboard_for_machine(machine_id: str) -> InlineKeyboardMa
     machine_id = str(machine_id or "").strip().upper()
     if not machine_id:
         return _upgrade_permanent_keyboard()
-    callback_data = f"upgrade_machine:{machine_id}"
-    if len(callback_data.encode("utf-8")) > 64:
-        callback_data = "menu_upgrade"
-    year_callback_data = f"license_plan_machine:{YEAR_365_PLAN}:{machine_id}"
-    if len(year_callback_data.encode("utf-8")) > 64:
-        year_callback_data = f"license_plan:{YEAR_365_PLAN}"
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("💎 Gia hạn 1 năm - 450.000đ", callback_data=year_callback_data)],
-            [InlineKeyboardButton("🚀 Vĩnh viễn - 990.000đ", callback_data=callback_data)],
+            [InlineKeyboardButton("💎 Gia hạn 1 năm - 450.000đ", callback_data="license_product:TOOL_YEAR_365")],
+            [InlineKeyboardButton("🚀 Vĩnh viễn - 990.000đ", callback_data="license_product:TOOL_LIFETIME")],
         ]
     )
 
 
 def _paid_license_plan_keyboard(machine_id: str = "") -> InlineKeyboardMarkup:
-    machine_id = str(machine_id or "").strip().upper()
     rows = []
-    for plan in (YEAR_365_PLAN, LIFETIME_PLAN):
-        label = "💎 Gia hạn 1 năm - 450.000đ" if plan == YEAR_365_PLAN else "🚀 Vĩnh viễn - 990.000đ"
-        callback_data = f"license_plan_machine:{plan}:{machine_id}" if machine_id else f"license_plan:{plan}"
-        if len(callback_data.encode("utf-8")) > 64:
-            callback_data = f"license_plan:{plan}"
-        rows.append([InlineKeyboardButton(label, callback_data=callback_data)])
+    for product_id, product in TOOL_LICENSE_PRODUCTS.items():
+        label = str(product["display_name"])
+        rows.append([InlineKeyboardButton(label, callback_data=f"license_product:{product_id}")])
     rows.append([InlineKeyboardButton("↩️ Quay lại", callback_data="menu_ai_daily")])
     return InlineKeyboardMarkup(rows)
 
@@ -325,11 +334,14 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
         "order_id": _make_order_id(product_name),
         "telegram_user_id": int(user.id) if user else "",
         "username": _user_label(user) if user else "",
+        "product_id": product_name.upper(),
         "product_name": product_name,
         "package_name": package_name,
         "quantity": int(quantity),
         "unit_price": int(unit_price),
         "total": int(unit_price) * int(quantity),
+        "amount": int(unit_price) * int(quantity),
+        "delivery_type": "account",
         "payment_method": "",
         "payment_status": "pending",
         "order_status": "pending",
@@ -338,6 +350,47 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
         "paid_at": "",
         "delivered_at": "",
         "delivery": "",
+    }
+    orders = _load_orders()
+    orders.append(order)
+    _save_orders(orders)
+    return order
+
+
+def _create_license_sales_order(update: Update, product_id: str, machine_id: str) -> dict[str, object]:
+    if product_id not in TOOL_LICENSE_PRODUCTS:
+        raise ValueError(f"Unknown license product: {product_id}")
+    user = update.effective_user
+    product = TOOL_LICENSE_PRODUCTS[product_id]
+    now = _utc_now()
+    price = int(product["price"])
+    order = {
+        "order_id": _make_order_id(product_id),
+        "telegram_user_id": int(user.id) if user else "",
+        "username": _user_label(user) if user else "",
+        "product_id": product_id,
+        "product_name": product["display_name"],
+        "package_name": product["plan"],
+        "quantity": 1,
+        "unit_price": price,
+        "total": price,
+        "amount": price,
+        "delivery_type": "license",
+        "machine_id": machine_id.strip().upper(),
+        "plan": product["plan"],
+        "duration_days": product["duration_days"],
+        "expire_date": product["expire_date"],
+        "lifetime": product["lifetime"],
+        "price_vnd": price,
+        "payment_method": "",
+        "payment_status": "pending",
+        "order_status": "pending",
+        "created_at": now.isoformat(),
+        "expire_at": (now + timedelta(minutes=ORDER_TTL_MINUTES)).isoformat(),
+        "paid_at": "",
+        "delivered_at": "",
+        "delivery": "",
+        "license_file": "",
     }
     orders = _load_orders()
     orders.append(order)
@@ -626,19 +679,27 @@ async def _send_payment_choice(update: Update, order: dict[str, object], *, edit
 
 async def _send_acb_qr(update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: str) -> None:
     order = _find_order(order_id)
+    query = update.callback_query
+    message = query.message if query and getattr(query, "message", None) else update.effective_message
     if not order:
-        await update.callback_query.edit_message_text("Không tìm thấy đơn hàng.", reply_markup=_main_menu_keyboard())
+        if query:
+            await query.edit_message_text("Không tìm thấy đơn hàng.", reply_markup=_main_menu_keyboard())
+        else:
+            await message.reply_text("Không tìm thấy đơn hàng.", reply_markup=_main_menu_keyboard())
         return
     if _is_order_expired(order):
         _update_order(order_id, payment_status="expired", order_status="expired")
-        await update.callback_query.edit_message_text("Mã Order đã hết hạn. Vui lòng tạo lại đơn mới.", reply_markup=_product_menu_keyboard())
+        if query:
+            await query.edit_message_text("Mã Order đã hết hạn. Vui lòng tạo lại đơn mới.", reply_markup=_product_menu_keyboard())
+        else:
+            await message.reply_text("Mã Order đã hết hạn. Vui lòng tạo lại đơn mới.", reply_markup=_product_menu_keyboard())
         return
 
     payment_service: PaymentService = context.application.bot_data["payment_service"]
     order = _update_order(order_id, payment_method="ACB") or order
     qr_url = _build_vietqr_url(order, payment_service)
     caption = _qr_caption(order, payment_service)
-    await update.callback_query.message.reply_photo(photo=qr_url, caption=caption, reply_markup=_qr_payment_keyboard(order_id))
+    await message.reply_photo(photo=qr_url, caption=caption, reply_markup=_qr_payment_keyboard(order_id))
 
 
 async def _notify_admins_order_pending(context: ContextTypes.DEFAULT_TYPE, order: dict[str, object]) -> None:
@@ -800,8 +861,9 @@ async def _send_upgrade(update: Update, context: ContextTypes.DEFAULT_TYPE, *, e
         await update.effective_message.reply_text(text, reply_markup=_paid_license_plan_keyboard(machine_id))
 
 
-def _paid_license_prompt_text(plan: str) -> str:
-    if plan == YEAR_365_PLAN:
+def _paid_license_prompt_text(product_id: str) -> str:
+    product = TOOL_LICENSE_PRODUCTS.get(product_id, TOOL_LICENSE_PRODUCTS["TOOL_LIFETIME"])
+    if product["plan"] == YEAR_365_PLAN:
         return (
             "💎 Gia hạn 1 năm - 450.000đ\n\n"
             "Vui lòng gửi Machine ID của bạn.\n"
@@ -814,87 +876,47 @@ def _paid_license_prompt_text(plan: str) -> str:
     )
 
 
-async def _issue_admin_paid_license(update: Update, context: ContextTypes.DEFAULT_TYPE, machine_id: str, plan: str) -> None:
+async def _create_paid_license_order(update: Update, context: ContextTypes.DEFAULT_TYPE, machine_id: str, product_id: str, *, edit: bool = False) -> None:
     user = update.effective_user
     license_service: LicenseService = context.application.bot_data["license_service"]
-    result = license_service.issue_paid_license(
-        user.id,
-        _user_label(user),
-        machine_id,
-        plan=plan,
-        customer=_user_label(user),
-        order_id=f"ADMIN-{plan}-{machine_id}",
-        payment_status="admin_grant",
-    )
-    if result.record:
-        license_service.update_user_from_license(result.record, source=f"admin_{plan.lower()}")
-    record = result.record or {}
-    await update.effective_message.reply_text(
-        "Đã cấp license test/admin.\n"
-        f"Plan: {record.get('plan', plan)}\n"
-        f"Machine ID: {machine_id}\n"
-        f"Hạn dùng: {record.get('expire_date', '')}"
-    )
-    await _send_license_file(update, result.license_path or record.get("license_file"))
-
-
-async def _create_paid_license_order(update: Update, context: ContextTypes.DEFAULT_TYPE, machine_id: str, plan: str, *, edit: bool = False) -> None:
-    user = update.effective_user
-    license_service: LicenseService = context.application.bot_data["license_service"]
-    payment_service: PaymentService = context.application.bot_data["payment_service"]
-    admin_ids: set[int] = context.application.bot_data.get("admin_ids", set())
     machine_id = str(machine_id or "").strip().upper()
-    plan_info = get_license_plan(plan)
+    product_id = str(product_id or "").strip().upper()
+    product = TOOL_LICENSE_PRODUCTS.get(product_id)
+    if not product:
+        await update.effective_message.reply_text("Gói license không hợp lệ.", reply_markup=_ai_daily_keyboard())
+        return
 
     if not machine_id:
-        pending_license_plan_by_user[int(user.id)] = plan_info["plan"]
-        text = _paid_license_prompt_text(plan_info["plan"])
+        pending_license_product_by_user[int(user.id)] = product_id
+        text = _paid_license_prompt_text(product_id)
         if edit and update.callback_query:
             await update.callback_query.edit_message_text(text, reply_markup=_ai_daily_keyboard())
         else:
             await update.effective_message.reply_text(text, reply_markup=_ai_daily_keyboard())
         return
 
-    pending_license_plan_by_user.pop(int(user.id), None)
+    pending_license_product_by_user.pop(int(user.id), None)
 
     license_service.touch_user(
         user.id,
         _user_label(user),
         machine_id=machine_id,
-        source=f"paid_{plan_info['plan'].lower()}",
+        source=f"paid_{product['plan'].lower()}",
         reminder_state="pending",
     )
-
-    if _is_admin(user.id, admin_ids):
-        await _issue_admin_paid_license(update, context, machine_id, plan_info["plan"])
-        return
-
-    order = license_service.create_pending_order(
-        user.id,
-        _user_label(user),
-        machine_id,
-        customer=_user_label(user),
-        plan=plan_info["plan"],
+    order = _create_license_sales_order(update, product_id, machine_id)
+    await update.effective_message.reply_text(
+        "Đã tạo đơn license.\n"
+        f"Order ID: {order['order_id']}\n"
+        f"Machine ID: {machine_id}\n"
+        f"Số tiền: {_format_vnd(int(order['total']))}đ\n\n"
+        "License sẽ chỉ được gửi sau khi thanh toán được xác nhận."
     )
-    text = (
-        f"{'💎 Gia hạn 1 năm - 450.000đ' if plan_info['plan'] == YEAR_365_PLAN else '🚀 Bản vĩnh viễn - 990.000đ'}\n\n"
-        + payment_service.build_payment_text(int(order.get("price", plan_info["price_vnd"])), order["order_id"], machine_id)
-    )
-
-    if payment_service.config.qr_url:
-        if edit and update.callback_query:
-            await update.callback_query.edit_message_text("Đã tạo đơn license trả phí.")
-        await update.effective_message.reply_photo(photo=payment_service.config.qr_url, caption=text, reply_markup=_paid_license_plan_keyboard(machine_id))
-        return
-
-    if edit and update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=_paid_license_plan_keyboard(machine_id))
-    else:
-        await update.effective_message.reply_text(text, reply_markup=_paid_license_plan_keyboard(machine_id))
+    await _send_acb_qr(update, context, str(order["order_id"]))
 
 
 async def _create_upgrade_order(update: Update, context: ContextTypes.DEFAULT_TYPE, machine_id: str, *, edit: bool = False) -> None:
-    await _create_paid_license_order(update, context, machine_id, LIFETIME_PLAN, edit=edit)
+    await _create_paid_license_order(update, context, machine_id, "TOOL_LIFETIME", edit=edit)
 
 
 async def _send_support(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
@@ -1022,9 +1044,9 @@ async def on_text_machine_id(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not _looks_like_machine_id(text):
         return
     logger.info("text_machine_id telegram_user_id=%s machine_id=%s", getattr(update.effective_user, "id", None), text)
-    pending_plan = pending_license_plan_by_user.get(int(update.effective_user.id))
-    if pending_plan:
-        await _create_paid_license_order(update, context, text, pending_plan)
+    pending_product_id = pending_license_product_by_user.get(int(update.effective_user.id))
+    if pending_product_id:
+        await _create_paid_license_order(update, context, text, pending_product_id)
         return
     await _handle_machine_id_free_license(update, context, text, source="text_machine")
 
@@ -1096,50 +1118,8 @@ async def cmd_grant_permanent(update: Update, context: ContextTypes.DEFAULT_TYPE
     await _send_license_file(update, result.license_path or (result.record or {}).get("license_file"))
 
 
-async def _cmd_grant_paid_plan(update: Update, context: ContextTypes.DEFAULT_TYPE, plan: str, usage: str) -> None:
-    if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
-        return
-    args = context.args or []
-    if len(args) < 2:
-        await update.effective_message.reply_text(usage)
-        return
-    telegram_user_id = int(args[0])
-    machine_id = args[1].strip().upper()
-    plan_info = get_license_plan(plan)
-    license_service: LicenseService = context.application.bot_data["license_service"]
-    result = license_service.issue_paid_license(
-        telegram_user_id,
-        "admin_grant",
-        machine_id,
-        plan=plan_info["plan"],
-        customer="admin_grant",
-        order_id=f"ADMIN-{plan_info['plan']}-{machine_id}",
-        payment_status="admin_grant",
-    )
-    if not result.ok:
-        await update.effective_message.reply_text(result.message)
-        return
-    license_service.update_user_from_license(result.record or {}, source=f"admin_grant_{plan_info['plan'].lower()}")
-    await update.effective_message.reply_text(
-        "Thanh cong. Da cap license.\n"
-        f"Plan: {plan_info['plan']}\n"
-        f"Machine ID: {machine_id}\n"
-        f"Expire date: {result.record.get('expire_date', '') if result.record else ''}"
-    )
-    await _send_license_file(update, result.license_path or (result.record or {}).get("license_file"))
-
-
-async def cmd_grant_year(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _cmd_grant_paid_plan(update, context, YEAR_365_PLAN, "Dung: /grant_year <telegram_user_id> <machine_id>")
-
-
-async def cmd_grant_lifetime(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _cmd_grant_paid_plan(update, context, LIFETIME_PLAN, "Dung: /grant_lifetime <telegram_user_id> <machine_id>")
-
-
 def _deliver_sales_order(order: dict[str, object]) -> tuple[bool, str, str]:
-    product_name = str(order.get("product_name", "")).upper()
+    product_name = str(order.get("product_id") or order.get("product_name", "")).upper()
     quantity = int(order.get("quantity", 1))
     inventory = _load_inventory()
     item = inventory.get(product_name)
@@ -1164,9 +1144,70 @@ def _deliver_sales_order(order: dict[str, object]) -> tuple[bool, str, str]:
     return True, "", "Đã trừ tồn kho. Chưa có hàng deliverable, admin cần xử lý giao hàng."
 
 
+def _issue_license_for_sales_order(license_service: LicenseService, order: dict[str, object]):
+    plan = str(order.get("plan") or LIFETIME_PLAN).strip().upper()
+    return license_service.issue_paid_license(
+        int(order.get("telegram_user_id", 0)),
+        str(order.get("username", "")),
+        str(order.get("machine_id", "")).strip().upper(),
+        plan=plan,
+        customer=str(order.get("username", "") or "Customer"),
+        order_id=str(order.get("order_id", "")),
+        payment_status="paid",
+    )
+
+
 async def fulfill_order(context: ContextTypes.DEFAULT_TYPE, order_id: str) -> dict[str, object]:
     sales_order = _find_order(order_id)
     if sales_order:
+        if str(sales_order.get("delivery_type", "account")) == "license":
+            license_service: LicenseService = context.application.bot_data["license_service"]
+            existing_file = str(sales_order.get("license_file", ""))
+            if existing_file and Path(existing_file).exists():
+                result_record = license_service.find(str(sales_order.get("machine_id", "")))
+                license_path = Path(existing_file)
+            else:
+                result = _issue_license_for_sales_order(license_service, sales_order)
+                if not result.ok:
+                    return {"ok": False, "type": "license", "message": result.message, "order": sales_order}
+                result_record = result.record or {}
+                license_path = result.license_path or Path(str(result_record.get("license_file", "")))
+                license_service.update_user_from_license(result_record, source="sales_order_paid")
+            now = _utc_now_iso()
+            updated_order = _update_order(
+                order_id,
+                payment_status="paid",
+                order_status="delivered",
+                paid_at=sales_order.get("paid_at") or now,
+                delivered_at=now,
+                delivery=str(license_path),
+                license_file=str(license_path),
+            )
+            customer_id = sales_order.get("telegram_user_id")
+            if customer_id:
+                plan = str(sales_order.get("plan", "")).upper()
+                plan_label = "365 ngày" if plan == YEAR_365_PLAN else "vĩnh viễn"
+                await context.bot.send_message(
+                    chat_id=int(customer_id),
+                    text=(
+                        "Thanh toán thành công.\n"
+                        f"Bot đã cấp license {plan_label}.\n"
+                        f"Order ID: {order_id}\n"
+                        f"Machine ID: {sales_order.get('machine_id', '')}"
+                    ),
+                )
+                if license_path and Path(license_path).exists():
+                    with Path(license_path).open("rb") as handle:
+                        await context.bot.send_document(chat_id=int(customer_id), document=InputFile(handle, filename=Path(license_path).name))
+            return {
+                "ok": True,
+                "type": "license",
+                "delivery": str(license_path),
+                "message": "Đã tạo và gửi license.",
+                "record": result_record,
+                "order": updated_order or sales_order,
+            }
+
         delivered, delivery_text, delivery_message = _deliver_sales_order(sales_order)
         now = _utc_now_iso()
         order_status = "delivered" if delivered and delivery_text else "paid"
@@ -1202,24 +1243,7 @@ async def fulfill_order(context: ContextTypes.DEFAULT_TYPE, order_id: str) -> di
             "order": updated_order or sales_order,
         }
 
-    license_service: LicenseService = context.application.bot_data["license_service"]
-    result = license_service.mark_paid(order_id)
-    if not result.ok:
-        return {"ok": False, "type": "license", "message": result.message}
-    if result.record:
-        license_service.update_user_from_license(result.record, source="bank_paid")
-        customer_id = int(result.record.get("telegram_user_id", 0))
-        plan = str(result.record.get("plan") or result.record.get("license_type") or "").upper()
-        plan_label = "365 ngày" if plan == YEAR_365_PLAN else "vĩnh viễn"
-        await context.bot.send_message(
-            chat_id=customer_id,
-            text=f"Thanh toán thành công.\nBot đã cấp license {plan_label}.\nOrder ID: {order_id}",
-        )
-        path = result.license_path or result.record.get("license_file")
-        if path and Path(path).exists():
-            with Path(path).open("rb") as handle:
-                await context.bot.send_document(chat_id=customer_id, document=InputFile(handle, filename=Path(path).name))
-    return {"ok": True, "type": "license", "message": result.message, "record": result.record}
+    return {"ok": False, "type": "order", "message": "Không tìm thấy order chung.", "order_id": order_id}
 
 
 async def _notify_admins_paid_without_delivery(
@@ -1265,20 +1289,7 @@ async def cmd_paid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    license_service: LicenseService = context.application.bot_data["license_service"]
-    result = license_service.mark_paid(order_id)
-    if not result.ok:
-        await update.effective_message.reply_text(result.message)
-        return
-    if result.record:
-        license_service.update_user_from_license(result.record, source="admin_paid")
-    plan = str((result.record or {}).get("plan") or (result.record or {}).get("license_type") or "").upper()
-    plan_label = "365 ngay" if plan == YEAR_365_PLAN else "vinh vien"
-    await update.effective_message.reply_text(
-        f"Thanh toan thanh cong.\nBot da cap license {plan_label} cho ban.\n"
-        f"Order ID: {order_id}"
-    )
-    await _send_license_file(update, result.license_path or (result.record or {}).get("license_file"))
+    await update.effective_message.reply_text("Không tìm thấy order chung.")
 
 
 async def cmd_revoke(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1511,15 +1522,12 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await _handle_free_license_click(update, context)
     elif data == "menu_help":
         await _send_help(update, context, edit=True)
-    elif data.startswith("license_plan_machine:"):
-        _, plan, machine_id = data.split(":", 2)
-        await _create_paid_license_order(update, context, machine_id, plan, edit=True)
-    elif data.startswith("license_plan:"):
-        plan = data.split(":", 1)[1].strip().upper()
-        license_service: LicenseService = context.application.bot_data["license_service"]
-        user = update.effective_user
-        machine_id = license_service.recent_machine_id_for_user(user.id) if user else ""
-        await _create_paid_license_order(update, context, machine_id, plan, edit=True)
+    elif data.startswith("license_product_machine:"):
+        _, product_id, machine_id = data.split(":", 2)
+        await _create_paid_license_order(update, context, "", product_id, edit=True)
+    elif data.startswith("license_product:"):
+        product_id = data.split(":", 1)[1].strip().upper()
+        await _create_paid_license_order(update, context, "", product_id, edit=True)
     elif data.startswith("upgrade_machine:"):
         machine_id = data.split(":", 1)[1].strip().upper()
         await _create_upgrade_order(update, context, machine_id, edit=True)
@@ -1594,8 +1602,6 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("grant_free", cmd_grant_free))
     app.add_handler(CommandHandler("grant_permanent", cmd_grant_permanent))
-    app.add_handler(CommandHandler("grant_year", cmd_grant_year))
-    app.add_handler(CommandHandler("grant_lifetime", cmd_grant_lifetime))
     app.add_handler(CommandHandler("paid", cmd_paid))
     app.add_handler(CommandHandler("cancel_order", cmd_cancel_order))
     app.add_handler(CommandHandler("order", cmd_order))

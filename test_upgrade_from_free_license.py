@@ -10,9 +10,9 @@ from types import SimpleNamespace
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from license_service import LicenseService
+import telegram_license_bot as botmod
+from license_service import LIFETIME_PLAN, YEAR_365_PLAN, LicenseService
 from payment_service import PaymentConfig, PaymentService
-from license_service import LIFETIME_PLAN, YEAR_365_PLAN
 from telegram_license_bot import _handle_free_license_click, _on_menu_impl, _upgrade_permanent_keyboard_for_machine
 
 
@@ -36,17 +36,13 @@ class FakeQuery:
         self.edits: list[dict[str, object]] = []
         self.answered = False
         self.data = ""
+        self.message = None
 
     async def answer(self):
         self.answered = True
 
     async def edit_message_text(self, text, reply_markup=None, **kwargs):
         self.edits.append({"text": text, "reply_markup": reply_markup})
-
-
-def first_callback_data(reply_markup) -> str:
-    button = reply_markup.inline_keyboard[0][0]
-    return button.callback_data
 
 
 def callback_data_at(reply_markup, row: int, col: int = 0) -> str:
@@ -63,149 +59,130 @@ def make_private_key_pem() -> str:
 
 
 class UpgradeFromFreeLicenseTest(unittest.TestCase):
-    def test_free_success_button_contains_machine_id_and_upgrades_immediately(self) -> None:
+    def test_free_success_button_creates_lifetime_order_but_no_paid_license(self) -> None:
         previous_private_key = os.environ.get("PRIVATE_KEY_PEM")
+        old_orders_path = botmod.ORDERS_DB_PATH
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            os.environ["PRIVATE_KEY_PEM"] = make_private_key_pem()
-            license_service = LicenseService(
-                private_key_path=root / "unused.pem",
-                db_path=root / "licenses_db.json",
-                output_dir=root / "issued_licenses",
-            )
-            machine_id = "F461FE60-342ADFEF-C1AE4E7B-A5FC9744"
-            license_service.db.upsert_user(
-                {
-                    "telegram_user_id": 123456,
-                    "username": "Test User",
-                    "machine_id": machine_id,
-                    "source": "free_ready",
-                    "reminder_state": "active",
-                    "last_seen_at": "2026-06-02T00:00:00+00:00",
-                    "last_command_at": "2026-06-02T00:00:00+00:00",
-                    "last_license_type": "",
-                    "last_license_expire_date": "",
-                    "last_license_path": "",
-                    "next_reminder_at": "",
-                    "created_at": "2026-06-02T00:00:00+00:00",
-                    "updated_at": "2026-06-02T00:00:01+00:00",
-                }
-            )
-
-            payment_service = PaymentService(
-                PaymentConfig(
-                    bank_name="ACB",
-                    bank_account="123456789",
-                    bank_account_name="TEST ACCOUNT",
-                    qr_url="https://example.com/qr.png",
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                botmod.ORDERS_DB_PATH = root / "orders_db.json"
+                os.environ["PRIVATE_KEY_PEM"] = make_private_key_pem()
+                license_service = LicenseService(
+                    private_key_path=root / "unused.pem",
+                    db_path=root / "licenses_db.json",
+                    output_dir=root / "issued_licenses",
                 )
-            )
-            app = SimpleNamespace(bot_data={"license_service": license_service, "payment_service": payment_service, "admin_ids": set()})
-            user = SimpleNamespace(id=123456, username="testuser", full_name="Test User")
-            message = FakeMessage()
-            update = SimpleNamespace(effective_user=user, effective_message=message, callback_query=None)
-            context = SimpleNamespace(application=app)
+                machine_id = "F461FE60-342ADFEF-C1AE4E7B-A5FC9744"
+                license_service.touch_user(123456, "Test User", machine_id=machine_id, source="test", reminder_state="active")
+                payment_service = PaymentService(
+                    PaymentConfig(
+                        bank_name="ACB",
+                        bank_account="123456789",
+                        bank_account_name="TEST ACCOUNT",
+                    )
+                )
+                app = SimpleNamespace(bot_data={"license_service": license_service, "payment_service": payment_service, "admin_ids": set()})
+                user = SimpleNamespace(id=123456, username="testuser", full_name="Test User")
+                message = FakeMessage()
+                update = SimpleNamespace(effective_user=user, effective_message=message, callback_query=None)
+                context = SimpleNamespace(application=app)
 
-            asyncio.run(_handle_free_license_click(update, context))
+                asyncio.run(_handle_free_license_click(update, context))
 
-            self.assertGreaterEqual(len(message.texts), 1)
-            button_markup = message.texts[0]["reply_markup"]
-            callback_data = callback_data_at(button_markup, 1)
-            self.assertEqual(callback_data, f"upgrade_machine:{machine_id}")
-            self.assertEqual(len(license_service.db.data["licenses"]), 1)
+                self.assertEqual(len(license_service.db.data["licenses"]), 1)
+                callback_data = callback_data_at(message.texts[0]["reply_markup"], 1)
+                self.assertEqual(callback_data, "license_product:TOOL_LIFETIME")
 
-            upgrade_query = FakeQuery()
-            upgrade_query.data = callback_data
-            upgrade_update = SimpleNamespace(
-                effective_user=user,
-                effective_message=FakeMessage(),
-                callback_query=upgrade_query,
-            )
-            asyncio.run(_on_menu_impl(upgrade_update, context))
+                upgrade_query = FakeQuery()
+                upgrade_query.data = callback_data
+                upgrade_update = SimpleNamespace(
+                    effective_user=user,
+                    effective_message=FakeMessage(),
+                    callback_query=upgrade_query,
+                )
+                asyncio.run(_on_menu_impl(upgrade_update, context))
 
-            self.assertTrue(upgrade_query.answered)
-            self.assertEqual(len(license_service.db.data["orders"]), 1)
-            order = license_service.db.data["orders"][0]
-            self.assertEqual(order["machine_id"], machine_id)
-            self.assertEqual(order["plan"], LIFETIME_PLAN)
-            self.assertEqual(order["price"], 990000)
-            self.assertEqual(order["payment_status"], "pending")
-            self.assertEqual(len(upgrade_update.effective_message.photos), 1)
-            self.assertNotIn("Chưa có Machine ID", "".join(item["text"] for item in upgrade_query.edits))
+                self.assertEqual(botmod._load_orders(), [])
+                self.assertIn("Machine ID", upgrade_query.edits[0]["text"])
 
-        if previous_private_key is None:
-            os.environ.pop("PRIVATE_KEY_PEM", None)
-        else:
-            os.environ["PRIVATE_KEY_PEM"] = previous_private_key
+                machine_message = FakeMessage()
+                machine_message.text = machine_id
+                machine_update = SimpleNamespace(effective_user=user, effective_message=machine_message, callback_query=None)
+                asyncio.run(botmod.on_text_machine_id(machine_update, context))
 
-    def test_long_machine_id_upgrade_button_uses_recent_machine_id(self) -> None:
+                orders = botmod._load_orders()
+                self.assertEqual(len(orders), 1)
+                order = orders[0]
+                self.assertEqual(order["product_id"], "TOOL_LIFETIME")
+                self.assertEqual(order["delivery_type"], "license")
+                self.assertEqual(order["machine_id"], machine_id)
+                self.assertEqual(order["plan"], LIFETIME_PLAN)
+                self.assertEqual(order["total"], 990000)
+                self.assertEqual(order["payment_status"], "pending")
+                self.assertEqual(len(machine_message.photos), 1)
+                self.assertEqual(len(license_service.db.data["licenses"]), 1)
+        finally:
+            botmod.ORDERS_DB_PATH = old_orders_path
+            if previous_private_key is None:
+                os.environ.pop("PRIVATE_KEY_PEM", None)
+            else:
+                os.environ["PRIVATE_KEY_PEM"] = previous_private_key
+
+    def test_long_machine_id_year_button_uses_recent_machine_id_and_common_order(self) -> None:
         previous_private_key = os.environ.get("PRIVATE_KEY_PEM")
+        old_orders_path = botmod.ORDERS_DB_PATH
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            os.environ["PRIVATE_KEY_PEM"] = make_private_key_pem()
-            license_service = LicenseService(
-                private_key_path=root / "unused.pem",
-                db_path=root / "licenses_db.json",
-                output_dir=root / "issued_licenses",
-            )
-            machine_id = "BFEB" + "A" * 124
-            license_service.db.upsert_user(
-                {
-                    "telegram_user_id": 123456,
-                    "username": "Test User",
-                    "machine_id": machine_id,
-                    "source": "free_ready",
-                    "reminder_state": "active",
-                    "last_seen_at": "2026-06-02T00:00:00+00:00",
-                    "last_command_at": "2026-06-02T00:00:00+00:00",
-                    "last_license_type": "",
-                    "last_license_expire_date": "",
-                    "last_license_path": "",
-                    "next_reminder_at": "",
-                    "created_at": "2026-06-02T00:00:00+00:00",
-                    "updated_at": "2026-06-02T00:00:01+00:00",
-                }
-            )
-
-            payment_service = PaymentService(
-                PaymentConfig(
-                    bank_name="ACB",
-                    bank_account="123456789",
-                    bank_account_name="TEST ACCOUNT",
-                    qr_url="https://example.com/qr.png",
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                botmod.ORDERS_DB_PATH = root / "orders_db.json"
+                os.environ["PRIVATE_KEY_PEM"] = make_private_key_pem()
+                license_service = LicenseService(
+                    private_key_path=root / "unused.pem",
+                    db_path=root / "licenses_db.json",
+                    output_dir=root / "issued_licenses",
                 )
-            )
-            app = SimpleNamespace(bot_data={"license_service": license_service, "payment_service": payment_service, "admin_ids": set()})
-            user = SimpleNamespace(id=123456, username="testuser", full_name="Test User")
-            context = SimpleNamespace(application=app)
+                machine_id = "BFEB" + "A" * 124
+                license_service.touch_user(123456, "Test User", machine_id=machine_id, source="test", reminder_state="active")
+                payment_service = PaymentService(PaymentConfig(bank_name="ACB", bank_account="123456789", bank_account_name="TEST ACCOUNT"))
+                app = SimpleNamespace(bot_data={"license_service": license_service, "payment_service": payment_service, "admin_ids": set()})
+                user = SimpleNamespace(id=123456, username="testuser", full_name="Test User")
+                context = SimpleNamespace(application=app)
 
-            callback_data = first_callback_data(_upgrade_permanent_keyboard_for_machine(machine_id))
-            self.assertEqual(callback_data, f"license_plan:{YEAR_365_PLAN}")
-            self.assertLessEqual(len(callback_data.encode("utf-8")), 64)
+                callback_data = callback_data_at(_upgrade_permanent_keyboard_for_machine(machine_id), 0)
+                self.assertEqual(callback_data, "license_product:TOOL_YEAR_365")
+                self.assertLessEqual(len(callback_data.encode("utf-8")), 64)
 
-            upgrade_query = FakeQuery()
-            upgrade_query.data = callback_data
-            upgrade_update = SimpleNamespace(
-                effective_user=user,
-                effective_message=FakeMessage(),
-                callback_query=upgrade_query,
-            )
-            asyncio.run(_on_menu_impl(upgrade_update, context))
+                upgrade_query = FakeQuery()
+                upgrade_query.data = callback_data
+                upgrade_update = SimpleNamespace(effective_user=user, effective_message=FakeMessage(), callback_query=upgrade_query)
+                asyncio.run(_on_menu_impl(upgrade_update, context))
 
-            self.assertTrue(upgrade_query.answered)
-            self.assertEqual(len(license_service.db.data["orders"]), 1)
-            order = license_service.db.data["orders"][0]
-            self.assertEqual(order["machine_id"], machine_id)
-            self.assertEqual(order["plan"], YEAR_365_PLAN)
-            self.assertEqual(order["price"], 450000)
-            self.assertEqual(order["payment_status"], "pending")
+                self.assertEqual(botmod._load_orders(), [])
+                self.assertIn("Machine ID", upgrade_query.edits[0]["text"])
 
-        if previous_private_key is None:
-            os.environ.pop("PRIVATE_KEY_PEM", None)
-        else:
-            os.environ["PRIVATE_KEY_PEM"] = previous_private_key
+                machine_message = FakeMessage()
+                machine_message.text = machine_id
+                machine_update = SimpleNamespace(effective_user=user, effective_message=machine_message, callback_query=None)
+                asyncio.run(botmod.on_text_machine_id(machine_update, context))
+
+                orders = botmod._load_orders()
+                self.assertEqual(len(orders), 1)
+                order = orders[0]
+                self.assertEqual(order["product_id"], "TOOL_YEAR_365")
+                self.assertEqual(order["delivery_type"], "license")
+                self.assertEqual(order["machine_id"], machine_id)
+                self.assertEqual(order["plan"], YEAR_365_PLAN)
+                self.assertEqual(order["total"], 450000)
+                self.assertEqual(order["payment_status"], "pending")
+                self.assertEqual(len(license_service.db.data["licenses"]), 0)
+        finally:
+            botmod.ORDERS_DB_PATH = old_orders_path
+            if previous_private_key is None:
+                os.environ.pop("PRIVATE_KEY_PEM", None)
+            else:
+                os.environ["PRIVATE_KEY_PEM"] = previous_private_key
 
 
 if __name__ == "__main__":

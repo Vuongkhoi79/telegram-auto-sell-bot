@@ -16,7 +16,6 @@ import bank_checker
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 ORDERS_DB_PATH = PROJECT_ROOT / "orders_db.json"
-LICENSE_DB_PATH = PROJECT_ROOT / "licenses_db.json"
 PROCESSED_TRANSACTIONS_PATH = PROJECT_ROOT / "processed_transactions.json"
 UNMATCHED_TRANSACTIONS_PATH = PROJECT_ROOT / "unmatched_transactions.json"
 WEBHOOK_PATH = "/sepay-webhook"
@@ -93,60 +92,6 @@ def find_pending_order(description: str, amount: int) -> dict[str, Any] | None:
     return None
 
 
-def load_license_db() -> dict[str, Any]:
-    if not LICENSE_DB_PATH.exists():
-        return {}
-    try:
-        data = json.loads(LICENSE_DB_PATH.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def save_license_db(data: dict[str, Any]) -> None:
-    LICENSE_DB_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def find_pending_license_order(description: str, amount: int) -> dict[str, Any] | None:
-    data = load_license_db()
-    orders = data.get("orders", [])
-    if not isinstance(orders, list):
-        return None
-
-    for order in reversed(orders):
-        if not isinstance(order, dict):
-            continue
-        order_id = str(order.get("order_id", ""))
-        if order.get("payment_status") != "pending":
-            continue
-        if not order_id or order_id not in description:
-            continue
-        try:
-            price = int(order.get("price", 0))
-        except (TypeError, ValueError):
-            price = 0
-        if price == int(amount):
-            return order
-    return None
-
-
-def update_license_order(order_id: str, **changes: Any) -> dict[str, Any] | None:
-    data = load_license_db()
-    orders = data.get("orders", [])
-    if not isinstance(orders, list):
-        return None
-
-    for order in reversed(orders):
-        if isinstance(order, dict) and str(order.get("order_id", "")).upper() == order_id.upper():
-            order.update(changes)
-            meta = data.setdefault("meta", {})
-            if isinstance(meta, dict):
-                meta["updated_at"] = utc_now_iso()
-            save_license_db(data)
-            return order
-    return None
-
-
 def append_unmatched(payload: dict[str, Any], reason: str) -> None:
     items = load_json_list(UNMATCHED_TRANSACTIONS_PATH)
     items.append({"payload": payload, "reason": reason, "created_at": utc_now_iso()})
@@ -165,10 +110,7 @@ async def process_sepay_payload(payload: dict[str, Any], fulfill_order: FulfillO
         return {"ok": True, "status": "duplicate", "transaction_id": transaction_id}
 
     order = find_pending_order(description, amount)
-    order_type = "sales"
-    if not order:
-        order = find_pending_license_order(description, amount)
-        order_type = "license" if order else ""
+    order_type = "order"
     if not order:
         print("[SEPAY] unmatched transaction", flush=True)
         append_unmatched(payload, "No pending order matched amount and description")
@@ -177,24 +119,15 @@ async def process_sepay_payload(payload: dict[str, Any], fulfill_order: FulfillO
     print("[SEPAY] matched order", flush=True)
     order_id = str(order.get("order_id", ""))
     paid_at = utc_now_iso()
-    if order_type == "sales":
-        bank_checker.update_order(
-            order_id,
-            payment_status="paid",
-            order_status="paid",
-            paid_at=paid_at,
-            payment_method="SEPAY",
-            transaction_id=transaction_id,
-        )
+    bank_checker.update_order(
+        order_id,
+        payment_status="paid",
+        order_status="paid",
+        paid_at=paid_at,
+        payment_method="SEPAY",
+        transaction_id=transaction_id,
+    )
     fulfillment = await fulfill_order(order_id)
-    if order_type == "license":
-        update_license_order(
-            order_id,
-            payment_status="paid",
-            paid_at=paid_at,
-            payment_method="SEPAY",
-            transaction_id=transaction_id,
-        )
     processed.append(
         {
             "transaction_id": transaction_id,
