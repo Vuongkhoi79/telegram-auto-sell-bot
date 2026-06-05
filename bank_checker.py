@@ -53,6 +53,8 @@ def is_expired(order: dict[str, Any]) -> bool:
 
 
 def update_order(order_id: str, **changes: Any) -> dict[str, Any] | None:
+    if "payment_status" in changes and "status" not in changes:
+        changes["status"] = changes["payment_status"]
     orders = load_json_list(ORDERS_DB_PATH)
     for order in reversed(orders):
         if str(order.get("order_id", "")).upper() == order_id.upper():

@@ -59,6 +59,93 @@ def make_private_key_pem() -> str:
 
 
 class UpgradeFromFreeLicenseTest(unittest.TestCase):
+    def _assert_paid_license_machine_text_creates_pending_order(
+        self,
+        *,
+        product_id: str,
+        machine_id: str,
+        expected_plan: str,
+        expected_total: int,
+        user_id: int,
+    ) -> None:
+        previous_private_key = os.environ.get("PRIVATE_KEY_PEM")
+        old_orders_path = botmod.ORDERS_DB_PATH
+
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                botmod.ORDERS_DB_PATH = root / "orders_db.json"
+                os.environ["PRIVATE_KEY_PEM"] = make_private_key_pem()
+                license_service = LicenseService(
+                    private_key_path=root / "unused.pem",
+                    db_path=root / "licenses_db.json",
+                    output_dir=root / "issued_licenses",
+                )
+                payment_service = PaymentService(
+                    PaymentConfig(
+                        bank_name="ACB",
+                        bank_account="123456789",
+                        bank_account_name="TEST ACCOUNT",
+                    )
+                )
+                app = SimpleNamespace(bot_data={"license_service": license_service, "payment_service": payment_service, "admin_ids": set()})
+                user = SimpleNamespace(id=user_id, username="testuser", full_name="Test User")
+                context = SimpleNamespace(application=app)
+
+                query = FakeQuery()
+                query.data = f"license_product:{product_id}"
+                update = SimpleNamespace(effective_user=user, effective_message=FakeMessage(), callback_query=query)
+                asyncio.run(_on_menu_impl(update, context))
+
+                self.assertEqual(botmod._load_orders(), [])
+                self.assertIn("Machine ID", query.edits[0]["text"])
+                self.assertEqual(botmod.pending_license_product_by_user[user_id], product_id)
+
+                machine_message = FakeMessage()
+                machine_message.text = machine_id
+                machine_update = SimpleNamespace(effective_user=user, effective_message=machine_message, callback_query=None)
+                asyncio.run(botmod.on_text_machine_id(machine_update, context))
+
+                orders = botmod._load_orders()
+                self.assertEqual(len(orders), 1)
+                order = orders[0]
+                self.assertEqual(order["product_id"], product_id)
+                self.assertEqual(order["delivery_type"], "license")
+                self.assertEqual(order["machine_id"], machine_id)
+                self.assertEqual(order["plan"], expected_plan)
+                self.assertEqual(order["total"], expected_total)
+                self.assertEqual(order["amount"], expected_total)
+                self.assertEqual(order["payment_status"], "pending")
+                self.assertEqual(order["status"], "pending")
+                self.assertEqual(len(machine_message.photos), 1)
+                self.assertEqual(len(license_service.db.data["licenses"]), 0)
+                self.assertNotIn(user_id, botmod.pending_license_product_by_user)
+        finally:
+            botmod.ORDERS_DB_PATH = old_orders_path
+            botmod.pending_license_product_by_user.pop(user_id, None)
+            if previous_private_key is None:
+                os.environ.pop("PRIVATE_KEY_PEM", None)
+            else:
+                os.environ["PRIVATE_KEY_PEM"] = previous_private_key
+
+    def test_year_button_accepts_pending_short_machine_id_and_creates_qr_order(self) -> None:
+        self._assert_paid_license_machine_text_creates_pending_order(
+            product_id="TOOL_YEAR_365",
+            machine_id="TEST365ABC123",
+            expected_plan=YEAR_365_PLAN,
+            expected_total=450000,
+            user_id=345365,
+        )
+
+    def test_lifetime_button_accepts_pending_short_machine_id_and_creates_qr_order(self) -> None:
+        self._assert_paid_license_machine_text_creates_pending_order(
+            product_id="TOOL_LIFETIME",
+            machine_id="TESTLIFEABC123",
+            expected_plan=LIFETIME_PLAN,
+            expected_total=990000,
+            user_id=345990,
+        )
+
     def test_free_success_button_creates_lifetime_order_but_no_paid_license(self) -> None:
         previous_private_key = os.environ.get("PRIVATE_KEY_PEM")
         old_orders_path = botmod.ORDERS_DB_PATH

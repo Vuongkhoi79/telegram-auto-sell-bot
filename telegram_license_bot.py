@@ -317,6 +317,8 @@ def _find_order(order_id: str) -> dict[str, object] | None:
 
 
 def _update_order(order_id: str, **changes: object) -> dict[str, object] | None:
+    if "payment_status" in changes and "status" not in changes:
+        changes["status"] = changes["payment_status"]
     orders = _load_orders()
     for order in reversed(orders):
         if str(order.get("order_id", "")).upper() == order_id.upper():
@@ -343,6 +345,7 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
         "amount": int(unit_price) * int(quantity),
         "delivery_type": "account",
         "payment_method": "",
+        "status": "pending",
         "payment_status": "pending",
         "order_status": "pending",
         "created_at": now.isoformat(),
@@ -383,6 +386,7 @@ def _create_license_sales_order(update: Update, product_id: str, machine_id: str
         "lifetime": product["lifetime"],
         "price_vnd": price,
         "payment_method": "",
+        "status": "pending",
         "payment_status": "pending",
         "order_status": "pending",
         "created_at": now.isoformat(),
@@ -1041,13 +1045,19 @@ async def on_text_machine_id(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not message or not message.text:
         return
     text = message.text.strip().upper()
+    pending_product_id = pending_license_product_by_user.get(int(update.effective_user.id))
+    if pending_product_id:
+        logger.info(
+            "paid_license_machine_id telegram_user_id=%s product_id=%s machine_id=%s",
+            getattr(update.effective_user, "id", None),
+            pending_product_id,
+            text,
+        )
+        await _create_paid_license_order(update, context, text, pending_product_id)
+        return
     if not _looks_like_machine_id(text):
         return
     logger.info("text_machine_id telegram_user_id=%s machine_id=%s", getattr(update.effective_user, "id", None), text)
-    pending_product_id = pending_license_product_by_user.get(int(update.effective_user.id))
-    if pending_product_id:
-        await _create_paid_license_order(update, context, text, pending_product_id)
-        return
     await _handle_machine_id_free_license(update, context, text, source="text_machine")
 
 
