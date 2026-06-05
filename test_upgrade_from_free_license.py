@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 from license_service import LicenseService
 from payment_service import PaymentConfig, PaymentService
+from license_service import LIFETIME_PLAN, YEAR_365_PLAN
 from telegram_license_bot import _handle_free_license_click, _on_menu_impl, _upgrade_permanent_keyboard_for_machine
 
 
@@ -46,6 +47,10 @@ class FakeQuery:
 def first_callback_data(reply_markup) -> str:
     button = reply_markup.inline_keyboard[0][0]
     return button.callback_data
+
+
+def callback_data_at(reply_markup, row: int, col: int = 0) -> str:
+    return reply_markup.inline_keyboard[row][col].callback_data
 
 
 def make_private_key_pem() -> str:
@@ -96,7 +101,7 @@ class UpgradeFromFreeLicenseTest(unittest.TestCase):
                     qr_url="https://example.com/qr.png",
                 )
             )
-            app = SimpleNamespace(bot_data={"license_service": license_service, "payment_service": payment_service})
+            app = SimpleNamespace(bot_data={"license_service": license_service, "payment_service": payment_service, "admin_ids": set()})
             user = SimpleNamespace(id=123456, username="testuser", full_name="Test User")
             message = FakeMessage()
             update = SimpleNamespace(effective_user=user, effective_message=message, callback_query=None)
@@ -106,7 +111,7 @@ class UpgradeFromFreeLicenseTest(unittest.TestCase):
 
             self.assertGreaterEqual(len(message.texts), 1)
             button_markup = message.texts[0]["reply_markup"]
-            callback_data = first_callback_data(button_markup)
+            callback_data = callback_data_at(button_markup, 1)
             self.assertEqual(callback_data, f"upgrade_machine:{machine_id}")
             self.assertEqual(len(license_service.db.data["licenses"]), 1)
 
@@ -123,7 +128,8 @@ class UpgradeFromFreeLicenseTest(unittest.TestCase):
             self.assertEqual(len(license_service.db.data["orders"]), 1)
             order = license_service.db.data["orders"][0]
             self.assertEqual(order["machine_id"], machine_id)
-            self.assertEqual(order["price"], 450000)
+            self.assertEqual(order["plan"], LIFETIME_PLAN)
+            self.assertEqual(order["price"], 990000)
             self.assertEqual(order["payment_status"], "pending")
             self.assertEqual(len(upgrade_update.effective_message.photos), 1)
             self.assertNotIn("Chưa có Machine ID", "".join(item["text"] for item in upgrade_query.edits))
@@ -171,12 +177,12 @@ class UpgradeFromFreeLicenseTest(unittest.TestCase):
                     qr_url="https://example.com/qr.png",
                 )
             )
-            app = SimpleNamespace(bot_data={"license_service": license_service, "payment_service": payment_service})
+            app = SimpleNamespace(bot_data={"license_service": license_service, "payment_service": payment_service, "admin_ids": set()})
             user = SimpleNamespace(id=123456, username="testuser", full_name="Test User")
             context = SimpleNamespace(application=app)
 
             callback_data = first_callback_data(_upgrade_permanent_keyboard_for_machine(machine_id))
-            self.assertEqual(callback_data, "menu_upgrade")
+            self.assertEqual(callback_data, f"license_plan:{YEAR_365_PLAN}")
             self.assertLessEqual(len(callback_data.encode("utf-8")), 64)
 
             upgrade_query = FakeQuery()
@@ -192,6 +198,7 @@ class UpgradeFromFreeLicenseTest(unittest.TestCase):
             self.assertEqual(len(license_service.db.data["orders"]), 1)
             order = license_service.db.data["orders"][0]
             self.assertEqual(order["machine_id"], machine_id)
+            self.assertEqual(order["plan"], YEAR_365_PLAN)
             self.assertEqual(order["price"], 450000)
             self.assertEqual(order["payment_status"], "pending")
 

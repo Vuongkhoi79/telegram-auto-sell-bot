@@ -19,7 +19,7 @@ class FakeMessage:
 
 
 class LicenseHelpUiTest(unittest.TestCase):
-    def test_free_help_shows_machine_id_and_actions(self) -> None:
+    def test_free_help_shows_machine_id_and_ai_daily_actions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             license_service = LicenseService(
@@ -55,18 +55,13 @@ class LicenseHelpUiTest(unittest.TestCase):
             self.assertEqual(len(update.effective_message.texts), 1)
             payload = update.effective_message.texts[0]
             text = payload["text"]
-            keyboard = payload["reply_markup"]
-            buttons = keyboard.inline_keyboard
+            buttons = payload["reply_markup"].inline_keyboard
 
-            self.assertIn("Máy của bạn chưa có license.", text)
-            self.assertIn("Nhận license tự động qua Telegram bot.", text)
+            self.assertIn("Machine ID", text)
             self.assertIn(machine_id, text)
-            self.assertEqual(buttons[0][0].text, "📋 Sao chép Machine ID")
-            self.assertEqual(buttons[0][0].callback_data, f"copy_machine_id:{machine_id}")
-            self.assertEqual(buttons[1][0].text, "🎁 Nhận License Free 90 Ngày")
-            self.assertTrue(buttons[1][0].url.startswith("https://t.me/Aidaily79_bot?start="))
-            self.assertEqual(buttons[2][0].text, "📂 Nhập file license")
-            self.assertEqual(buttons[2][0].callback_data, f"import_license:{machine_id}")
+            self.assertEqual(buttons[0][1].callback_data, "menu_free")
+            self.assertEqual(buttons[2][0].callback_data, "license_plan:YEAR_365")
+            self.assertEqual(buttons[3][0].callback_data, "license_plan:LIFETIME")
 
 
 if __name__ == "__main__":

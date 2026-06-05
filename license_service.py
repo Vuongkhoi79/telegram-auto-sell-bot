@@ -21,6 +21,40 @@ from license_manager import (
 
 DEFAULT_FREE_DAYS = 90
 DEFAULT_PAID_PRICE = 450_000
+YEAR_365_PLAN = "YEAR_365"
+YEAR_365_DAYS = 365
+YEAR_365_PRICE = 450_000
+LIFETIME_PLAN = "LIFETIME"
+LIFETIME_PRICE = 990_000
+
+
+LICENSE_PLANS = {
+    YEAR_365_PLAN: {
+        "label": "Gia hạn 1 năm",
+        "license_type": "paid_365d",
+        "duration_days": YEAR_365_DAYS,
+        "price_vnd": YEAR_365_PRICE,
+        "lifetime": False,
+        "expire_date": None,
+    },
+    LIFETIME_PLAN: {
+        "label": "Vĩnh viễn",
+        "license_type": "permanent",
+        "duration_days": 0,
+        "price_vnd": LIFETIME_PRICE,
+        "lifetime": True,
+        "expire_date": PERMANENT_EXPIRE_DATE,
+    },
+}
+
+
+def get_license_plan(plan: str | None) -> dict[str, Any]:
+    normalized = str(plan or LIFETIME_PLAN).strip().upper()
+    if normalized not in LICENSE_PLANS:
+        normalized = LIFETIME_PLAN
+    data = dict(LICENSE_PLANS[normalized])
+    data["plan"] = normalized
+    return data
 
 
 def _slug(value: str) -> str:
@@ -260,9 +294,12 @@ class LicenseService:
         expire_date: str,
         license_path: Path,
         customer: str,
+        plan: str | None = None,
+        duration_days: int | None = None,
+        lifetime: bool | None = None,
     ) -> dict[str, Any]:
         now = utc_now_iso()
-        return {
+        record = {
             "telegram_user_id": int(telegram_user_id),
             "username": username or "",
             "machine_id": machine_id.strip().upper(),
@@ -276,6 +313,13 @@ class LicenseService:
             "created_at": now,
             "customer": customer or "",
         }
+        if plan:
+            record["plan"] = plan
+        if duration_days is not None:
+            record["duration_days"] = duration_days
+        if lifetime is not None:
+            record["lifetime"] = bool(lifetime)
+        return record
 
     def _write_license_file(
         self,
@@ -288,6 +332,7 @@ class LicenseService:
         expire_date: str | None = None,
         issued_at: str | None = None,
         created_at_utc: str | None = None,
+        extra_payload: dict | None = None,
     ) -> tuple[dict[str, Any], Path]:
         private_key = self._load_private_key()
         package = build_license_package(
@@ -299,6 +344,7 @@ class LicenseService:
             expire_date=expire_date,
             issued_at=issued_at,
             created_at_utc=created_at_utc,
+            extra_payload=extra_payload,
         )
         order_id = _slug(file_tag or uuid.uuid4().hex[:8])
         file_path = self._make_license_file_path(machine_id, license_type, order_id)
@@ -353,21 +399,28 @@ class LicenseService:
         machine_id: str,
         *,
         customer: str | None = None,
+        plan: str | None = None,
     ) -> dict[str, Any]:
+        plan_info = get_license_plan(plan)
         existing = self.db.has_active_pending_order(machine_id)
         if existing:
-            return existing
+            if existing.get("plan", LIFETIME_PLAN) == plan_info["plan"]:
+                return existing
 
         now = utc_now_iso()
         compact_time = now.replace("+00:00", "Z").replace("-", "").replace(":", "").replace("T", "")
-        order_id = f"ORD-{compact_time}-{_slug(machine_id)[:8]}"
+        order_id = f"ORD-{compact_time}-{_slug(plan_info['plan'])[:4]}-{_slug(machine_id)[:8]}"
         order = {
             "order_id": order_id,
             "telegram_user_id": int(telegram_user_id),
             "username": username or "",
             "machine_id": machine_id.strip().upper(),
-            "license_type": "permanent",
-            "price": self.paid_price,
+            "license_type": plan_info["license_type"],
+            "plan": plan_info["plan"],
+            "price": int(plan_info["price_vnd"]),
+            "price_vnd": int(plan_info["price_vnd"]),
+            "duration_days": plan_info["duration_days"],
+            "lifetime": bool(plan_info["lifetime"]),
             "payment_status": "pending",
             "issued_at": "",
             "expire_date": "",
@@ -377,6 +430,51 @@ class LicenseService:
         }
         self.db.add_order(order)
         return order
+
+    def issue_paid_license(
+        self,
+        telegram_user_id: int,
+        username: str,
+        machine_id: str,
+        *,
+        plan: str,
+        customer: str | None = None,
+        order_id: str | None = None,
+        payment_status: str = "paid",
+    ) -> LicenseIssueResult:
+        plan_info = get_license_plan(plan)
+        order_id = order_id or f"{plan_info['plan']}-{_slug(machine_id)}"
+        package, license_path = self._write_license_file(
+            machine_id=machine_id,
+            customer=customer or username or "Customer",
+            license_type=plan_info["license_type"],
+            days=int(plan_info["duration_days"]),
+            file_tag=order_id,
+            expire_date=plan_info["expire_date"],
+            extra_payload={
+                "plan": plan_info["plan"],
+                "price_vnd": int(plan_info["price_vnd"]),
+                "lifetime": bool(plan_info["lifetime"]),
+            },
+        )
+        record = self._build_record(
+            telegram_user_id,
+            username,
+            machine_id,
+            license_type=plan_info["license_type"],
+            price=int(plan_info["price_vnd"]),
+            order_id=order_id,
+            payment_status=payment_status,
+            expire_date=package["payload"]["expire_date"],
+            license_path=license_path,
+            customer=customer or username or "Customer",
+            plan=plan_info["plan"],
+            duration_days=plan_info["duration_days"],
+            lifetime=plan_info["lifetime"],
+        )
+        record["signature"] = package["signature"]
+        self.db.add_license(record)
+        return LicenseIssueResult(ok=True, message=f"{plan_info['plan']} license da duoc cap.", record=record, license_path=license_path)
 
     def issue_permanent_license(
         self,
@@ -388,30 +486,15 @@ class LicenseService:
         order_id: str | None = None,
         payment_status: str = "paid",
     ) -> LicenseIssueResult:
-        order_id = order_id or f"PAID-{_slug(machine_id)}"
-        package, license_path = self._write_license_file(
-            machine_id=machine_id,
-            customer=customer or username or "Customer",
-            license_type="permanent",
-            days=0,
-            file_tag=order_id,
-            expire_date=PERMANENT_EXPIRE_DATE,
-        )
-        record = self._build_record(
+        return self.issue_paid_license(
             telegram_user_id,
             username,
             machine_id,
-            license_type="permanent",
-            price=self.paid_price,
+            plan=LIFETIME_PLAN,
+            customer=customer,
             order_id=order_id,
             payment_status=payment_status,
-            expire_date=package["payload"]["expire_date"],
-            license_path=license_path,
-            customer=customer or username or "Customer",
         )
-        record["signature"] = package["signature"]
-        self.db.add_license(record)
-        return LicenseIssueResult(ok=True, message="Permanent license da duoc cap.", record=record, license_path=license_path)
 
     def mark_paid(self, order_id: str) -> LicenseIssueResult:
         order = self.db.find_order(order_id)
@@ -429,6 +512,14 @@ class LicenseService:
             customer=str(order.get("customer", "")),
             order_id=order_id,
             payment_status="paid",
+        ) if not order.get("plan") else self.issue_paid_license(
+            int(order["telegram_user_id"]),
+            str(order.get("username", "")),
+            str(order.get("machine_id", "")),
+            plan=str(order.get("plan")),
+            customer=str(order.get("customer", "")),
+            order_id=order_id,
+            payment_status="paid",
         )
         if result.record:
             self.db.update_order(
@@ -437,6 +528,8 @@ class LicenseService:
                 issued_at=result.record.get("issued_at", ""),
                 expire_date=result.record.get("expire_date", ""),
                 license_file=result.record.get("license_file", ""),
+                license_type=result.record.get("license_type", ""),
+                plan=result.record.get("plan", ""),
             )
         return result
 

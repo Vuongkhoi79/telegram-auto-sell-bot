@@ -121,6 +121,7 @@ def build_license_payload(
     expire_date: str | None = None,
     issued_at: str | None = None,
     created_at_utc: str | None = None,
+    extra_payload: dict | None = None,
 ) -> dict:
     issued = date.today()
     normalized_license_type = (license_type or "free_90d").strip().lower()
@@ -131,7 +132,7 @@ def build_license_payload(
     else:
         normalized_expire_date = (issued + timedelta(days=days)).isoformat()
 
-    return {
+    payload = {
         "license_version": 1,
         "license_type": normalized_license_type,
         "customer": customer,
@@ -141,6 +142,9 @@ def build_license_payload(
         "duration_days": days if normalized_license_type != "permanent" else None,
         "created_at_utc": created_at_utc or utc_now_iso(),
     }
+    if extra_payload:
+        payload.update(extra_payload)
+    return payload
 
 
 def package_license(payload: dict, private_key) -> dict:
@@ -165,6 +169,7 @@ def build_license_package(
     expire_date: str | None = None,
     issued_at: str | None = None,
     created_at_utc: str | None = None,
+    extra_payload: dict | None = None,
 ) -> dict:
     payload = build_license_payload(
         machine_id,
@@ -174,6 +179,7 @@ def build_license_package(
         expire_date=expire_date,
         issued_at=issued_at,
         created_at_utc=created_at_utc,
+        extra_payload=extra_payload,
     )
     return package_license(payload, private_key)
 

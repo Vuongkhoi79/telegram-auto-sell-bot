@@ -76,7 +76,7 @@ class SePayLicenseOrderTest(unittest.TestCase):
 
             payload = {
                 "transaction_id": "SEPAY-TX-001",
-                "transferAmount": 450000,
+                "transferAmount": 990000,
                 "addInfo": f"AI_DAILY {order['order_id']} TESTMACH",
             }
 
