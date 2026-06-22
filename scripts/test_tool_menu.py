@@ -79,7 +79,20 @@ async def main() -> None:
     await bot._on_menu_impl(tool_update, context)
     tool_text, tool_keyboard = tool_query.edits[-1]
     assert tool_text == bot._ai_daily_text()
-    assert {"menu_free", "menu_help", "menu_upgrade", "menu_main"}.issubset(callback_data(tool_keyboard))
+    assert callback_data(tool_keyboard) == {
+        "menu_download", "menu_free", "license_product:TOOL_YEAR_365", "menu_help", "menu_main"
+    }
+
+    download_query = FakeQuery("menu_download")
+    download_update = type("FakeUpdate", (), {"callback_query": download_query})()
+    await bot._on_menu_impl(download_update, context)
+    assert "Admin chưa cấu hình link tải Tool" in download_query.edits[-1][0]
+
+    context.application.bot_data["tool_download_url"] = "https://example.test/ai-daily.zip"
+    configured_download_query = FakeQuery("menu_download")
+    configured_download_update = type("FakeUpdate", (), {"callback_query": configured_download_query})()
+    await bot._on_menu_impl(configured_download_update, context)
+    assert configured_download_query.edits[-1][0] == "Tải AI Daily Video Creator tại đây: https://example.test/ai-daily.zip"
 
     back_query = FakeQuery("menu_main")
     back_update = type("FakeUpdate", (), {"callback_query": back_query})()

@@ -19,7 +19,7 @@ from license_manager import (
 )
 
 
-DEFAULT_FREE_DAYS = 90
+DEFAULT_FREE_DAYS = 10
 DEFAULT_PAID_PRICE = 450_000
 YEAR_365_PLAN = "YEAR_365"
 YEAR_365_DAYS = 365
@@ -31,7 +31,7 @@ LIFETIME_PRICE = 990_000
 LICENSE_PLANS = {
     YEAR_365_PLAN: {
         "label": "Gia hạn 1 năm",
-        "license_type": "paid_365d",
+        "license_type": "annual_1y",
         "duration_days": YEAR_365_DAYS,
         "price_vnd": YEAR_365_PRICE,
         "lifetime": False,
@@ -232,14 +232,14 @@ class LicenseDatabase:
 
     def has_free_license_for_user(self, telegram_user_id: int) -> bool:
         for record in self.data["licenses"]:
-            if int(record.get("telegram_user_id", -1)) == int(telegram_user_id) and record.get("license_type") == "free_90d":
+            if int(record.get("telegram_user_id", -1)) == int(telegram_user_id) and record.get("license_type") in {"free_90d", "trial_10d"}:
                 return True
         return False
 
     def has_free_license_for_machine(self, machine_id: str) -> bool:
         normalized = machine_id.strip().upper()
         for record in self.data["licenses"]:
-            if record.get("machine_id") == normalized and record.get("license_type") == "free_90d":
+            if record.get("machine_id") == normalized and record.get("license_type") in {"free_90d", "trial_10d"}:
                 return True
         return False
 
@@ -364,7 +364,7 @@ class LicenseService:
             existing = self.db.latest_license_by_machine(machine_id)
             return LicenseIssueResult(
                 ok=False,
-                message="Machine ID nay da nhan free 90 ngay.",
+                message="Machine ID nay da nhan trial 10 ngay.",
                 record=existing,
             )
 
@@ -372,7 +372,7 @@ class LicenseService:
         package, license_path = self._write_license_file(
             machine_id=machine_id,
             customer=customer or username or "Customer",
-            license_type="free_90d",
+            license_type="trial_10d",
             days=self.free_days,
             file_tag=order_id,
         )
@@ -380,7 +380,7 @@ class LicenseService:
             telegram_user_id,
             username,
             machine_id,
-            license_type="free_90d",
+            license_type="trial_10d",
             price=0,
             order_id=order_id,
             payment_status="free",
@@ -390,7 +390,7 @@ class LicenseService:
         )
         record["signature"] = package["signature"]
         self.db.add_license(record)
-        return LicenseIssueResult(ok=True, message="Free license 90 ngay da duoc cap.", record=record, license_path=license_path)
+        return LicenseIssueResult(ok=True, message="Trial license 10 ngay da duoc cap.", record=record, license_path=license_path)
 
     def create_pending_order(
         self,
@@ -609,7 +609,7 @@ class LicenseService:
         return self.db.upsert_user(user_record)
 
     def can_grant_free(self, telegram_user_id: int, machine_id: str) -> bool:
-        return not self.db.has_free_license_for_machine(machine_id)
+        return not self.db.has_free_license_for_user(telegram_user_id) and not self.db.has_free_license_for_machine(machine_id)
 
     def free_or_paid_status(self, machine_id: str) -> dict[str, Any] | None:
         return self.db.latest_license_by_machine(machine_id)

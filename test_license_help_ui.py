@@ -59,9 +59,11 @@ class LicenseHelpUiTest(unittest.TestCase):
 
             self.assertIn("Machine ID", text)
             self.assertIn(machine_id, text)
-            self.assertEqual(buttons[0][1].callback_data, "menu_free")
-            self.assertEqual(buttons[2][0].callback_data, "license_product:TOOL_YEAR_365")
-            self.assertEqual(buttons[3][0].callback_data, "license_product:TOOL_LIFETIME")
+            callbacks = [button.callback_data for row in buttons for button in row]
+            self.assertEqual(
+                callbacks,
+                ["menu_download", "menu_free", "license_product:TOOL_YEAR_365", "menu_help", "menu_main"],
+            )
 
 
 if __name__ == "__main__":

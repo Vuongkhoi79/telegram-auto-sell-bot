@@ -409,16 +409,10 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
 def _ai_daily_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [
-                InlineKeyboardButton("📥 TẢI TOOL", url=os.environ.get("DOWNLOAD_URL", DEFAULT_DOWNLOAD_URL)),
-                InlineKeyboardButton("🎁 NHẬN LICENSE TRIAL 10 NGÀY", callback_data="menu_free"),
-            ],
-            [
-                InlineKeyboardButton("📖 HƯỚNG DẪN", callback_data="menu_help"),
-                InlineKeyboardButton("🔥 NÂNG CẤP VĨNH VIỄN", callback_data="menu_upgrade"),
-            ],
-            [InlineKeyboardButton("💎 Gia hạn 1 năm - 450.000đ", callback_data="license_product:TOOL_YEAR_365")],
-            [InlineKeyboardButton("🚀 Vĩnh viễn - 990.000đ", callback_data="license_product:TOOL_LIFETIME")],
+            [InlineKeyboardButton("📥 Tải Tool", callback_data="menu_download")],
+            [InlineKeyboardButton("🎁 Dùng thử 10 ngày", callback_data="menu_free")],
+            [InlineKeyboardButton("💎 Mua license 365 ngày - 450.000đ", callback_data="license_product:TOOL_YEAR_365")],
+            [InlineKeyboardButton("📘 Hướng dẫn kích hoạt", callback_data="menu_help")],
             [InlineKeyboardButton("↩️ Quay lại", callback_data="menu_main")],
         ]
     )
@@ -1161,8 +1155,12 @@ async def _send_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, *, e
 
 
 async def _send_download(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
-    download_url = context.application.bot_data.get("download_url", "")
-    text = f"Tai tool:\n{download_url or 'Chua cau hinh DOWNLOAD_URL.'}"
+    download_url = context.application.bot_data.get("tool_download_url", "")
+    text = (
+        f"Tải AI Daily Video Creator tại đây: {download_url}"
+        if download_url
+        else "Admin chưa cấu hình link tải Tool. Vui lòng liên hệ hỗ trợ."
+    )
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=_ai_daily_keyboard())
     else:
@@ -1178,8 +1176,11 @@ async def _send_free_help(update: Update, context: ContextTypes.DEFAULT_TYPE, *,
             machine_id = str(user_record.get("machine_id", "")).strip().upper() or None
 
     text = (
-        "Mở tool -> tab Kích Hoạt -> bấm Nhận License Trial 10 Ngày.\n\n"
-        "Bot sẽ tự cấp license ngay nếu link từ tool có Machine ID hợp lệ."
+        "Bước 1: Tải tool\n"
+        "Bước 2: Giải nén\n"
+        "Bước 3: Mở app\n"
+        "Bước 4: Copy Machine ID, gửi cho bot để nhận license JSON\n"
+        "Bước 5: Dán license JSON vào app và bấm Activate"
     )
     if machine_id:
         text += (
@@ -2180,7 +2181,7 @@ def _load_config() -> dict[str, str]:
         "BANK_ACCOUNT_NAME": os.environ.get("BANK_ACCOUNT_NAME", "").strip(),
         "BANK_QR_URL": os.environ.get("BANK_QR_URL", "").strip(),
         "BANK_PROVIDER": os.environ.get("BANK_PROVIDER", "webhook").strip() or "webhook",
-        "DOWNLOAD_URL": os.environ.get("DOWNLOAD_URL", "").strip(),
+        "TOOL_DOWNLOAD_URL": os.environ.get("TOOL_DOWNLOAD_URL", "").strip(),
         "SUPPORT_USERNAME": os.environ.get("SUPPORT_USERNAME", "").strip(),
     }
 
@@ -2194,7 +2195,7 @@ def build_application() -> Application:
         private_key_path=Path(cfg["PRIVATE_KEY_PATH"]),
         db_path=Path(cfg["LICENSE_DB_PATH"]),
         output_dir=Path(cfg["LICENSE_OUTPUT_DIR"]),
-        free_days=int(cfg["FREE_LICENSE_DAYS"]),
+        free_days=10,
         paid_price=int(cfg["PAID_LICENSE_PRICE"]),
     )
     payment_service = PaymentService(
@@ -2219,7 +2220,7 @@ def build_application() -> Application:
     app.bot_data["payment_service"] = payment_service
     app.bot_data["store_db_path"] = store_db_path
     app.bot_data["bank_provider"] = cfg["BANK_PROVIDER"]
-    app.bot_data["download_url"] = cfg["DOWNLOAD_URL"]
+    app.bot_data["tool_download_url"] = cfg["TOOL_DOWNLOAD_URL"]
     app.bot_data["support_username"] = cfg["SUPPORT_USERNAME"] or "@Aidaily79"
 
     app.add_handler(CommandHandler("start", cmd_start))

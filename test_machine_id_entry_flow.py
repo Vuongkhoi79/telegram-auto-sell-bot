@@ -73,7 +73,7 @@ class MachineIdEntryFlowTest(unittest.TestCase):
 
                 self.assertEqual(len(update.effective_message.documents), 1)
                 self.assertTrue(update.effective_message.texts)
-                self.assertIn("Bạn được tặng 90 ngày miễn phí", update.effective_message.texts[0]["text"])
+                self.assertIn("Bạn được tặng trial 10 ngày", update.effective_message.texts[0]["text"])
                 self.assertIn(MACHINE_ID, update.effective_message.texts[0]["text"])
                 record = license_service.db.latest_license_by_machine(MACHINE_ID)
                 self.assertIsNotNone(record)

@@ -74,15 +74,20 @@ def main() -> None:
         db_path.write_text(json.dumps(db, indent=2, ensure_ascii=False), encoding="utf-8")
 
         service = LicenseService(key_path, db_path, out_dir)
-        assert service.can_grant_free(123, NEW_MACHINE) is True, "new machine should be eligible"
-        result = service.issue_free_license(123, "tester", NEW_MACHINE, customer="tester")
+        assert service.can_grant_free(123, NEW_MACHINE) is False, "a Telegram user can receive only one trial"
+        assert service.can_grant_free(456, NEW_MACHINE) is True, "a new user and machine should be eligible"
+        result = service.issue_free_license(456, "new-tester", NEW_MACHINE, customer="new-tester")
         assert result.ok is True, result.message
         assert result.record is not None
         assert result.record["machine_id"] == NEW_MACHINE
+        assert result.record["license_type"] == "trial_10d"
 
         payload = json.loads(Path(result.license_path).read_text(encoding="utf-8"))
         assert payload["payload"]["machine_id"] == NEW_MACHINE
+        assert payload["payload"]["license_type"] == "trial_10d"
+        assert payload["payload"]["duration_days"] == 10
         assert service.db.latest_license_by_machine(NEW_MACHINE) is not None
+        assert service.can_grant_free(456, NEW_MACHINE) is False
 
         removed = service.purge_machine(OLD_MACHINE)
         assert removed["licenses"] >= 1

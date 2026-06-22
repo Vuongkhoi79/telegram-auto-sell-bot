@@ -66,7 +66,7 @@ class PaidLicensePlansTest(unittest.TestCase):
                 data = json.loads(Path(result.license_path).read_text(encoding="utf-8"))
                 payload = data["payload"]
                 self.assertEqual(payload["machine_id"], MACHINE_ID)
-                self.assertEqual(payload["license_type"], "paid_365d")
+                self.assertEqual(payload["license_type"], "annual_1y")
                 self.assertEqual(payload["plan"], YEAR_365_PLAN)
                 self.assertEqual(payload["duration_days"], 365)
                 self.assertEqual(payload["price_vnd"], 450000)
