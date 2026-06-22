@@ -105,11 +105,13 @@ class StoreRepository:
         with self._session() as connection:
             rows = connection.execute(
                 """
-                SELECT COALESCE(NULLIF(category_key, ''), NULLIF(name, ''), code) AS category_key,
-                       MIN(menu_order) AS menu_order
+                SELECT COALESCE(NULLIF(p.category_key, ''), NULLIF(p.name, ''), p.code) AS category_key,
+                       MIN(p.menu_order) AS menu_order,
+                       SUM(CASE WHEN i.status = 'available' THEN 1 ELSE 0 END) AS available_count
                 FROM products
-                WHERE active = 1 AND show_in_menu = 1 AND product_group = ?
-                GROUP BY COALESCE(NULLIF(category_key, ''), NULLIF(name, ''), code)
+                AS p LEFT JOIN inventory_items AS i ON i.product_id = p.id
+                WHERE p.active = 1 AND p.show_in_menu = 1 AND p.product_group = ?
+                GROUP BY COALESCE(NULLIF(p.category_key, ''), NULLIF(p.name, ''), p.code)
                 ORDER BY menu_order, category_key COLLATE NOCASE
                 """,
                 (product_group,),

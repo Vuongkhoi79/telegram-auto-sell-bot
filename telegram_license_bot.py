@@ -791,23 +791,25 @@ def _chunked(items: list[InlineKeyboardButton], size: int) -> list[list[InlineKe
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
-def _catalog_category_keys(product_group: str = "account") -> list[str]:
+def _catalog_category_items(product_group: str = "account") -> list[dict[str, object]]:
     try:
         categories = StoreRepository(_resolve_store_db_path()).list_visible_categories(product_group)
     except (OSError, RuntimeError, sqlite3.Error):
         categories = []
     if categories:
-        return [str(item["category_key"]).upper() for item in categories]
-    return list(PRODUCT_ORDER) if product_group == "account" else []
+        return [dict(item) for item in categories]
+    return [{"category_key": key, "available_count": get_available_count(key)} for key in PRODUCT_ORDER] if product_group == "account" else []
 
 
 def _product_menu_keyboard(product_group: str = "account") -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     buttons: list[InlineKeyboardButton] = []
-    for product_name in _catalog_category_keys(product_group):
-        label, _, _ = get_product_status_for_menu(product_name)
+    for item in _catalog_category_items(product_group):
+        product_name = str(item["category_key"]).upper()
+        available = int(item["available_count"] or 0) > 0
+        label = f"{'🟢' if available else '🔴'} {product_name}"
         buttons.append(InlineKeyboardButton(label, callback_data=f"product:{product_name}"))
-    rows.extend(_chunked(buttons, 4))
+    rows.extend(_chunked(buttons, 3))
     rows.append([InlineKeyboardButton("↩️ Quay lại", callback_data="menu_main")])
     return InlineKeyboardMarkup(rows)
 
@@ -818,7 +820,8 @@ def _start_help_text() -> str:
 
 def _product_list_text() -> str:
     lines = ["🎁 SẢN PHẨM", ""]
-    for product_name in _catalog_category_keys():
+    for item in _catalog_category_items():
+        product_name = str(item["category_key"]).upper()
         label, _, _ = get_product_status_for_menu(product_name)
         lines.append(label)
     return "\n".join(lines)
@@ -1003,7 +1006,7 @@ async def _send_license_file(update: Update, license_path: str | None) -> None:
 
 
 async def _send_products(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False, product_group: str = "account") -> None:
-    text = _product_list_text() if product_group == "account" else "🛠 TOOL"
+    text = "🎁 SẢN PHẨM\n\nChọn sản phẩm:" if product_group == "account" else "🛠 TOOL\n\nChọn sản phẩm:"
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=_product_menu_keyboard(product_group))
     else:
