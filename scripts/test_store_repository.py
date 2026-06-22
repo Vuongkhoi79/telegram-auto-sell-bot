@@ -14,6 +14,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from repository.store_repository import StoreRepository
 from scripts.import_inventory import OPTIONAL_COLUMNS, REQUIRED_COLUMNS, import_inventory
+from scripts.cleanup_demo_inventory import cleanup_demo_inventory
 
 
 class StoreRepositoryTest(unittest.TestCase):
@@ -265,6 +266,38 @@ class StoreRepositoryTest(unittest.TestCase):
         categories = {row["category_key"] for row in self.store.list_visible_categories()}
         self.assertTrue({"CHATGPT", "GEMINI", "GROK"}.issubset(categories))
         self.assertNotIn("AI", categories)
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            with connection:
+                now = datetime.now(timezone.utc).isoformat()
+                connection.execute(
+                    "INSERT INTO products (id, code, name, category_key, active, delivery_type, created_at, updated_at) VALUES (?, ?, ?, ?, 1, 'account', ?, ?)",
+                    ("mixed-case-chatgpt", "MIXED-CHATGPT", "ChatGPT Alternate", "ChatGPT", now, now),
+                )
+        self.assertEqual(
+            [row["category_key"] for row in self.store.list_visible_categories()].count("CHATGPT"),
+            1,
+        )
+
+    def test_cleanup_demo_inventory_preserves_real_reserved_and_delivered(self) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            with connection:
+                for product_id, code, note in (("demo-product", "DEMO-CODE", "Example only"), ("real-product", "REAL-CODE", "real supplier stock"), ("protected-demo-code", "DEMO-PROTECTED", "real supplier stock")):
+                    connection.execute(
+                        "INSERT INTO products (id, code, name, note, active, delivery_type, created_at, updated_at) VALUES (?, ?, ?, ?, 1, 'account', ?, ?)",
+                        (product_id, code, code, note, now, now),
+                    )
+                for item_id, product_id, status in (("demo-available", "demo-product", "available"), ("demo-delivered", "demo-product", "delivered"), ("real-available", "real-product", "available"), ("protected-available", "protected-demo-code", "available")):
+                    connection.execute(
+                        "INSERT INTO inventory_items (id, product_id, secret_value, status, created_at) VALUES (?, ?, ?, ?, ?)",
+                        (item_id, product_id, item_id + "|pass", status, now),
+                    )
+        self.assertEqual(cleanup_demo_inventory(self.db_path, {"DEMO-CODE", "DEMO-PROTECTED"}), 1)
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            states = dict(connection.execute("SELECT id, status FROM inventory_items WHERE id IN ('demo-available', 'demo-delivered', 'real-available', 'protected-available')").fetchall())
+        self.assertEqual(states, {"demo-available": "disabled", "demo-delivered": "delivered", "real-available": "available", "protected-available": "available"})
+        stock = {row["product_code"]: row for row in self.store.get_stock_summary()}
+        self.assertEqual(stock["DEMO-CODE"]["available"], 0)
 
 
 if __name__ == "__main__":

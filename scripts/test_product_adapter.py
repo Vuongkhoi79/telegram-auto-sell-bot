@@ -151,6 +151,18 @@ def main() -> None:
         with closing(sqlite3.connect(db_path)) as connection:
             assert connection.execute("SELECT COUNT(*) FROM order_inventory_items").fetchone()[0] == 1
 
+        # A catalog category with no available account is rendered red.
+        with closing(sqlite3.connect(db_path)) as connection:
+            with connection:
+                connection.execute("UPDATE inventory_items SET status = 'disabled' WHERE product_id = 'chatgpt'")
+        red_menu_buttons = [
+            button.text
+            for row in bot._product_menu_keyboard().inline_keyboard
+            for button in row
+            if button.callback_data == "product:CHATGPT"
+        ]
+        assert red_menu_buttons == ["🔴 CHATGPT"], red_menu_buttons
+
         try:
             bot._create_sales_order(fake_update, "CHATGPT", "7D", 1)
         except bot.InventoryReservationError:
