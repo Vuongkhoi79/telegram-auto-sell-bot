@@ -64,6 +64,14 @@ def main() -> None:
                     "INSERT INTO inventory_items (id, product_id, secret_value, status, created_at) VALUES (?, ?, ?, 'available', ?)",
                     ("chatgpt-item", "chatgpt", "test@example.com|pass", now),
                 )
+                connection.execute(
+                    """
+                    INSERT INTO products
+                        (id, code, name, active, delivery_type, created_at, updated_at)
+                    VALUES (?, ?, ?, 0, 'account', ?, ?)
+                    """,
+                    ("claude-inactive", "CLAUDE-PRO-1M-PRIVATE", "Claude Pro", now, now),
+                )
         inventory_path.write_text(json.dumps({"VEO3 ULTRA": {"stock": 2, "active": True}}), encoding="utf-8")
         bot.INVENTORY_PATH = inventory_path
         bot.ORDERS_DB_PATH = orders_path
@@ -86,9 +94,19 @@ def main() -> None:
             button.callback_data for row in menu.inline_keyboard for button in row
         }
         assert "product:CHATGPT" in menu_callbacks
-        assert "product:VEO3 ULTRA" in menu_callbacks
+        assert "product:VEO3 ULTRA" not in menu_callbacks
+        assert "product:CLAUDE AI" not in menu_callbacks
         assert "🟢 CHATGPT" in bot._product_list_text()
-        assert "🟢 VEO3 ULTRA" in bot._product_list_text()
+        assert "VEO3 ULTRA" not in bot._product_list_text()
+
+        empty_db_path = root / "empty-store.db"
+        bot._initialize_store_db(empty_db_path)
+        os.environ["STORE_DB_PATH"] = str(empty_db_path)
+        empty_menu_callbacks = {
+            button.callback_data for row in bot._product_menu_keyboard().inline_keyboard for button in row
+        }
+        assert "product:VEO3 ULTRA" in empty_menu_callbacks
+        os.environ["STORE_DB_PATH"] = str(db_path)
 
         update = FakeUpdate()
         asyncio.run(bot._send_product_detail(update, None, "CHATGPT"))

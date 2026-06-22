@@ -498,14 +498,7 @@ def get_product_display_info(
 ) -> dict[str, object]:
     """Read mapped product metadata from SQLite; otherwise retain JSON fallback."""
     normalized_key = product_key.upper()
-    product_code = TELEGRAM_PRODUCT_CODE_MAP.get(normalized_key)
-    if not product_code:
-        _log_sqlite_fallback_once(
-            f"mapping:{normalized_key}",
-            "SQLite product mapping missing for Telegram key: %s; using inventory.json",
-            normalized_key,
-        )
-        return _json_product_display_info(normalized_key)
+    product_code = TELEGRAM_PRODUCT_CODE_MAP.get(normalized_key, normalized_key)
 
     path = _resolve_store_db_path(store_db_path)
     if not path.is_file():
@@ -563,6 +556,28 @@ def get_product_status_for_menu(
 
 def get_available_count(product_key: str, *, store_db_path: Path | str | None = None) -> int:
     return int(get_product_display_info(product_key, store_db_path=store_db_path)["available_count"])
+
+
+def _telegram_product_key_for_sqlite_code(product_code: str) -> str:
+    normalized_code = product_code.upper()
+    for product_key in PRODUCT_ORDER:
+        if TELEGRAM_PRODUCT_CODE_MAP.get(product_key) == normalized_code:
+            return product_key
+    return normalized_code
+
+
+def _catalog_product_keys() -> list[str]:
+    path = _resolve_store_db_path()
+    if not path.is_file():
+        return list(PRODUCT_ORDER)
+    try:
+        products = StoreRepository(path).list_active_catalog_products()
+    except (OSError, RuntimeError, sqlite3.Error) as exc:
+        logger.warning("SQLite catalog lookup failed; using PRODUCT_ORDER: %s", exc)
+        return list(PRODUCT_ORDER)
+    if not products:
+        return list(PRODUCT_ORDER)
+    return [_telegram_product_key_for_sqlite_code(str(product["code"])) for product in products]
 
 
 def _load_orders() -> list[dict[str, object]]:
@@ -638,9 +653,9 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
         "delivered_at": "",
         "delivery": "",
     }
-    product_code = TELEGRAM_PRODUCT_CODE_MAP.get(product_name.upper())
-    sqlite_product_info = get_product_display_info(product_name) if product_code else None
-    if product_code and sqlite_product_info and sqlite_product_info["source"] == "store.db":
+    sqlite_product_info = get_product_display_info(product_name)
+    product_code = str(sqlite_product_info.get("product_code") or "")
+    if product_code and sqlite_product_info["source"] == "store.db":
         try:
             StoreRepository(_resolve_store_db_path()).create_pending_account_order_and_reserve(
                 order_id=str(order["order_id"]),
@@ -764,7 +779,7 @@ def _chunked(items: list[InlineKeyboardButton], size: int) -> list[list[InlineKe
 def _product_menu_keyboard() -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     buttons: list[InlineKeyboardButton] = []
-    for product_name in PRODUCT_ORDER:
+    for product_name in _catalog_product_keys():
         label, _, _ = get_product_status_for_menu(product_name)
         buttons.append(InlineKeyboardButton(label, callback_data=f"product:{product_name}"))
     rows.extend(_chunked(buttons, 4))
@@ -778,7 +793,7 @@ def _start_help_text() -> str:
 
 def _product_list_text() -> str:
     lines = ["🎁 SẢN PHẨM", ""]
-    for product_name in PRODUCT_ORDER:
+    for product_name in _catalog_product_keys():
         label, _, _ = get_product_status_for_menu(product_name)
         lines.append(label)
     return "\n".join(lines)
@@ -1464,8 +1479,11 @@ async def cmd_grant_permanent(update: Update, context: ContextTypes.DEFAULT_TYPE
 def _deliver_sales_order(order: dict[str, object]) -> tuple[bool, str, str]:
     product_name = str(order.get("product_id") or order.get("product_name", "")).upper()
     quantity = int(order.get("quantity", 1))
-    sqlite_product_code = TELEGRAM_PRODUCT_CODE_MAP.get(product_name)
-    use_sqlite_delivery = bool(sqlite_product_code) and order.get("inventory_source") != "json"
+    sqlite_product_code = TELEGRAM_PRODUCT_CODE_MAP.get(product_name, product_name)
+    use_sqlite_delivery = bool(sqlite_product_code) and (
+        order.get("inventory_source") == "sqlite"
+        or (order.get("inventory_source") is None and product_name in TELEGRAM_PRODUCT_CODE_MAP)
+    )
     if use_sqlite_delivery:
         order_id = str(order.get("order_id", ""))
         try:

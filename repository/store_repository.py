@@ -75,6 +75,19 @@ class StoreRepository:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_active_catalog_products(self) -> list[dict[str, Any]]:
+        """List active catalog products in display-name order for the Telegram menu."""
+        with self._session() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, code, name, active, delivery_type
+                FROM products
+                WHERE active = 1
+                ORDER BY name COLLATE NOCASE, code
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def get_product_details(self, product_code: str) -> dict[str, Any] | None:
         """Read one product and its import metadata without changing inventory state."""
         with self._session() as connection:
