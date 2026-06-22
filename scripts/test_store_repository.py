@@ -247,6 +247,25 @@ class StoreRepositoryTest(unittest.TestCase):
         self.assertEqual([row["product_code"] for row in packages], ["GPT-B", "GPT-A"])
         self.assertEqual([row["category_key"] for row in self.store.list_visible_categories("tool")], ["VIDEO_TOOL"])
 
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            with connection:
+                for code, name, category_key in (
+                    ("CATEGORY-CHATGPT", "ChatGPT Plus", "CHATGPT"),
+                    ("CATEGORY-GEMINI", "Gemini Advanced", "GEMINI"),
+                    ("CATEGORY-GROK", "Grok Super", "GROK"),
+                ):
+                    connection.execute(
+                        """
+                        INSERT INTO products
+                            (id, code, name, category, category_key, active, delivery_type, created_at, updated_at)
+                        VALUES (?, ?, ?, 'AI', ?, 1, 'account', ?, ?)
+                        """,
+                        (f"test-{code}", code, name, category_key, datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat()),
+                    )
+        categories = {row["category_key"] for row in self.store.list_visible_categories()}
+        self.assertTrue({"CHATGPT", "GEMINI", "GROK"}.issubset(categories))
+        self.assertNotIn("AI", categories)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

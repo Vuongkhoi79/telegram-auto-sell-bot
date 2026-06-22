@@ -105,11 +105,11 @@ class StoreRepository:
         with self._session() as connection:
             rows = connection.execute(
                 """
-                SELECT COALESCE(NULLIF(category_key, ''), NULLIF(category, ''), code) AS category_key,
+                SELECT COALESCE(NULLIF(category_key, ''), NULLIF(name, ''), code) AS category_key,
                        MIN(menu_order) AS menu_order
                 FROM products
                 WHERE active = 1 AND show_in_menu = 1 AND product_group = ?
-                GROUP BY COALESCE(NULLIF(category_key, ''), NULLIF(category, ''), code)
+                GROUP BY COALESCE(NULLIF(category_key, ''), NULLIF(name, ''), code)
                 ORDER BY menu_order, category_key COLLATE NOCASE
                 """,
                 (product_group,),
