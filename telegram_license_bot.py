@@ -101,13 +101,41 @@ PRODUCT_ORDER = [
     "VIEWMAX",
 ]
 
-# UI callback keys stay unchanged. Only products with an explicit code use SQLite.
+# UI callback keys stay unchanged. Add aliases here when extending the catalog.
 TELEGRAM_PRODUCT_CODE_MAP = {
+    "ADOBE": "ADOBE-1M-PRIVATE",
+    "ARTLIST": "ARTLIST-1M-PRIVATE",
+    "CANVA": "CANVA-PRO-1M-PRIVATE",
+    "CANVA PRO": "CANVA-PRO-1M-PRIVATE",
+    "CAPCUT": "CAPCUT-PRO-1M-PRIVATE",
+    "CAPCUT PRO": "CAPCUT-PRO-1M-PRIVATE",
     "CHATGPT": "GPT-PLUS-1M-PRIVATE",
+    "CLAUDE": "CLAUDE-PRO-1M-PRIVATE",
+    "CLAUDE AI": "CLAUDE-PRO-1M-PRIVATE",
+    "CURSOR": "CURSOR-PRO-1M-PRIVATE",
+    "CURSOR AI": "CURSOR-PRO-1M-PRIVATE",
+    "ELEVEN": "ELEVENLABS-1M-PRIVATE",
+    "ELEVENLABS": "ELEVENLABS-1M-PRIVATE",
+    "GAMMA": "GAMMA-1M-PRIVATE",
+    "GAMMA AI": "GAMMA-1M-PRIVATE",
     "GEMINI": "GEM-AIPRO-1M-PRIVATE",
     "GEMINI AI": "GEM-AIPRO-1M-PRIVATE",
     "GROK": "GROK-SUPER-1M-PRIVATE",
     "GROK SUPER": "GROK-SUPER-1M-PRIVATE",
+    "HEYGEN": "HEYGEN-1M-PRIVATE",
+    "HEYGEN AI": "HEYGEN-1M-PRIVATE",
+    "HIGGSFIELD": "HIGGSFIELD-1M-PRIVATE",
+    "HIGGFIELD": "HIGGSFIELD-1M-PRIVATE",
+    "KLING": "KLING-1M-PRIVATE",
+    "KREA": "KREA-1M-PRIVATE",
+    "KREA AI": "KREA-1M-PRIVATE",
+    "OPENART": "OPENART-1M-PRIVATE",
+    "OPENART AI": "OPENART-1M-PRIVATE",
+    "SUNO": "SUNO-1M-PRIVATE",
+    "SUNO AI": "SUNO-1M-PRIVATE",
+    "VEO3": "VEO3-1M-PRIVATE",
+    "VEO3 ULTRA": "VEO3-1M-PRIVATE",
+    "VIEWMAX": "VIEWMAX-1M-PRIVATE",
 }
 _SQLITE_FALLBACK_LOGGED: set[str] = set()
 
@@ -611,7 +639,8 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
         "delivery": "",
     }
     product_code = TELEGRAM_PRODUCT_CODE_MAP.get(product_name.upper())
-    if product_code:
+    sqlite_product_info = get_product_display_info(product_name) if product_code else None
+    if product_code and sqlite_product_info and sqlite_product_info["source"] == "store.db":
         try:
             StoreRepository(_resolve_store_db_path()).create_pending_account_order_and_reserve(
                 order_id=str(order["order_id"]),
@@ -633,6 +662,10 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
                 exc,
             )
             raise InventoryReservationError("Sản phẩm hiện đã hết hàng, vui lòng quay lại sau.") from exc
+        order["inventory_source"] = "sqlite"
+    else:
+        # Missing SQLite products intentionally retain the legacy JSON path.
+        order["inventory_source"] = "json"
     orders = _load_orders()
     orders.append(order)
     _save_orders(orders)
@@ -1432,7 +1465,8 @@ def _deliver_sales_order(order: dict[str, object]) -> tuple[bool, str, str]:
     product_name = str(order.get("product_id") or order.get("product_name", "")).upper()
     quantity = int(order.get("quantity", 1))
     sqlite_product_code = TELEGRAM_PRODUCT_CODE_MAP.get(product_name)
-    if sqlite_product_code:
+    use_sqlite_delivery = bool(sqlite_product_code) and order.get("inventory_source") != "json"
+    if use_sqlite_delivery:
         order_id = str(order.get("order_id", ""))
         try:
             repository = StoreRepository(_resolve_store_db_path())

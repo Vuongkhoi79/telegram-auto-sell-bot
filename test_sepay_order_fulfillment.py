@@ -164,7 +164,12 @@ class SePayOrderFulfillmentTest(unittest.TestCase):
             json.dumps({"CAPCUT PRO": {"stock": 1, "active": True, "deliverables": [credential]}}, ensure_ascii=False),
             encoding="utf-8",
         )
-        order = pending_order(order_id="ORD-CAPCUT-001", total=99000, amount=99000)
+        order = pending_order(
+            order_id="ORD-CAPCUT-001",
+            total=99000,
+            amount=99000,
+            inventory_source="json",
+        )
         botmod.ORDERS_DB_PATH.write_text(json.dumps([order], ensure_ascii=False), encoding="utf-8")
 
         payload = {"transaction_id": "SEPAY-CAPCUT-001", "transferAmount": 99000, "addInfo": f"PAY {order['order_id']}"}
