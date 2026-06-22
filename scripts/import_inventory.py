@@ -27,6 +27,7 @@ REQUIRED_COLUMNS = (
     "product_code", "category", "product_name", "account_type", "duration",
     "price_vnd", "warranty_days", "credential_text", "note", "active",
 )
+OPTIONAL_COLUMNS = ("category_key", "menu_order", "show_in_menu", "product_group", "description")
 PRODUCT_IMPORT_COLUMNS = {
     "category": "TEXT NOT NULL DEFAULT ''",
     "account_type": "TEXT NOT NULL DEFAULT ''",
@@ -34,6 +35,11 @@ PRODUCT_IMPORT_COLUMNS = {
     "price_vnd": "INTEGER NOT NULL DEFAULT 0",
     "warranty_days": "INTEGER NOT NULL DEFAULT 0",
     "note": "TEXT NOT NULL DEFAULT ''",
+    "menu_order": "INTEGER NOT NULL DEFAULT 100",
+    "show_in_menu": "INTEGER NOT NULL DEFAULT 1",
+    "product_group": "TEXT NOT NULL DEFAULT 'account'",
+    "category_key": "TEXT NOT NULL DEFAULT ''",
+    "description": "TEXT NOT NULL DEFAULT ''",
 }
 
 
@@ -83,7 +89,7 @@ def read_rows(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
             if missing:
                 raise ValueError(f"Missing required columns: {', '.join(sorted(missing))}")
             for row_number, row in enumerate(reader, start=2):
-                yield row_number, {key: row.get(key, "") for key in REQUIRED_COLUMNS}
+                yield row_number, {key: row.get(key, "") for key in (*REQUIRED_COLUMNS, *OPTIONAL_COLUMNS)}
         return
     if suffix != ".xlsx":
         raise ValueError("Input must be an .xlsx or .csv file")
@@ -99,8 +105,8 @@ def read_rows(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
             if not any(value is not None and text(value) for value in values):
                 continue
             yield row_number, {
-                column: values[positions[column]] if positions[column] < len(values) else ""
-                for column in REQUIRED_COLUMNS
+                column: values[positions[column]] if column in positions and positions[column] < len(values) else ""
+                for column in (*REQUIRED_COLUMNS, *OPTIONAL_COLUMNS)
             }
     finally:
         workbook.close()
@@ -138,6 +144,7 @@ def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE) -
                 credential = validate_credential(row["credential_text"])
                 price_vnd = parse_int(row["price_vnd"], "price_vnd")
                 warranty_days = parse_int(row["warranty_days"], "warranty_days")
+                menu_order = parse_int(row["menu_order"], "menu_order", default=100)
                 if price_vnd < 0 or warranty_days < 0:
                     raise ValueError("price_vnd and warranty_days must not be negative")
                 now = utc_now_iso()
@@ -145,13 +152,17 @@ def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE) -
                 product_values = (
                     product_name, text(row["category"]), text(row["account_type"]), text(row["duration"]),
                     price_vnd, warranty_days, text(row["note"]), parse_active(row["active"]), now,
+                    text(row["category_key"]).upper() or text(row["category"]).upper() or product_code,
+                    menu_order, parse_active(row["show_in_menu"]), text(row["product_group"]).lower() or "account",
+                    text(row["description"]),
                 )
                 if product:
                     product_id = product["id"]
                     connection.execute(
                         """
                         UPDATE products SET name = ?, category = ?, account_type = ?, duration = ?,
-                            price_vnd = ?, warranty_days = ?, note = ?, active = ?, updated_at = ?
+                            price_vnd = ?, warranty_days = ?, note = ?, active = ?, updated_at = ?,
+                            category_key = ?, menu_order = ?, show_in_menu = ?, product_group = ?, description = ?
                         WHERE id = ?
                         """,
                         (*product_values, product_id),
@@ -163,10 +174,14 @@ def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE) -
                         """
                         INSERT INTO products
                             (id, code, name, active, delivery_type, created_at, updated_at,
-                             category, account_type, duration, price_vnd, warranty_days, note)
-                        VALUES (?, ?, ?, ?, 'account', ?, ?, ?, ?, ?, ?, ?, ?)
+                             category, account_type, duration, price_vnd, warranty_days, note,
+                             category_key, menu_order, show_in_menu, product_group, description)
+                        VALUES (?, ?, ?, ?, 'account', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (product_id, product_code, product_name, product_values[7], now, now, *product_values[1:7]),
+                        (
+                            product_id, product_code, product_name, product_values[7], now, now,
+                            *product_values[1:7], *product_values[9:],
+                        ),
                     )
                     product_was_created = True
                     product_was_updated = False

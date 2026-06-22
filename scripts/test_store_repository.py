@@ -13,7 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from repository.store_repository import StoreRepository
-from scripts.import_inventory import REQUIRED_COLUMNS, import_inventory
+from scripts.import_inventory import OPTIONAL_COLUMNS, REQUIRED_COLUMNS, import_inventory
 
 
 class StoreRepositoryTest(unittest.TestCase):
@@ -227,6 +227,25 @@ class StoreRepositoryTest(unittest.TestCase):
         with closing(sqlite3.connect(self.db_path)) as connection:
             self.assertIsNone(connection.execute("SELECT id FROM products WHERE code = 'ROW_FAILURE'").fetchone())
         self.assertEqual(self.store.get_stock_count("ROW_SUCCESS"), 2)
+
+    def test_catalog_schema_and_optional_import_columns(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(products)")}
+        self.assertTrue({"menu_order", "show_in_menu", "product_group", "category_key", "description"}.issubset(columns))
+
+        catalog_path = Path(self.temp_dir.name) / "catalog.csv"
+        with catalog_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow([*REQUIRED_COLUMNS, *OPTIONAL_COLUMNS])
+            writer.writerow(["GPT-A", "CHATGPT", "ChatGPT Apple", "private", "1M", 10, 1, "a@example.com|pass", "", 1, "CHATGPT", 20, 1, "account", "Apple package"])
+            writer.writerow(["GPT-B", "CHATGPT", "ChatGPT BHF", "private", "1M", 20, 1, "b@example.com|pass", "", 1, "CHATGPT", 10, 1, "account", "BHF package"])
+            writer.writerow(["TOOL-A", "TOOL", "Video Tool", "tool", "1M", 30, 0, "tool@example.com|pass", "", 1, "VIDEO_TOOL", 1, 1, "tool", "Tool package"])
+        report = import_inventory(catalog_path, self.db_path)
+        self.assertEqual((report["credentials_added"], report["invalid_rows"]), (3, 0))
+        self.assertIn("CHATGPT", [row["category_key"] for row in self.store.list_visible_categories()])
+        packages = self.store.list_packages_by_category("CHATGPT")
+        self.assertEqual([row["product_code"] for row in packages], ["GPT-B", "GPT-A"])
+        self.assertEqual([row["category_key"] for row in self.store.list_visible_categories("tool")], ["VIDEO_TOOL"])
 
 
 if __name__ == "__main__":

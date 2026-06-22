@@ -22,6 +22,14 @@ REQUIRED_TABLES = {
     "inventory_movements",
 }
 
+CATALOG_COLUMNS = {
+    "menu_order": "INTEGER NOT NULL DEFAULT 100",
+    "show_in_menu": "INTEGER NOT NULL DEFAULT 1",
+    "product_group": "TEXT NOT NULL DEFAULT 'account'",
+    "category_key": "TEXT NOT NULL DEFAULT ''",
+    "description": "TEXT NOT NULL DEFAULT ''",
+}
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(microsecond=0)
@@ -67,6 +75,11 @@ class StoreRepository:
         missing = REQUIRED_TABLES - found
         if missing:
             raise RuntimeError(f"Store database schema is missing tables: {', '.join(sorted(missing))}")
+        with self._session() as connection:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(products)")}
+            for name, definition in CATALOG_COLUMNS.items():
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE products ADD COLUMN {name} {definition}")
 
     def list_active_products(self) -> list[dict[str, Any]]:
         with self._session() as connection:
@@ -85,6 +98,36 @@ class StoreRepository:
                 WHERE active = 1
                 ORDER BY name COLLATE NOCASE, code
                 """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_visible_categories(self, product_group: str = "account") -> list[dict[str, Any]]:
+        with self._session() as connection:
+            rows = connection.execute(
+                """
+                SELECT COALESCE(NULLIF(category_key, ''), NULLIF(category, ''), code) AS category_key,
+                       MIN(menu_order) AS menu_order
+                FROM products
+                WHERE active = 1 AND show_in_menu = 1 AND product_group = ?
+                GROUP BY COALESCE(NULLIF(category_key, ''), NULLIF(category, ''), code)
+                ORDER BY menu_order, category_key COLLATE NOCASE
+                """,
+                (product_group,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_packages_by_category(self, category_key: str, product_group: str = "account") -> list[dict[str, Any]]:
+        with self._session() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, code AS product_code, name AS display_name, category_key,
+                       description, price_vnd, active, menu_order, product_group
+                FROM products
+                WHERE active = 1 AND product_group = ?
+                  AND COALESCE(NULLIF(category_key, ''), NULLIF(category, ''), code) = ?
+                ORDER BY menu_order, display_name COLLATE NOCASE, product_code
+                """,
+                (product_group, category_key.upper()),
             ).fetchall()
         return [dict(row) for row in rows]
 

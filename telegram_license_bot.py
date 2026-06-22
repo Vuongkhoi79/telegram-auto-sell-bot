@@ -203,6 +203,11 @@ def _initialize_store_db(store_db_path: Path) -> None:
                 price_vnd INTEGER NOT NULL DEFAULT 0,
                 warranty_days INTEGER NOT NULL DEFAULT 0,
                 note TEXT NOT NULL DEFAULT ''
+                ,menu_order INTEGER NOT NULL DEFAULT 100
+                ,show_in_menu INTEGER NOT NULL DEFAULT 1
+                ,product_group TEXT NOT NULL DEFAULT 'account'
+                ,category_key TEXT NOT NULL DEFAULT ''
+                ,description TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS inventory_items (
@@ -293,6 +298,11 @@ def _initialize_store_db(store_db_path: Path) -> None:
             "price_vnd": "INTEGER NOT NULL DEFAULT 0",
             "warranty_days": "INTEGER NOT NULL DEFAULT 0",
             "note": "TEXT NOT NULL DEFAULT ''",
+            "menu_order": "INTEGER NOT NULL DEFAULT 100",
+            "show_in_menu": "INTEGER NOT NULL DEFAULT 1",
+            "product_group": "TEXT NOT NULL DEFAULT 'account'",
+            "category_key": "TEXT NOT NULL DEFAULT ''",
+            "description": "TEXT NOT NULL DEFAULT ''",
         }.items():
             if name not in existing_columns:
                 connection.execute(f"ALTER TABLE products ADD COLUMN {name} {definition}")
