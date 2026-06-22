@@ -2079,7 +2079,8 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     elif data == "menu_products":
         await _send_products(update, context, edit=True)
     elif data == "menu_tools":
-        await _send_products(update, context, edit=True, product_group="tool")
+        # Tool is the original license/download branch, separate from account catalog products.
+        await query.edit_message_text(_ai_daily_text(), reply_markup=_ai_daily_keyboard())
     elif data == "menu_orders":
         await _send_orders(update, context, edit=True)
     elif data == "menu_payment":
