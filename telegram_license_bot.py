@@ -639,15 +639,19 @@ def _update_order(order_id: str, **changes: object) -> dict[str, object] | None:
 
 def _create_sales_order(update: Update, product_name: str, package_name: str, quantity: int) -> dict[str, object]:
     user = update.effective_user
-    unit_price = PRODUCT_PACKAGES[package_name]
+    package = _get_package_info(product_name, package_name)
+    if not package or int(package["available_count"]) < int(quantity):
+        raise InventoryReservationError("Sản phẩm hiện đã hết hàng, vui lòng quay lại sau.")
+    unit_price = int(package["price_vnd"])
     now = _utc_now()
     order = {
         "order_id": _make_order_id(product_name),
         "telegram_user_id": int(user.id) if user else "",
         "username": _user_label(user) if user else "",
-        "product_id": product_name.upper(),
+        "product_id": str(package["product_code"]).upper() if package["source"] == "sqlite" else product_name.upper(),
         "product_name": product_name,
-        "package_name": package_name,
+        "package_name": str(package["display_name"]),
+        "package_code": str(package["product_code"]),
         "quantity": int(quantity),
         "unit_price": int(unit_price),
         "total": int(unit_price) * int(quantity),
@@ -663,9 +667,8 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
         "delivered_at": "",
         "delivery": "",
     }
-    sqlite_product_info = get_product_display_info(product_name)
-    product_code = str(sqlite_product_info.get("product_code") or "")
-    if product_code and sqlite_product_info["source"] == "store.db":
+    product_code = str(package["product_code"]) if package.get("reservation_sqlite") else ""
+    if product_code:
         try:
             StoreRepository(_resolve_store_db_path()).create_pending_account_order_and_reserve(
                 order_id=str(order["order_id"]),
@@ -837,10 +840,24 @@ def _product_detail_keyboard(product_name: str, available: bool) -> InlineKeyboa
 
 
 def _package_keyboard(product_name: str) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(f"🎁 Gói {name} - {_format_vnd(price)}đ", callback_data=f"pkg:{product_name}:{name}")]
-        for name, price in PRODUCT_PACKAGES.items()
-    ]
+    rows = []
+    try:
+        packages = StoreRepository(_resolve_store_db_path()).list_packages_by_category(product_name.upper())
+    except (OSError, RuntimeError, sqlite3.Error):
+        packages = []
+    if packages:
+        rows.extend(
+            [InlineKeyboardButton(
+                f"🎁 {package['display_name']} - {_format_vnd(int(package['price_vnd']))}đ",
+                callback_data=f"pkg:{product_name}:{package['product_code']}",
+            )]
+            for package in packages
+        )
+    else:
+        rows.extend(
+            [InlineKeyboardButton(f"🎁 Gói {name} - {_format_vnd(price)}đ", callback_data=f"pkg:{product_name}:{name}")]
+            for name, price in PRODUCT_PACKAGES.items()
+        )
     rows.append([InlineKeyboardButton("↩️ Quay lại sản phẩm", callback_data="menu_products")])
     rows.append([InlineKeyboardButton("🏠 Quay lại Menu", callback_data="menu_main")])
     return InlineKeyboardMarkup(rows)
@@ -904,7 +921,8 @@ def _package_text(product_name: str) -> str:
 
 
 def _quantity_text(product_name: str, package_name: str) -> str:
-    unit_price = PRODUCT_PACKAGES[package_name]
+    package = _get_package_info(product_name, package_name)
+    unit_price = int(package["price_vnd"]) if package else 0
     return (
         "Chọn số lượng\n\n"
         f"📦 Sản phẩm: {product_name}\n"
@@ -1236,6 +1254,34 @@ def _paid_license_prompt_text(product_id: str) -> str:
         "Vui lòng gửi Machine ID của bạn.\n"
         "Sau khi thanh toán/xác nhận, bot sẽ gửi file license vĩnh viễn."
     )
+
+
+def _get_package_info(product_key: str, package_key: str) -> dict[str, object] | None:
+    if package_key in PRODUCT_PACKAGES:
+        product_info = get_product_display_info(product_key)
+        return {
+            "product_code": str(product_info.get("product_code") or product_key.upper()),
+            "display_name": package_key,
+            "price_vnd": PRODUCT_PACKAGES[package_key],
+            "available_count": int(product_info["available_count"]),
+            "source": "legacy",
+            "reservation_sqlite": product_info["source"] == "store.db",
+        }
+    try:
+        repository = StoreRepository(_resolve_store_db_path())
+        package = repository.get_product_details(package_key)
+        if not package or not package["active"]:
+            return None
+        return {
+            "product_code": str(package["code"]),
+            "display_name": str(package["name"]),
+            "price_vnd": int(package["price_vnd"]),
+            "available_count": repository.get_stock_count(str(package["code"])),
+            "source": "sqlite",
+            "reservation_sqlite": True,
+        }
+    except (OSError, RuntimeError, sqlite3.Error):
+        return None
 
 
 async def _create_paid_license_order(update: Update, context: ContextTypes.DEFAULT_TYPE, machine_id: str, product_id: str, *, edit: bool = False) -> None:
@@ -2014,13 +2060,14 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.edit_message_text(_ai_daily_text(), reply_markup=_ai_daily_keyboard())
     elif data.startswith("pkg:"):
         _, product_name, package_name = data.split(":", 2)
-        if package_name not in PRODUCT_PACKAGES:
+        package = _get_package_info(product_name, package_name)
+        if not package or int(package["available_count"]) <= 0:
             await query.edit_message_text("Gói không hợp lệ.", reply_markup=_product_menu_keyboard())
             return
         await _send_quantity_choice(update, product_name, package_name, edit=True)
     elif data.startswith("qty:"):
         _, product_name, package_name, raw_qty = data.split(":", 3)
-        if package_name not in PRODUCT_PACKAGES:
+        if not _get_package_info(product_name, package_name):
             await query.edit_message_text("Gói không hợp lệ.", reply_markup=_product_menu_keyboard())
             return
         try:

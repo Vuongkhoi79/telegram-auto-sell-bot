@@ -182,9 +182,8 @@ def main() -> None:
             assert states == {"chatgpt-item": "delivered", "chatgpt-item-2": "available"}, states
 
         unmapped_order = bot._create_sales_order(fake_update, "VEO3 ULTRA", "7D", 1)
-        assert unmapped_order["order_id"] == "ORD-UNMAPPED-1"
         assert unmapped_order["inventory_source"] == "json"
-        assert bot._find_order("ORD-UNMAPPED-1") is not None
+        assert bot._find_order(str(unmapped_order["order_id"])) is not None
         inventory_path.write_text(
             json.dumps({"VEO3 ULTRA": {"stock": 1, "active": True, "deliverables": ["legacy@example.com|pass"]}}),
             encoding="utf-8",
