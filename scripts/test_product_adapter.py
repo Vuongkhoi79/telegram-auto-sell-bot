@@ -55,10 +55,10 @@ def main() -> None:
                 connection.execute(
                     """
                     INSERT INTO products
-                        (id, code, name, active, delivery_type, created_at, updated_at, price_vnd, warranty_days)
-                    VALUES (?, ?, ?, 1, 'account', ?, ?, ?, ?)
+                        (id, code, name, active, delivery_type, created_at, updated_at, price_vnd, warranty_days, category_key)
+                    VALUES (?, ?, ?, 1, 'account', ?, ?, ?, ?, ?)
                     """,
-                    ("chatgpt", "GPT-PLUS-1M-PRIVATE", "ChatGPT Plus 1 tháng", now, now, 70000, 7),
+                    ("chatgpt", "GPT-PLUS-1M-PRIVATE", "ChatGPT Plus 1 tháng", now, now, 70000, 7, "CHATGPT"),
                 )
                 connection.execute(
                     "INSERT INTO inventory_items (id, product_id, secret_value, status, created_at) VALUES (?, ?, ?, 'available', ?)",
@@ -111,11 +111,10 @@ def main() -> None:
         update = FakeUpdate()
         asyncio.run(bot._send_product_detail(update, None, "CHATGPT"))
         detail_text, detail_keyboard = update.effective_message.replies[0]
-        assert "Tồn kho: 1" in detail_text
         detail_callbacks = {
             button.callback_data for row in detail_keyboard.inline_keyboard for button in row
         }
-        assert "pkg:CHATGPT:7D" in detail_callbacks
+        assert "pkg:CHATGPT:GPT-PLUS-1M-PRIVATE" in detail_callbacks
 
         order_ids = iter(["ORD-MAPPED-1", "ORD-MAPPED-2", "ORD-UNMAPPED-1"])
         bot._make_order_id = lambda _product_name: next(order_ids)
