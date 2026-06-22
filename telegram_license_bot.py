@@ -504,7 +504,10 @@ def get_product_display_info(
 ) -> dict[str, object]:
     """Read mapped product metadata from SQLite; otherwise retain JSON fallback."""
     normalized_key = product_key.upper()
-    product_code = TELEGRAM_PRODUCT_CODE_MAP.get(normalized_key, normalized_key)
+    candidate_codes: list[str] = [normalized_key]
+    mapped_code = TELEGRAM_PRODUCT_CODE_MAP.get(normalized_key, "")
+    if mapped_code and mapped_code not in candidate_codes:
+        candidate_codes.append(mapped_code)
 
     path = _resolve_store_db_path(store_db_path)
     if not path.is_file():
@@ -517,16 +520,24 @@ def get_product_display_info(
         return _json_product_display_info(normalized_key)
     try:
         repository = StoreRepository(path)
-        product = repository.get_product_details(product_code)
+        product = None
+        product_code = normalized_key
+        for candidate_code in candidate_codes:
+            product = repository.get_product_details(candidate_code)
+            if product:
+                product_code = candidate_code
+                break
         if not product:
             _log_sqlite_fallback_once(
-                f"product-missing:{product_code}",
+                f"product-missing:{normalized_key}",
                 "SQLite product %s mapped from %s was not found; using inventory.json",
-                product_code,
+                mapped_code or normalized_key,
                 normalized_key,
             )
             return _json_product_display_info(normalized_key)
-        available_count = repository.get_stock_count(product_code)
+        available_count = 0
+        for candidate_code in candidate_codes:
+            available_count = max(available_count, repository.get_stock_count(candidate_code))
     except (OSError, RuntimeError, sqlite3.Error) as exc:
         _log_sqlite_fallback_once(
             f"lookup-error:{normalized_key}",
@@ -791,7 +802,15 @@ def _catalog_category_items(product_group: str = "account") -> list[dict[str, ob
     except (OSError, RuntimeError, sqlite3.Error):
         categories = []
     if categories:
-        return [dict(item) for item in categories]
+        normalized_items: list[dict[str, object]] = []
+        for item in categories:
+            normalized_item = dict(item)
+            category_key = str(normalized_item.get("category_key", "")).strip()
+            if category_key:
+                direct_count = get_available_count(category_key)
+                normalized_item["available_count"] = max(int(normalized_item.get("available_count") or 0), direct_count)
+            normalized_items.append(normalized_item)
+        return normalized_items
     return [{"category_key": key, "available_count": get_available_count(key)} for key in PRODUCT_ORDER] if product_group == "account" else []
 
 
