@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import sqlite3
+import uuid
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -40,8 +41,11 @@ from license_service import (
     LicenseService,
 )
 from payment_service import PaymentConfig, PaymentService
+from repository.store_repository import StoreRepository
+from scripts.import_inventory import import_inventory
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+IMPORTS_DIR = PROJECT_ROOT / "imports"
 INVENTORY_PATH = PROJECT_ROOT / "inventory.json"
 ORDERS_DB_PATH = PROJECT_ROOT / "orders_db.json"
 PROCESSED_TRANSACTIONS_PATH = PROJECT_ROOT / "processed_transactions.json"
@@ -97,8 +101,22 @@ PRODUCT_ORDER = [
     "VIEWMAX",
 ]
 
+# UI callback keys stay unchanged. Only products with an explicit code use SQLite.
+TELEGRAM_PRODUCT_CODE_MAP = {
+    "CHATGPT": "GPT-PLUS-1M-PRIVATE",
+    "GEMINI": "GEM-AIPRO-1M-PRIVATE",
+    "GEMINI AI": "GEM-AIPRO-1M-PRIVATE",
+    "GROK": "GROK-SUPER-1M-PRIVATE",
+    "GROK SUPER": "GROK-SUPER-1M-PRIVATE",
+}
+_SQLITE_FALLBACK_LOGGED: set[str] = set()
+
 logger = logging.getLogger(__name__)
 MACHINE_ID_RE = re.compile(r"^[A-Z0-9-]{16,128}$")
+
+
+class InventoryReservationError(RuntimeError):
+    pass
 
 
 def _parse_admin_ids(raw: str | None) -> set[int]:
@@ -263,7 +281,8 @@ def _order_suffix(product_name: str) -> str:
 
 def _make_order_id(product_name: str) -> str:
     timestamp = _utc_now().strftime("%Y%m%d%H%M%S")
-    return f"ORD-{timestamp}-{_order_suffix(product_name)}"
+    unique_suffix = uuid.uuid4().hex[:8].upper()
+    return f"ORD-{timestamp}-{_order_suffix(product_name)}-{unique_suffix}"
 
 
 def _user_label(user) -> str:
@@ -414,6 +433,110 @@ def _save_inventory(inventory: dict[str, dict[str, object]]) -> None:
     INVENTORY_PATH.write_text(json.dumps(inventory, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _resolve_store_db_path(store_db_path: Path | str | None = None) -> Path:
+    if store_db_path is not None:
+        path = Path(store_db_path).expanduser()
+    else:
+        path = Path(os.environ.get("STORE_DB_PATH", "database/store.db")).expanduser()
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def _json_product_display_info(product_key: str) -> dict[str, object]:
+    normalized_key = product_key.upper()
+    item = _load_inventory().get(normalized_key)
+    _, available, stock = _inventory_status(normalized_key, item)
+    return {
+        "product_key": normalized_key,
+        "product_code": None,
+        "product_name": normalized_key,
+        "price_vnd": 0,
+        "warranty_days": 0,
+        "active": bool(item.get("active", True)) if item else True,
+        "available_count": stock,
+        "available": available,
+        "source": "inventory.json",
+    }
+
+
+def _log_sqlite_fallback_once(log_key: str, message: str, *args: object) -> None:
+    if log_key in _SQLITE_FALLBACK_LOGGED:
+        return
+    _SQLITE_FALLBACK_LOGGED.add(log_key)
+    logger.warning(message, *args)
+
+
+def get_product_display_info(
+    product_key: str, *, store_db_path: Path | str | None = None
+) -> dict[str, object]:
+    """Read mapped product metadata from SQLite; otherwise retain JSON fallback."""
+    normalized_key = product_key.upper()
+    product_code = TELEGRAM_PRODUCT_CODE_MAP.get(normalized_key)
+    if not product_code:
+        _log_sqlite_fallback_once(
+            f"mapping:{normalized_key}",
+            "SQLite product mapping missing for Telegram key: %s; using inventory.json",
+            normalized_key,
+        )
+        return _json_product_display_info(normalized_key)
+
+    path = _resolve_store_db_path(store_db_path)
+    if not path.is_file():
+        _log_sqlite_fallback_once(
+            f"store-missing:{path}",
+            "SQLite store missing at %s for %s; using inventory.json",
+            path,
+            normalized_key,
+        )
+        return _json_product_display_info(normalized_key)
+    try:
+        repository = StoreRepository(path)
+        product = repository.get_product_details(product_code)
+        if not product:
+            _log_sqlite_fallback_once(
+                f"product-missing:{product_code}",
+                "SQLite product %s mapped from %s was not found; using inventory.json",
+                product_code,
+                normalized_key,
+            )
+            return _json_product_display_info(normalized_key)
+        available_count = repository.get_stock_count(product_code)
+    except (OSError, RuntimeError, sqlite3.Error) as exc:
+        _log_sqlite_fallback_once(
+            f"lookup-error:{normalized_key}",
+            "SQLite lookup failed for %s; using inventory.json: %s",
+            normalized_key,
+            exc,
+        )
+        return _json_product_display_info(normalized_key)
+
+    active = bool(product["active"])
+    return {
+        "product_key": normalized_key,
+        "product_code": product_code,
+        "product_name": str(product["name"]),
+        "price_vnd": int(product["price_vnd"]),
+        "warranty_days": int(product["warranty_days"]),
+        "active": active,
+        "available_count": available_count,
+        "available": active and available_count > 0,
+        "source": "store.db",
+    }
+
+
+def get_product_status_for_menu(
+    product_key: str, *, store_db_path: Path | str | None = None
+) -> tuple[str, bool, int]:
+    info = get_product_display_info(product_key, store_db_path=store_db_path)
+    display_name = str(info["product_key"])
+    available = bool(info["available"])
+    count = int(info["available_count"])
+    return f"{'🟢' if available else '🔴'} {display_name}", available, count
+
+
+def get_available_count(product_key: str, *, store_db_path: Path | str | None = None) -> int:
+    return int(get_product_display_info(product_key, store_db_path=store_db_path)["available_count"])
+
+
 def _load_orders() -> list[dict[str, object]]:
     if not ORDERS_DB_PATH.exists():
         return []
@@ -487,6 +610,29 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
         "delivered_at": "",
         "delivery": "",
     }
+    product_code = TELEGRAM_PRODUCT_CODE_MAP.get(product_name.upper())
+    if product_code:
+        try:
+            StoreRepository(_resolve_store_db_path()).create_pending_account_order_and_reserve(
+                order_id=str(order["order_id"]),
+                telegram_user_id=int(order["telegram_user_id"]),
+                username=str(order["username"]),
+                product_code=product_code,
+                product_name=str(order["product_name"]),
+                package_name=str(order["package_name"]),
+                quantity=int(order["quantity"]),
+                unit_price_vnd=int(order["unit_price"]),
+                total_vnd=int(order["total"]),
+                created_at=str(order["created_at"]),
+                expire_at=str(order["expire_at"]),
+            )
+        except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
+            logger.warning(
+                "Mapped account order %s was not created because SQLite reservation failed: %s",
+                order["order_id"],
+                exc,
+            )
+            raise InventoryReservationError("Sản phẩm hiện đã hết hàng, vui lòng quay lại sau.") from exc
     orders = _load_orders()
     orders.append(order)
     _save_orders(orders)
@@ -544,6 +690,26 @@ def _is_order_expired(order: dict[str, object]) -> bool:
     return _utc_now() > expire_dt
 
 
+def _release_expired_sqlite_reservations(store_db_path: Path | str | None = None) -> int:
+    path = _resolve_store_db_path(store_db_path)
+    if not path.is_file():
+        logger.warning("SQLite reservation cleanup skipped; store database is missing: %s", path)
+        return 0
+    try:
+        return StoreRepository(path).release_expired_reservations()
+    except (OSError, RuntimeError, sqlite3.Error) as exc:
+        logger.exception("SQLite reservation cleanup failed: %s", exc)
+        return 0
+
+
+async def sqlite_reservation_cleanup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    released = _release_expired_sqlite_reservations(
+        context.application.bot_data.get("store_db_path")
+    )
+    if released:
+        logger.info("Released %s expired SQLite inventory reservation(s)", released)
+
+
 def _inventory_status(name: str, item: dict[str, object] | None) -> tuple[str, bool, int]:
     stock = 0
     active = True
@@ -563,11 +729,10 @@ def _chunked(items: list[InlineKeyboardButton], size: int) -> list[list[InlineKe
 
 
 def _product_menu_keyboard() -> InlineKeyboardMarkup:
-    inventory = _load_inventory()
     rows: list[list[InlineKeyboardButton]] = []
     buttons: list[InlineKeyboardButton] = []
     for product_name in PRODUCT_ORDER:
-        label, _, _ = _inventory_status(product_name, inventory.get(product_name))
+        label, _, _ = get_product_status_for_menu(product_name)
         buttons.append(InlineKeyboardButton(label, callback_data=f"product:{product_name}"))
     rows.extend(_chunked(buttons, 4))
     rows.append([InlineKeyboardButton("↩️ Quay lại", callback_data="menu_main")])
@@ -579,10 +744,9 @@ def _start_help_text() -> str:
 
 
 def _product_list_text() -> str:
-    inventory = _load_inventory()
     lines = ["🎁 SẢN PHẨM", ""]
     for product_name in PRODUCT_ORDER:
-        label, _, _ = _inventory_status(product_name, inventory.get(product_name))
+        label, _, _ = get_product_status_for_menu(product_name)
         lines.append(label)
     return "\n".join(lines)
 
@@ -696,6 +860,7 @@ def _order_payment_text(order: dict[str, object]) -> str:
     return (
         "Chọn cách thanh toán\n\n"
         "🧾 Chi tiết đơn\n"
+        f"🆔 Mã đơn: {order.get('order_id', '')}\n"
         f"📦 Sản phẩm: {order.get('product_name', '')}\n"
         f"🎁 Gói: {order.get('package_name', '')}\n"
         f"🔢 Số lượng: {order.get('quantity', '')}\n"
@@ -757,9 +922,7 @@ async def _send_products(update: Update, context: ContextTypes.DEFAULT_TYPE, *, 
 
 
 async def _send_product_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, product_name: str, *, edit: bool = False) -> None:
-    inventory = _load_inventory()
-    item = inventory.get(product_name.upper(), {})
-    _, available, stock = _inventory_status(product_name, item)
+    available = True
     if product_name == AI_DAILY_PRODUCT_NAME:
         text = (
             "🎁 AI DAILY VIDEO CREATOR\n\n"
@@ -771,6 +934,9 @@ async def _send_product_detail(update: Update, context: ContextTypes.DEFAULT_TYP
             "Viết Lại Kịch Bản"
         )
     else:
+        product_info = get_product_display_info(product_name)
+        available = bool(product_info["available"])
+        stock = int(product_info["available_count"])
         if not available:
             text = "Sản phẩm hiện đã hết hàng, vui lòng quay lại sau."
             keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Quay lại sản phẩm", callback_data="menu_products")]])
@@ -826,6 +992,7 @@ async def _send_acb_qr(update: Update, context: ContextTypes.DEFAULT_TYPE, order
         return
     if _is_order_expired(order):
         _update_order(order_id, payment_status="expired", order_status="expired")
+        _release_expired_sqlite_reservations()
         if query:
             await query.edit_message_text("Mã Order đã hết hạn. Vui lòng tạo lại đơn mới.", reply_markup=_product_menu_keyboard())
         else:
@@ -1264,6 +1431,23 @@ async def cmd_grant_permanent(update: Update, context: ContextTypes.DEFAULT_TYPE
 def _deliver_sales_order(order: dict[str, object]) -> tuple[bool, str, str]:
     product_name = str(order.get("product_id") or order.get("product_name", "")).upper()
     quantity = int(order.get("quantity", 1))
+    sqlite_product_code = TELEGRAM_PRODUCT_CODE_MAP.get(product_name)
+    if sqlite_product_code:
+        order_id = str(order.get("order_id", ""))
+        try:
+            repository = StoreRepository(_resolve_store_db_path())
+            if not repository.mark_account_order_paid_for_fulfillment(order_id):
+                logger.error("SQLite reservation order is missing for mapped account order %s", order_id)
+                return False, "", "Không tìm thấy reservation SQLite cho đơn đã thanh toán."
+            delivered_items = repository.deliver_reserved_items(order_id)
+        except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
+            logger.exception("SQLite delivery failed for mapped account order %s", order_id)
+            return False, "", f"Không thể giao hàng SQLite an toàn: {exc}"
+        if not delivered_items:
+            logger.error("SQLite reservation has no deliverable item for mapped account order %s", order_id)
+            return False, "", "Không có account SQLite đã reserve cho đơn này."
+        return True, "\n".join(delivered_items), "Đã giao hàng từ SQLite reservation."
+
     inventory = _load_inventory()
     item = inventory.get(product_name)
     if not item:
@@ -1523,23 +1707,8 @@ async def cmd_dbstock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
     try:
-        with closing(sqlite3.connect(f"file:{store_db_path.as_posix()}?mode=ro", uri=True)) as connection:
-            rows = connection.execute(
-                """
-                SELECT
-                    product.code AS product_code,
-                    product.name AS product_name,
-                    COALESCE(product.price_vnd, 0) AS price_vnd,
-                    COUNT(item.id) AS available_count,
-                    product.active AS active
-                FROM products AS product
-                LEFT JOIN inventory_items AS item
-                    ON item.product_id = product.id AND item.status = 'available'
-                GROUP BY product.id, product.code, product.name, product.price_vnd, product.active
-                ORDER BY product.code
-                """
-            ).fetchall()
-    except sqlite3.Error as exc:
+        rows = StoreRepository(store_db_path).get_stock_summary()
+    except (OSError, RuntimeError, sqlite3.Error) as exc:
         logger.exception("dbstock read failed")
         await update.effective_message.reply_text(f"Khong the doc store.db: {exc}")
         return
@@ -1548,13 +1717,122 @@ async def cmd_dbstock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.effective_message.reply_text("store.db chua co san pham nao.")
         return
     lines = ["TON KHO SQLITE"]
-    for product_code, product_name, price_vnd, available_count, active in rows:
-        active_label = "active" if active else "inactive"
+    for row in rows:
+        active_label = "active" if row["active"] else "inactive"
         lines.append(
-            f"{product_code} | {product_name} | {_format_vnd(int(price_vnd))}d | "
-            f"available: {available_count} | {active_label}"
+            f"{row['product_code']} | {row['display_name']} | {active_label} | "
+            f"available: {row['available']} | reserved: {row['reserved']} | "
+            f"delivered: {row['delivered']} | disabled: {row['disabled']}"
         )
     await update.effective_message.reply_text("\n".join(lines))
+
+
+def _admin_store_repository(context: ContextTypes.DEFAULT_TYPE) -> StoreRepository:
+    return StoreRepository(context.application.bot_data["store_db_path"])
+
+
+async def cmd_addstock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
+        await update.effective_message.reply_text("Khong co quyen.")
+        return
+    args = context.args or []
+    if len(args) not in {3, 4}:
+        await update.effective_message.reply_text("Dung: /addstock <product_code> <email> <password> [2fa]")
+        return
+    product_code, email, password, *optional_2fa = args
+    credential = "|".join([email, password, *optional_2fa])
+    try:
+        item_id = _admin_store_repository(context).add_inventory_item(product_code, credential)
+    except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
+        await update.effective_message.reply_text(f"Khong the them kho SQLite: {exc}")
+        return
+    await update.effective_message.reply_text(
+        f"Da them 1 account vao kho SQLite {product_code.upper()}. Item ID: {item_id}"
+    )
+
+
+async def cmd_removestock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
+        await update.effective_message.reply_text("Khong co quyen.")
+        return
+    args = context.args or []
+    if len(args) != 1:
+        await update.effective_message.reply_text("Dung: /removestock <item_id>")
+        return
+    try:
+        _admin_store_repository(context).set_inventory_item_disabled(args[0], True)
+    except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
+        await update.effective_message.reply_text(f"Khong the xoa an toan item SQLite: {exc}")
+        return
+    await update.effective_message.reply_text(f"Da disable item SQLite: {args[0]}")
+
+
+async def cmd_disable(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
+        await update.effective_message.reply_text("Khong co quyen.")
+        return
+    args = context.args or []
+    if len(args) != 2 or args[0].lower() not in {"product", "item"}:
+        await update.effective_message.reply_text("Dung: /disable product <product_code> hoac /disable item <item_id>")
+        return
+    try:
+        repository = _admin_store_repository(context)
+        if args[0].lower() == "product":
+            repository.set_product_active(args[1], False)
+        else:
+            repository.set_inventory_item_disabled(args[1], True)
+    except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
+        await update.effective_message.reply_text(f"Khong the disable SQLite: {exc}")
+        return
+    await update.effective_message.reply_text(f"Da disable {args[0].lower()} SQLite: {args[1]}")
+
+
+async def cmd_enable(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
+        await update.effective_message.reply_text("Khong co quyen.")
+        return
+    args = context.args or []
+    if len(args) != 2 or args[0].lower() not in {"product", "item"}:
+        await update.effective_message.reply_text("Dung: /enable product <product_code> hoac /enable item <item_id>")
+        return
+    try:
+        repository = _admin_store_repository(context)
+        if args[0].lower() == "product":
+            repository.set_product_active(args[1], True)
+        else:
+            repository.set_inventory_item_disabled(args[1], False)
+    except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
+        await update.effective_message.reply_text(f"Khong the enable SQLite: {exc}")
+        return
+    await update.effective_message.reply_text(f"Da enable {args[0].lower()} SQLite: {args[1]}")
+
+
+async def cmd_importexcel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
+        await update.effective_message.reply_text("Khong co quyen.")
+        return
+    args = context.args or []
+    if len(args) != 1:
+        await update.effective_message.reply_text("Dung: /importexcel <ten_file.xlsx hoac ten_file.csv trong thu muc imports>")
+        return
+    candidate = (IMPORTS_DIR / args[0]).resolve()
+    if not candidate.is_relative_to(IMPORTS_DIR.resolve()) or not candidate.is_file():
+        await update.effective_message.reply_text("Khong tim thay file import trong thu muc imports.")
+        return
+    try:
+        report = import_inventory(candidate, context.application.bot_data["store_db_path"])
+    except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
+        logger.exception("Excel import failed")
+        await update.effective_message.reply_text(f"Import SQLite that bai: {exc}")
+        return
+    await update.effective_message.reply_text(
+        "Import SQLite xong.\n"
+        f"Product tao: {report['products_created']}\n"
+        f"Product cap nhat: {report['products_updated']}\n"
+        f"Account them: {report['credentials_added']}\n"
+        f"Trung bo qua: {report['credentials_duplicate']}\n"
+        f"Dong loi: {report['row_errors']}"
+    )
 
 
 async def run_bank_check(context: ContextTypes.DEFAULT_TYPE) -> list[dict[str, object]]:
@@ -1683,7 +1961,11 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if package_name not in PRODUCT_PACKAGES:
             await query.edit_message_text("Gói không hợp lệ.", reply_markup=_product_menu_keyboard())
             return
-        order = _create_sales_order(update, product_name, package_name, int(raw_qty))
+        try:
+            order = _create_sales_order(update, product_name, package_name, int(raw_qty))
+        except InventoryReservationError as exc:
+            await query.edit_message_text(str(exc), reply_markup=_product_menu_keyboard())
+            return
         await _send_payment_choice(update, order, edit=True)
     elif data.startswith("pay_acb:"):
         order_id = data.split(":", 1)[1].strip()
@@ -1810,6 +2092,11 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("order", cmd_order))
     app.add_handler(CommandHandler("pending_orders", cmd_pending_orders))
     app.add_handler(CommandHandler("dbstock", cmd_dbstock))
+    app.add_handler(CommandHandler("addstock", cmd_addstock))
+    app.add_handler(CommandHandler("removestock", cmd_removestock))
+    app.add_handler(CommandHandler("disable", cmd_disable))
+    app.add_handler(CommandHandler("enable", cmd_enable))
+    app.add_handler(CommandHandler("importexcel", cmd_importexcel))
     app.add_handler(CommandHandler("check_bank", cmd_check_bank))
     app.add_handler(CommandHandler("transactions", cmd_transactions))
     app.add_handler(CommandHandler("revoke", cmd_revoke))
@@ -1819,6 +2106,12 @@ def build_application() -> Application:
     app.add_handler(CallbackQueryHandler(on_menu))
     if app.job_queue:
         app.job_queue.run_repeating(bank_checker_job, interval=15, first=5, name="bank_checker")
+        app.job_queue.run_repeating(
+            sqlite_reservation_cleanup_job,
+            interval=60,
+            first=60,
+            name="sqlite_reservation_cleanup",
+        )
     return app
 
 

@@ -75,6 +75,20 @@ class StoreRepository:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_product_details(self, product_code: str) -> dict[str, Any] | None:
+        """Read one product and its import metadata without changing inventory state."""
+        with self._session() as connection:
+            row = connection.execute(
+                """
+                SELECT id, code, name, active, delivery_type, category, account_type,
+                       duration, price_vnd, warranty_days, note
+                FROM products
+                WHERE code = ?
+                """,
+                (product_code.upper(),),
+            ).fetchone()
+        return dict(row) if row else None
+
     def get_stock_count(self, product_code: str) -> int:
         with self._session() as connection:
             row = connection.execute(
@@ -88,6 +102,32 @@ class StoreRepository:
             ).fetchone()
         return int(row["stock"] if row else 0)
 
+    def get_stock_summary(self) -> list[dict[str, Any]]:
+        with self._session() as connection:
+            rows = connection.execute(
+                """
+                SELECT p.code AS product_code, p.name AS display_name, p.active,
+                       SUM(CASE WHEN i.status = 'available' THEN 1 ELSE 0 END) AS available,
+                       SUM(CASE WHEN i.status = 'reserved' THEN 1 ELSE 0 END) AS reserved,
+                       SUM(CASE WHEN i.status = 'delivered' THEN 1 ELSE 0 END) AS delivered,
+                       SUM(CASE WHEN i.status = 'disabled' THEN 1 ELSE 0 END) AS disabled
+                FROM products AS p
+                LEFT JOIN inventory_items AS i ON i.product_id = p.id
+                GROUP BY p.id, p.code, p.name, p.active
+                ORDER BY p.code
+                """
+            ).fetchall()
+        return [
+            {
+                **dict(row),
+                "available": int(row["available"] or 0),
+                "reserved": int(row["reserved"] or 0),
+                "delivered": int(row["delivered"] or 0),
+                "disabled": int(row["disabled"] or 0),
+            }
+            for row in rows
+        ]
+
     def add_inventory_item(self, product_code: str, credential_text: str) -> str:
         credential_text = credential_text.strip()
         if not credential_text:
@@ -100,6 +140,12 @@ class StoreRepository:
             ).fetchone()
             if not product:
                 raise ValueError(f"Unknown product code: {product_code}")
+            duplicate = connection.execute(
+                "SELECT id FROM inventory_items WHERE product_id = ? AND secret_value = ?",
+                (product["id"], credential_text),
+            ).fetchone()
+            if duplicate:
+                raise ValueError(f"Duplicate credential for product code: {product_code}")
             connection.execute(
                 "INSERT INTO inventory_items (id, product_id, secret_value, status, created_at) VALUES (?, ?, ?, 'available', ?)",
                 (item_id, product["id"], credential_text, now),
@@ -113,6 +159,166 @@ class StoreRepository:
                 (str(uuid.uuid4()), item_id, now),
             )
         return item_id
+
+    def set_product_active(self, product_code: str, active: bool) -> None:
+        now = _utc_now_iso()
+        with self._session() as connection:
+            result = connection.execute(
+                "UPDATE products SET active = ?, updated_at = ? WHERE code = ?",
+                (1 if active else 0, now, product_code.upper()),
+            )
+            if result.rowcount != 1:
+                raise ValueError(f"Unknown product code: {product_code}")
+
+    def set_inventory_item_disabled(self, item_id: str, disabled: bool) -> None:
+        now = _utc_now_iso()
+        with self._session() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            item = connection.execute(
+                """
+                SELECT i.status, p.active
+                FROM inventory_items AS i
+                JOIN products AS p ON p.id = i.product_id
+                WHERE i.id = ?
+                """,
+                (item_id,),
+            ).fetchone()
+            if not item:
+                raise ValueError(f"Unknown inventory item: {item_id}")
+            if disabled:
+                if item["status"] != "available":
+                    raise ValueError("Only available inventory items can be disabled")
+                connection.execute(
+                    "UPDATE inventory_items SET status = 'disabled', disabled_at = ? WHERE id = ?",
+                    (now, item_id),
+                )
+                action, source = "disable", "admin_disable"
+            else:
+                if item["status"] != "disabled":
+                    raise ValueError("Only disabled inventory items can be enabled")
+                if not item["active"]:
+                    raise ValueError("Cannot enable an item while its product is disabled")
+                connection.execute(
+                    "UPDATE inventory_items SET status = 'available', disabled_at = NULL WHERE id = ?",
+                    (item_id,),
+                )
+                # Existing schema has no `enable` action; `release` plus source preserves audit history.
+                action, source = "release", "admin_enable"
+            connection.execute(
+                """
+                INSERT INTO inventory_movements
+                    (id, inventory_item_id, action, source, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (str(uuid.uuid4()), item_id, action, source, now),
+            )
+
+    def create_pending_account_order_and_reserve(
+        self,
+        *,
+        order_id: str,
+        telegram_user_id: int,
+        username: str,
+        product_code: str,
+        product_name: str,
+        package_name: str,
+        quantity: int,
+        unit_price_vnd: int,
+        total_vnd: int,
+        created_at: str,
+        expire_at: str,
+    ) -> list[str]:
+        """Atomically mirror an account order and reserve its available items.
+
+        Repeating the same order_id returns its existing reservation without
+        allocating any additional inventory.
+        """
+        if quantity <= 0:
+            raise ValueError("quantity must be positive")
+        with self._session() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT id FROM orders WHERE order_id = ?", (order_id,)
+            ).fetchone()
+            if existing:
+                rows = connection.execute(
+                    """
+                    SELECT inventory_item_id FROM order_inventory_items
+                    WHERE order_id = ? AND state IN ('reserved', 'delivered')
+                    ORDER BY created_at, inventory_item_id
+                    """,
+                    (existing["id"],),
+                ).fetchall()
+                return [str(row["inventory_item_id"]) for row in rows]
+
+            product = connection.execute(
+                "SELECT id FROM products WHERE code = ? AND active = 1", (product_code.upper(),)
+            ).fetchone()
+            if not product:
+                raise ValueError(f"Mapped SQLite product is unavailable: {product_code}")
+            items = connection.execute(
+                """
+                SELECT id FROM inventory_items
+                WHERE product_id = ? AND status = 'available'
+                ORDER BY created_at, id
+                LIMIT ?
+                """,
+                (product["id"], quantity),
+            ).fetchall()
+            if len(items) != quantity:
+                raise ValueError(f"Insufficient available inventory for {product_code}")
+
+            internal_order_id = str(uuid.uuid4())
+            connection.execute(
+                """
+                INSERT INTO orders
+                    (id, order_id, telegram_user_id, username, product_id, product_code,
+                     product_name, package_name, quantity, unit_price_vnd, total_vnd,
+                     delivery_type, payment_status, order_status, created_at, expire_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'account', 'pending', 'reserved', ?, ?)
+                """,
+                (
+                    internal_order_id,
+                    order_id,
+                    telegram_user_id,
+                    username,
+                    product["id"],
+                    product_code.upper(),
+                    product_name,
+                    package_name,
+                    quantity,
+                    unit_price_vnd,
+                    total_vnd,
+                    created_at,
+                    expire_at,
+                ),
+            )
+            for item in items:
+                connection.execute(
+                    """
+                    UPDATE inventory_items
+                    SET status = 'reserved', reserved_order_id = ?, reserved_at = ?
+                    WHERE id = ? AND status = 'available'
+                    """,
+                    (order_id, created_at, item["id"]),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO order_inventory_items
+                        (order_id, inventory_item_id, state, created_at)
+                    VALUES (?, ?, 'reserved', ?)
+                    """,
+                    (internal_order_id, item["id"], created_at),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO inventory_movements
+                        (id, inventory_item_id, action, order_id, source, created_at)
+                    VALUES (?, ?, 'reserve', ?, 'account_order_create', ?)
+                    """,
+                    (str(uuid.uuid4()), item["id"], internal_order_id, created_at),
+                )
+        return [str(item["id"]) for item in items]
 
     def reserve_inventory_items(
         self, order_id: str, product_code: str, quantity: int, expire_minutes: int = 5
@@ -248,6 +454,27 @@ class StoreRepository:
             )
         return True
 
+    def mark_account_order_paid_for_fulfillment(self, order_id: str) -> bool:
+        """Mark a reserved account order paid after the existing payment flow confirms it."""
+        now = _utc_now_iso()
+        with self._session() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            order = connection.execute(
+                "SELECT id, payment_status FROM orders WHERE order_id = ?", (order_id,)
+            ).fetchone()
+            if not order:
+                return False
+            if order["payment_status"] == "pending":
+                connection.execute(
+                    """
+                    UPDATE orders
+                    SET payment_status = 'paid', order_status = 'paid', paid_at = ?
+                    WHERE id = ?
+                    """,
+                    (now, order["id"]),
+                )
+            return True
+
     def deliver_reserved_items(self, order_id: str) -> list[str]:
         now = _utc_now_iso()
         with self._session() as connection:
@@ -270,7 +497,17 @@ class StoreRepository:
                 (order["id"],),
             ).fetchall()
             if not items:
-                return []
+                delivered_items = connection.execute(
+                    """
+                    SELECT item.secret_value
+                    FROM order_inventory_items AS oi
+                    JOIN inventory_items AS item ON item.id = oi.inventory_item_id
+                    WHERE oi.order_id = ? AND oi.state = 'delivered'
+                    ORDER BY oi.created_at, item.id
+                    """,
+                    (order["id"],),
+                ).fetchall()
+                return [str(item["secret_value"]) for item in delivered_items]
             for item in items:
                 connection.execute(
                     "UPDATE inventory_items SET status = 'delivered', delivered_order_id = ?, delivered_at = ? WHERE id = ?",

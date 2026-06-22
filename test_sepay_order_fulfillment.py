@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -70,6 +72,7 @@ def pending_order(**overrides):
 class SePayOrderFulfillmentTest(unittest.TestCase):
     def setUp(self) -> None:
         self.previous_private_key = os.environ.get("PRIVATE_KEY_PEM")
+        self.previous_store_db_path = os.environ.get("STORE_DB_PATH")
         self.old_paths = (
             botmod.ORDERS_DB_PATH,
             botmod.INVENTORY_PATH,
@@ -82,12 +85,15 @@ class SePayOrderFulfillmentTest(unittest.TestCase):
         self.root = Path(self.temp_dir.name)
         orders_path = self.root / "orders_db.json"
         inventory_path = self.root / "inventory.json"
+        self.store_db_path = self.root / "store.db"
         botmod.ORDERS_DB_PATH = orders_path
         botmod.INVENTORY_PATH = inventory_path
         bank_checker.ORDERS_DB_PATH = orders_path
         sepay_webhook.ORDERS_DB_PATH = orders_path
         sepay_webhook.PROCESSED_TRANSACTIONS_PATH = self.root / "processed_transactions.json"
         sepay_webhook.UNMATCHED_TRANSACTIONS_PATH = self.root / "unmatched_transactions.json"
+        botmod._initialize_store_db(self.store_db_path)
+        os.environ["STORE_DB_PATH"] = str(self.store_db_path)
         os.environ["PRIVATE_KEY_PEM"] = make_private_key_pem()
         self.license_service = LicenseService(
             private_key_path=self.root / "unused_private_key.pem",
@@ -113,7 +119,41 @@ class SePayOrderFulfillmentTest(unittest.TestCase):
             os.environ.pop("PRIVATE_KEY_PEM", None)
         else:
             os.environ["PRIVATE_KEY_PEM"] = self.previous_private_key
+        if self.previous_store_db_path is None:
+            os.environ.pop("STORE_DB_PATH", None)
+        else:
+            os.environ["STORE_DB_PATH"] = self.previous_store_db_path
         self.temp_dir.cleanup()
+
+    def _reserve_sqlite_chatgpt(self, order: dict[str, object], credential: str) -> None:
+        now = str(order["created_at"])
+        with closing(sqlite3.connect(self.store_db_path)) as connection:
+            with connection:
+                connection.execute(
+                    """
+                    INSERT INTO products
+                        (id, code, name, active, delivery_type, created_at, updated_at)
+                    VALUES (?, ?, ?, 1, 'account', ?, ?)
+                    """,
+                    ("chatgpt-product", "GPT-PLUS-1M-PRIVATE", "CHATGPT", now, now),
+                )
+                connection.execute(
+                    "INSERT INTO inventory_items (id, product_id, secret_value, status, created_at) VALUES (?, ?, ?, 'available', ?)",
+                    ("chatgpt-item", "chatgpt-product", credential, now),
+                )
+        botmod.StoreRepository(self.store_db_path).create_pending_account_order_and_reserve(
+            order_id=str(order["order_id"]),
+            telegram_user_id=int(order["telegram_user_id"]),
+            username=str(order["username"]),
+            product_code="GPT-PLUS-1M-PRIVATE",
+            product_name=str(order["product_name"]),
+            package_name=str(order["package_name"]),
+            quantity=int(order["quantity"]),
+            unit_price_vnd=int(order["unit_price"]),
+            total_vnd=int(order["total"]),
+            created_at=str(order["created_at"]),
+            expire_at=str(order["expire_at"]),
+        )
 
     async def _fulfill(self, order_id: str) -> dict[str, object]:
         return await fulfill_order(self.context, order_id)
@@ -138,10 +178,6 @@ class SePayOrderFulfillmentTest(unittest.TestCase):
 
     def test_sepay_fulfills_account_preserving_email_2fa_password_format(self) -> None:
         credential = "ai@example.com|JBSWY3DPEHPK3PXP|pass123"
-        botmod.INVENTORY_PATH.write_text(
-            json.dumps({"CHATGPT": {"stock": 1, "active": True, "deliverables": [credential]}}, ensure_ascii=False),
-            encoding="utf-8",
-        )
         order = pending_order(
             order_id="ORD-CHATGPT-001",
             product_id="CHATGPT",
@@ -150,6 +186,7 @@ class SePayOrderFulfillmentTest(unittest.TestCase):
             amount=99000,
         )
         botmod.ORDERS_DB_PATH.write_text(json.dumps([order], ensure_ascii=False), encoding="utf-8")
+        self._reserve_sqlite_chatgpt(order, credential)
 
         payload = {"transaction_id": "SEPAY-AI-001", "transferAmount": 99000, "addInfo": f"PAY {order['order_id']}"}
         result = asyncio.run(sepay_webhook.process_sepay_payload(payload, self._fulfill))
@@ -159,6 +196,13 @@ class SePayOrderFulfillmentTest(unittest.TestCase):
         self.assertIn(credential, self.bot.messages[0]["text"])
         updated_order = botmod._find_order(order["order_id"])
         self.assertEqual(updated_order["delivery"], credential)
+        duplicate = asyncio.run(sepay_webhook.process_sepay_payload(payload, self._fulfill))
+        self.assertEqual(duplicate["status"], "duplicate")
+        with closing(sqlite3.connect(self.store_db_path)) as connection:
+            self.assertEqual(
+                connection.execute("SELECT status FROM inventory_items WHERE id = 'chatgpt-item'").fetchone()[0],
+                "delivered",
+            )
 
     def test_sepay_fulfills_year_license_from_common_order(self) -> None:
         machine_id = "TEST-MACHINE-YEAR-001"
