@@ -5,4 +5,7 @@ services:
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python telegram_license_bot.py
+    envVars:
+      - key: STORE_DB_PATH
+        value: /var/data/store.db
     autoDeploy: true

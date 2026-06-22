@@ -4,11 +4,28 @@ import json
 import logging
 import os
 import re
+import sqlite3
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover
+    def load_dotenv(*args, **kwargs):  # type: ignore[override]
+        dotenv_path = Path(__file__).resolve().parent / ".env"
+        if not dotenv_path.exists():
+            return False
+        loaded = False
+        for raw_line in dotenv_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+            loaded = True
+        return loaded
 from telegram.error import BadRequest
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
@@ -119,6 +136,122 @@ def _utc_now_iso() -> str:
     return _utc_now().isoformat()
 
 
+def _initialize_store_db(store_db_path: Path) -> None:
+    """Create the empty SQLite store schema without importing or replacing data."""
+    store_db_path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(store_db_path)) as connection, connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS products (
+                id TEXT PRIMARY KEY,
+                code TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+                delivery_type TEXT NOT NULL CHECK (delivery_type IN ('account', 'license')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                category TEXT NOT NULL DEFAULT '',
+                account_type TEXT NOT NULL DEFAULT '',
+                duration TEXT NOT NULL DEFAULT '',
+                price_vnd INTEGER NOT NULL DEFAULT 0,
+                warranty_days INTEGER NOT NULL DEFAULT 0,
+                note TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS inventory_items (
+                id TEXT PRIMARY KEY,
+                product_id TEXT NOT NULL REFERENCES products(id),
+                secret_value TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'available' CHECK (status IN ('available', 'reserved', 'delivered', 'disabled')),
+                reserved_order_id TEXT,
+                delivered_order_id TEXT,
+                created_at TEXT NOT NULL,
+                reserved_at TEXT,
+                delivered_at TEXT,
+                disabled_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS orders (
+                id TEXT PRIMARY KEY,
+                order_id TEXT NOT NULL UNIQUE,
+                telegram_user_id INTEGER NOT NULL,
+                username TEXT NOT NULL DEFAULT '',
+                product_id TEXT,
+                product_code TEXT NOT NULL,
+                product_name TEXT NOT NULL,
+                package_name TEXT NOT NULL,
+                quantity INTEGER NOT NULL CHECK (quantity > 0),
+                unit_price_vnd INTEGER NOT NULL CHECK (unit_price_vnd >= 0),
+                total_vnd INTEGER NOT NULL CHECK (total_vnd >= 0),
+                delivery_type TEXT NOT NULL CHECK (delivery_type IN ('account', 'license')),
+                machine_id TEXT NOT NULL DEFAULT '',
+                plan TEXT NOT NULL DEFAULT '',
+                payment_method TEXT NOT NULL DEFAULT '',
+                payment_status TEXT NOT NULL DEFAULT 'pending' CHECK (payment_status IN ('pending', 'paid', 'failed', 'refunded', 'expired', 'cancelled')),
+                order_status TEXT NOT NULL DEFAULT 'pending' CHECK (order_status IN ('pending', 'reserved', 'paid', 'delivered', 'manual_delivery', 'cancelled', 'expired', 'failed')),
+                transaction_id TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                expire_at TEXT,
+                paid_at TEXT,
+                delivered_at TEXT,
+                delivery_ref TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS order_inventory_items (
+                order_id TEXT NOT NULL REFERENCES orders(id),
+                inventory_item_id TEXT NOT NULL UNIQUE REFERENCES inventory_items(id),
+                state TEXT NOT NULL CHECK (state IN ('reserved', 'delivered', 'released')),
+                created_at TEXT NOT NULL,
+                delivered_at TEXT,
+                released_at TEXT,
+                PRIMARY KEY (order_id, inventory_item_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS payment_transactions (
+                id TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                provider_transaction_id TEXT NOT NULL,
+                order_id TEXT REFERENCES orders(id),
+                amount_vnd INTEGER NOT NULL CHECK (amount_vnd >= 0),
+                description TEXT NOT NULL DEFAULT '',
+                raw_payload_json TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL CHECK (status IN ('received', 'matched', 'processed', 'duplicate', 'unmatched', 'failed')),
+                received_at TEXT NOT NULL,
+                processed_at TEXT,
+                UNIQUE (provider, provider_transaction_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS inventory_movements (
+                id TEXT PRIMARY KEY,
+                inventory_item_id TEXT NOT NULL REFERENCES inventory_items(id),
+                action TEXT NOT NULL CHECK (action IN ('import', 'reserve', 'deliver', 'release', 'disable')),
+                order_id TEXT REFERENCES orders(id),
+                admin_telegram_id INTEGER,
+                source TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_inventory_items_product_status ON inventory_items(product_id, status);
+            CREATE INDEX IF NOT EXISTS idx_orders_payment_status_expire_at ON orders(payment_status, expire_at);
+            CREATE INDEX IF NOT EXISTS idx_orders_telegram_user_id_created_at ON orders(telegram_user_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_payment_transactions_order_id ON payment_transactions(order_id);
+            CREATE INDEX IF NOT EXISTS idx_inventory_movements_item_created_at ON inventory_movements(inventory_item_id, created_at);
+            """
+        )
+        existing_columns = {row[1] for row in connection.execute("PRAGMA table_info(products)")}
+        for name, definition in {
+            "category": "TEXT NOT NULL DEFAULT ''",
+            "account_type": "TEXT NOT NULL DEFAULT ''",
+            "duration": "TEXT NOT NULL DEFAULT ''",
+            "price_vnd": "INTEGER NOT NULL DEFAULT 0",
+            "warranty_days": "INTEGER NOT NULL DEFAULT 0",
+            "note": "TEXT NOT NULL DEFAULT ''",
+        }.items():
+            if name not in existing_columns:
+                connection.execute(f"ALTER TABLE products ADD COLUMN {name} {definition}")
+
+
 def _format_vnd(amount: int) -> str:
     return f"{int(amount):,}".replace(",", ".")
 
@@ -203,7 +336,7 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton("🎁 Sản phẩm", callback_data="menu_products"),
-                InlineKeyboardButton("🎁 TOOL AI FREE 90 NGÀY", callback_data="menu_ai_daily"),
+                InlineKeyboardButton("🎁 TOOL AI TRIAL 10 NGÀY", callback_data="menu_ai_daily"),
             ],
             [
                 InlineKeyboardButton("📦 Đơn hàng", callback_data="menu_orders"),
@@ -219,7 +352,7 @@ def _ai_daily_keyboard() -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton("📥 TẢI TOOL", url=os.environ.get("DOWNLOAD_URL", DEFAULT_DOWNLOAD_URL)),
-                InlineKeyboardButton("🎁 NHẬN LICENSE FREE 90 NGÀY", callback_data="menu_free"),
+                InlineKeyboardButton("🎁 NHẬN LICENSE TRIAL 10 NGÀY", callback_data="menu_free"),
             ],
             [
                 InlineKeyboardButton("📖 HƯỚNG DẪN", callback_data="menu_help"),
@@ -774,7 +907,7 @@ async def _send_free_help(update: Update, context: ContextTypes.DEFAULT_TYPE, *,
             machine_id = str(user_record.get("machine_id", "")).strip().upper() or None
 
     text = (
-        "Mở tool -> tab Kích Hoạt -> bấm Nhận License Free 90 Ngày.\n\n"
+        "Mở tool -> tab Kích Hoạt -> bấm Nhận License Trial 10 Ngày.\n\n"
         "Bot sẽ tự cấp license ngay nếu link từ tool có Machine ID hợp lệ."
     )
     if machine_id:
@@ -797,7 +930,7 @@ async def _handle_free_license_click(update: Update, context: ContextTypes.DEFAU
     if not machine_id:
         await update.effective_message.reply_text(
             "Chưa có Machine ID để cấp license.\n\n"
-            "Vui lòng mở tool -> tab Kích Hoạt -> bấm Nhận License Free 90 Ngày, "
+            "Vui lòng mở tool -> tab Kích Hoạt -> bấm Nhận License Trial 10 Ngày, "
             "hoặc copy link nhận license free trong tab Kích Hoạt.",
             reply_markup=_upgrade_permanent_keyboard_for_machine(machine_id),
         )
@@ -813,7 +946,7 @@ async def _handle_free_license_click(update: Update, context: ContextTypes.DEFAU
         license_service.update_user_from_license(result.record or {}, source="free_button")
         record = result.record or {}
         await update.effective_message.reply_text(
-            "Bạn được tặng 90 ngày miễn phí.\n"
+            "Bạn được tặng trial 10 ngày.\n"
             f"Machine ID: {machine_id}\n"
             f"Hạn dùng: {record.get('expire_date', '')}\n"
             "Bot đã gửi file license bên dưới.\n"
@@ -825,7 +958,7 @@ async def _handle_free_license_click(update: Update, context: ContextTypes.DEFAU
         return
 
     await update.effective_message.reply_text(
-        "Machine ID này đã nhận free 90 ngày.",
+        "Machine ID này đã nhận trial 10 ngày.",
         reply_markup=_upgrade_permanent_keyboard_for_machine(machine_id),
     )
 
@@ -838,7 +971,7 @@ async def _send_help(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit
         "Mở AI DAILY VIDEO CREATOR.\n\n"
         "Bước 3:\n"
         "Bấm:\n"
-        "🎁 NHẬN LICENSE FREE 90 NGÀY\n\n"
+        "🎁 NHẬN LICENSE TRIAL 10 NGÀY\n\n"
         "Bước 4:\n"
         "Bot tự cấp license.\n\n"
         "Bước 5:\n"
@@ -944,7 +1077,7 @@ async def _handle_machine_id_free_license(update: Update, context: ContextTypes.
             license_service.update_user_from_license(result.record or {}, source=f"{source}_free")
             record = result.record or {}
             await update.effective_message.reply_text(
-                "Bạn được tặng 90 ngày miễn phí.\n"
+                "Bạn được tặng trial 10 ngày.\n"
                 f"Machine ID: {machine_id}\n"
                 f"Hạn dùng: {record.get('expire_date', '')}\n"
                 "Bot đã gửi file license bên dưới.\n"
@@ -964,7 +1097,7 @@ async def _handle_machine_id_free_license(update: Update, context: ContextTypes.
         reminder_state="active",
     )
     await update.effective_message.reply_text(
-        "Machine ID này đã nhận free 90 ngày.",
+        "Machine ID này đã nhận trial 10 ngày.",
         reply_markup=_upgrade_permanent_keyboard_for_machine(machine_id),
     )
     return True
@@ -982,7 +1115,7 @@ async def _maybe_issue_deeplink_license(update: Update, context: ContextTypes.DE
             license_service.update_user_from_license(result.record or {}, source="deeplink_free")
             record = result.record or {}
             await update.effective_message.reply_text(
-                "Bạn được tặng 90 ngày miễn phí.\n"
+                "Bạn được tặng trial 10 ngày.\n"
                 f"Machine ID: {machine_id}\n"
                 f"Hạn dùng: {record.get('expire_date', '')}\n"
                 "Bot đã gửi file license bên dưới.\n"
@@ -1002,7 +1135,7 @@ async def _maybe_issue_deeplink_license(update: Update, context: ContextTypes.DE
         reminder_state="active",
     )
     await update.effective_message.reply_text(
-        "Machine ID này đã nhận free 90 ngày.",
+        "Machine ID này đã nhận trial 10 ngày.",
         reply_markup=_upgrade_permanent_keyboard_for_machine(machine_id),
     )
     return True
@@ -1097,7 +1230,7 @@ async def cmd_grant_free(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     license_service.update_user_from_license(result.record or {}, source="admin_grant_free")
     await update.effective_message.reply_text(
-        "Thanh cong. Da cap free 90 ngay.\n"
+        "Thanh cong. Da cap trial 10 ngay.\n"
         f"Machine ID: {machine_id}\n"
         f"Expire date: {result.record.get('expire_date', '') if result.record else ''}"
     )
@@ -1373,6 +1506,57 @@ async def cmd_pending_orders(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.effective_message.reply_text("\n".join(lines))
 
 
+async def cmd_dbstock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show SQLite inventory to configured administrators without changing sales flow."""
+    telegram_user_id = update.effective_user.id if update.effective_user else "unknown"
+    if not update.effective_user or not _is_admin(
+        update.effective_user.id, context.application.bot_data["admin_ids"]
+    ):
+        await update.effective_message.reply_text(
+            f"Khong co quyen. Telegram ID cua ban: {telegram_user_id}"
+        )
+        return
+    store_db_path: Path = context.application.bot_data["store_db_path"]
+    if not store_db_path.is_file():
+        await update.effective_message.reply_text(
+            f"Khong tim thay store.db: {store_db_path}"
+        )
+        return
+    try:
+        with closing(sqlite3.connect(f"file:{store_db_path.as_posix()}?mode=ro", uri=True)) as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    product.code AS product_code,
+                    product.name AS product_name,
+                    COALESCE(product.price_vnd, 0) AS price_vnd,
+                    COUNT(item.id) AS available_count,
+                    product.active AS active
+                FROM products AS product
+                LEFT JOIN inventory_items AS item
+                    ON item.product_id = product.id AND item.status = 'available'
+                GROUP BY product.id, product.code, product.name, product.price_vnd, product.active
+                ORDER BY product.code
+                """
+            ).fetchall()
+    except sqlite3.Error as exc:
+        logger.exception("dbstock read failed")
+        await update.effective_message.reply_text(f"Khong the doc store.db: {exc}")
+        return
+
+    if not rows:
+        await update.effective_message.reply_text("store.db chua co san pham nao.")
+        return
+    lines = ["TON KHO SQLITE"]
+    for product_code, product_name, price_vnd, available_count, active in rows:
+        active_label = "active" if active else "inactive"
+        lines.append(
+            f"{product_code} | {product_name} | {_format_vnd(int(price_vnd))}d | "
+            f"available: {available_count} | {active_label}"
+        )
+    await update.effective_message.reply_text("\n".join(lines))
+
+
 async def run_bank_check(context: ContextTypes.DEFAULT_TYPE) -> list[dict[str, object]]:
     async def _fulfill(order_id: str) -> dict[str, object]:
         return await fulfill_order(context, order_id)
@@ -1566,6 +1750,7 @@ def _load_config() -> dict[str, str]:
         "PRIVATE_KEY_PATH": os.environ.get("PRIVATE_KEY_PATH", "private_key.pem").strip(),
         "LICENSE_DB_PATH": os.environ.get("LICENSE_DB_PATH", "licenses_db.json").strip(),
         "LICENSE_OUTPUT_DIR": os.environ.get("LICENSE_OUTPUT_DIR", "issued_licenses").strip(),
+        "STORE_DB_PATH": os.environ.get("STORE_DB_PATH", "database/store.db").strip(),
         "FREE_LICENSE_DAYS": os.environ.get("FREE_LICENSE_DAYS", str(DEFAULT_FREE_DAYS)).strip(),
         "PAID_LICENSE_PRICE": os.environ.get("PAID_LICENSE_PRICE", str(DEFAULT_PAID_PRICE)).strip(),
         "BANK_NAME": os.environ.get("BANK_NAME", "").strip(),
@@ -1598,11 +1783,19 @@ def build_application() -> Application:
             qr_url=cfg["BANK_QR_URL"],
         )
     )
+    store_db_path = Path(cfg["STORE_DB_PATH"]).expanduser()
+    if not store_db_path.is_absolute():
+        store_db_path = PROJECT_ROOT / store_db_path
+    try:
+        _initialize_store_db(store_db_path)
+    except sqlite3.Error as exc:
+        raise SystemExit(f"Cannot initialize store database at {store_db_path}: {exc}") from exc
 
     app = Application.builder().token(cfg["BOT_TOKEN"]).post_init(post_init).build()
     app.bot_data["admin_ids"] = admin_ids
     app.bot_data["license_service"] = license_service
     app.bot_data["payment_service"] = payment_service
+    app.bot_data["store_db_path"] = store_db_path
     app.bot_data["bank_provider"] = cfg["BANK_PROVIDER"]
     app.bot_data["download_url"] = cfg["DOWNLOAD_URL"]
     app.bot_data["support_username"] = cfg["SUPPORT_USERNAME"] or "@Aidaily79"
@@ -1616,6 +1809,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("cancel_order", cmd_cancel_order))
     app.add_handler(CommandHandler("order", cmd_order))
     app.add_handler(CommandHandler("pending_orders", cmd_pending_orders))
+    app.add_handler(CommandHandler("dbstock", cmd_dbstock))
     app.add_handler(CommandHandler("check_bank", cmd_check_bank))
     app.add_handler(CommandHandler("transactions", cmd_transactions))
     app.add_handler(CommandHandler("revoke", cmd_revoke))

@@ -1,4 +1,6 @@
 .env
+node_modules/
+database/*.db
 private_key.pem
 licenses_db.json
 issued_licenses/
