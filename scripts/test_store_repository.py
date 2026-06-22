@@ -200,6 +200,34 @@ class StoreRepositoryTest(unittest.TestCase):
         self.assertEqual((second_import["credentials_added"], second_import["credentials_duplicate"], second_import["row_errors"]), (0, 2, 0))
         self.assertEqual(self.store.get_stock_count("IMPORT_PRODUCT"), 2)
 
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            with connection:
+                connection.execute(
+                    """
+                    CREATE TRIGGER reject_row_failure
+                    BEFORE INSERT ON inventory_items
+                    WHEN (SELECT code FROM products WHERE id = NEW.product_id) = 'ROW_FAILURE'
+                    BEGIN
+                        SELECT RAISE(ABORT, 'forced row failure');
+                    END
+                    """
+                )
+        row_isolation_path = Path(self.temp_dir.name) / "row-isolation.csv"
+        with row_isolation_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(REQUIRED_COLUMNS)
+            writer.writerow(["ROW_SUCCESS", "AI", "Row Success", "private", "30D", 100, 7, "success1@example.com|pass", "", 1])
+            writer.writerow(["ROW_FAILURE", "AI", "Row Failure", "private", "30D", 100, 7, "failure@example.com|pass", "", 1])
+            writer.writerow(["ROW_SUCCESS", "AI", "Row Success", "private", "30D", 100, 7, "success2@example.com|pass", "", 1])
+        row_isolation = import_inventory(row_isolation_path, self.db_path)
+        self.assertEqual(
+            (row_isolation["products_created"], row_isolation["credentials_added"], row_isolation["invalid_rows"]),
+            (1, 2, 1),
+        )
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            self.assertIsNone(connection.execute("SELECT id FROM products WHERE code = 'ROW_FAILURE'").fetchone())
+        self.assertEqual(self.store.get_stock_count("ROW_SUCCESS"), 2)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

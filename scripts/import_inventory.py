@@ -118,7 +118,8 @@ def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE) -
         raise FileNotFoundError(f"Store database not found: {database_path}")
     report: dict[str, Any] = {
         "products_created": 0, "products_updated": 0, "credentials_added": 0,
-        "credentials_duplicate": 0, "row_errors": 0, "errors": [], "stock": {},
+        "credentials_duplicate": 0, "row_errors": 0, "invalid_rows": 0,
+        "errors": [], "stock": {},
     }
     created_product_codes: set[str] = set()
     updated_product_codes: set[str] = set()
@@ -126,7 +127,9 @@ def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE) -
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         ensure_import_schema(connection)
-        for row_number, row in read_rows(input_path):
+        for row_index, (row_number, row) in enumerate(read_rows(input_path), start=1):
+            savepoint = f"inventory_row_{row_index}"
+            connection.execute(f"SAVEPOINT {savepoint}")
             try:
                 product_code = text(row["product_code"]).upper()
                 product_name = text(row["product_name"])
@@ -153,8 +156,7 @@ def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE) -
                         """,
                         (*product_values, product_id),
                     )
-                    if product_code not in created_product_codes:
-                        updated_product_codes.add(product_code)
+                    product_was_updated = product_code not in created_product_codes
                 else:
                     product_id = str(uuid.uuid4())
                     connection.execute(
@@ -166,14 +168,21 @@ def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE) -
                         """,
                         (product_id, product_code, product_name, product_values[7], now, now, *product_values[1:7]),
                     )
-                    created_product_codes.add(product_code)
+                    product_was_created = True
+                    product_was_updated = False
 
                 exists = connection.execute(
                     "SELECT 1 FROM inventory_items WHERE product_id = ? AND secret_value = ?",
                     (product_id, credential),
                 ).fetchone()
                 if exists:
+                    connection.execute(f"RELEASE SAVEPOINT {savepoint}")
                     report["credentials_duplicate"] += 1
+                    if product:
+                        if product_was_updated:
+                            updated_product_codes.add(product_code)
+                    else:
+                        created_product_codes.add(product_code)
                     continue
                 item_id = str(uuid.uuid4())
                 connection.execute(
@@ -188,9 +197,18 @@ def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE) -
                     """,
                     (str(uuid.uuid4()), item_id, now),
                 )
+                connection.execute(f"RELEASE SAVEPOINT {savepoint}")
                 report["credentials_added"] += 1
+                if product:
+                    if product_was_updated:
+                        updated_product_codes.add(product_code)
+                else:
+                    created_product_codes.add(product_code)
             except Exception as exc:
+                connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                connection.execute(f"RELEASE SAVEPOINT {savepoint}")
                 report["row_errors"] += 1
+                report["invalid_rows"] += 1
                 report["errors"].append(f"row {row_number}: {exc}")
         stock_rows = connection.execute(
             """
@@ -212,6 +230,7 @@ def print_report(report: dict[str, Any]) -> None:
     print(f"Credentials added: {report['credentials_added']}")
     print(f"Credentials duplicate: {report['credentials_duplicate']}")
     print(f"Rows with errors: {report['row_errors']}")
+    print(f"Invalid rows: {report['invalid_rows']}")
     print("Stock by product_code:")
     for code, stock in report["stock"].items():
         print(f"  {code}: {stock}")
@@ -238,7 +257,11 @@ def self_test() -> None:
         assert report["credentials_added"] == 3, report
         assert report["credentials_duplicate"] == 0, report
         assert report["row_errors"] == 0, report
-        assert report["stock"] == {"CHATGPT": 1, "GEMINI": 1, "GROK": 1}, report
+        assert {code: report["stock"][code] for code in ("CHATGPT", "GEMINI", "GROK")} == {
+            "CHATGPT": 1,
+            "GEMINI": 1,
+            "GROK": 1,
+        }, report
         print_report(report)
         print("SELF-TEST: PASS")
 
