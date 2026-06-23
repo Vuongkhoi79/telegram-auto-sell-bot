@@ -819,13 +819,21 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
     unit_price = int(package["price_vnd"])
     now = _utc_now()
     reservation_product_code = _reservation_product_code(product_name, str(package.get("product_code", "")))
-    use_sqlite_reservation = bool(package.get("reservation_sqlite"))
+    reserve_with_sqlite = False
+    reservation_repo: StoreRepository | None = None
+    if reservation_product_code:
+        try:
+            reservation_repo = StoreRepository(_resolve_store_db_path())
+            reservation_product = reservation_repo.get_product_details(reservation_product_code)
+            reserve_with_sqlite = bool(reservation_product and reservation_product.get("active"))
+        except (OSError, RuntimeError, sqlite3.Error):
+            reserve_with_sqlite = False
     logger.debug(
-        "SELECTED PRODUCT reservation_product_code=%s package_product_code=%s package_source=%s reservation_sqlite=%s display_name=%s available_count=%s unit_price=%s",
+        "SELECTED PRODUCT reservation_product_code=%s package_product_code=%s package_source=%s reserve_with_sqlite=%s display_name=%s available_count=%s unit_price=%s",
         reservation_product_code,
         package.get("product_code"),
         package.get("source"),
-        use_sqlite_reservation,
+        reserve_with_sqlite,
         package.get("display_name"),
         package.get("available_count"),
         unit_price,
@@ -834,7 +842,7 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
         "order_id": _make_order_id(product_name),
         "telegram_user_id": int(user.id) if user else "",
         "username": _user_label(user) if user else "",
-        "product_id": reservation_product_code if use_sqlite_reservation else product_name.upper(),
+        "product_id": reservation_product_code if reserve_with_sqlite else product_name.upper(),
         "product_name": product_name,
         "package_name": str(package["display_name"]),
         "product_code": reservation_product_code,
@@ -854,7 +862,7 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
         "delivered_at": "",
         "delivery": "",
     }
-    product_code = reservation_product_code if use_sqlite_reservation else ""
+    product_code = reservation_product_code if reserve_with_sqlite else ""
     if product_code:
         try:
             logger.debug(
@@ -866,7 +874,8 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
                 order["unit_price"],
                 order["total"],
             )
-            StoreRepository(_resolve_store_db_path()).create_pending_account_order_and_reserve(
+            assert reservation_repo is not None
+            reservation_repo.create_pending_account_order_and_reserve(
                 order_id=str(order["order_id"]),
                 telegram_user_id=int(order["telegram_user_id"]),
                 username=str(order["username"]),
@@ -879,6 +888,9 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
                 created_at=str(order["created_at"]),
                 expire_at=str(order["expire_at"]),
             )
+            order["product_id"] = reservation_product_code
+            order["product_code"] = reservation_product_code
+            order["inventory_source"] = "sqlite"
             logger.debug(
                 "AFTER create_pending_account_order_and_reserve order_id=%s product_code=%s",
                 order["order_id"],
@@ -891,7 +903,6 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
                 exc,
             )
             raise InventoryReservationError("Sản phẩm hiện đã hết hàng, vui lòng quay lại sau.") from exc
-        order["inventory_source"] = "sqlite"
     else:
         # Missing SQLite products intentionally retain the legacy JSON path.
         order["inventory_source"] = "json"
