@@ -209,6 +209,62 @@ class SePayOrderFulfillmentTest(unittest.TestCase):
                 "delivered",
             )
 
+    def test_sepay_matches_normalized_order_id_without_hyphens(self) -> None:
+        order = pending_order(
+            order_id="ORD-20260623013908-GROKSUPE-8A31FC7F",
+            product_id="GROK SUPER",
+            product_name="GROK SUPER",
+            total=99000,
+            amount=99000,
+        )
+        botmod.ORDERS_DB_PATH.write_text(json.dumps([order], ensure_ascii=False), encoding="utf-8")
+        credential = "grok@example.com|pass123"
+        now = order["created_at"]
+        with closing(sqlite3.connect(self.store_db_path)) as connection:
+            with connection:
+                connection.execute(
+                    """
+                    INSERT INTO products
+                        (id, code, name, active, delivery_type, created_at, updated_at)
+                    VALUES (?, ?, ?, 1, 'account', ?, ?)
+                    """,
+                    ("grok-product", "GROK-SUPER-1M-PRIVATE", "GROK SUPER", now, now),
+                )
+                connection.execute(
+                    "INSERT INTO inventory_items (id, product_id, secret_value, status, created_at) VALUES (?, ?, ?, 'available', ?)",
+                    ("grok-item", "grok-product", credential, now),
+                )
+        botmod.StoreRepository(self.store_db_path).create_pending_account_order_and_reserve(
+            order_id=str(order["order_id"]),
+            telegram_user_id=int(order["telegram_user_id"]),
+            username=str(order["username"]),
+            product_code="GROK-SUPER-1M-PRIVATE",
+            product_name=str(order["product_name"]),
+            package_name=str(order["package_name"]),
+            quantity=int(order["quantity"]),
+            unit_price_vnd=int(order["unit_price"]),
+            total_vnd=int(order["total"]),
+            created_at=str(order["created_at"]),
+            expire_at=str(order["expire_at"]),
+        )
+        order["inventory_source"] = "sqlite"
+        botmod.ORDERS_DB_PATH.write_text(json.dumps([order], ensure_ascii=False), encoding="utf-8")
+
+        payload = {
+            "transaction_id": "SEPAY-GROK-001",
+            "transferAmount": 99000,
+            "description": "ORD20260623013908GROKSUPE8A31FC7F",
+        }
+        result = asyncio.run(sepay_webhook.process_sepay_payload(payload, self._fulfill))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "paid")
+        self.assertEqual(result["order_id"], order["order_id"])
+        self.assertEqual(result["fulfillment"]["type"], "sales_order")
+        self.assertIn(credential, self.bot.messages[0]["text"])
+        updated_order = botmod._find_order(order["order_id"])
+        self.assertEqual(updated_order["delivery"], credential)
+
     def test_sepay_fulfills_year_license_from_common_order(self) -> None:
         machine_id = "TEST-MACHINE-YEAR-001"
         order = pending_order(

@@ -76,12 +76,22 @@ def extract_transaction_id(payload: dict[str, Any]) -> str:
     return f"SEPAY-{amount}-{digest}"
 
 
+def normalize_order_token(value: str) -> str:
+    return re.sub(r"[\s-]+", "", str(value or "")).upper()
+
+
 def find_pending_order(description: str, amount: int) -> dict[str, Any] | None:
+    normalized_description = normalize_order_token(description)
     for order in bank_checker.load_json_list(ORDERS_DB_PATH):
         order_id = str(order.get("order_id", ""))
         if order.get("payment_status") != "pending":
             continue
-        if not order_id or order_id not in description:
+        if not order_id:
+            continue
+        normalized_order_id = normalize_order_token(order_id)
+        if not normalized_order_id:
+            continue
+        if normalized_order_id not in normalized_description and order_id not in str(description):
             continue
         try:
             total = int(order.get("total", 0))
