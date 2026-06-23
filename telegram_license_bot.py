@@ -583,18 +583,22 @@ def _telegram_product_key_for_sqlite_code(product_code: str) -> str:
     return normalized_code
 
 
-def _catalog_product_keys() -> list[str]:
+def _menu_available_count(product_key: str) -> int:
+    normalized_key = product_key.upper()
+    product_code = TELEGRAM_PRODUCT_CODE_MAP.get(normalized_key)
+    if not product_code:
+        return 0
     path = _resolve_store_db_path()
     if not path.is_file():
-        return list(PRODUCT_ORDER)
+        return 0
     try:
-        products = StoreRepository(path).list_active_catalog_products()
-    except (OSError, RuntimeError, sqlite3.Error) as exc:
-        logger.warning("SQLite catalog lookup failed; using PRODUCT_ORDER: %s", exc)
-        return list(PRODUCT_ORDER)
-    if not products:
-        return list(PRODUCT_ORDER)
-    return [_telegram_product_key_for_sqlite_code(str(product["code"])) for product in products]
+        repository = StoreRepository(path)
+        product = repository.get_product_details(product_code)
+        if not product or not product["active"]:
+            return 0
+        return repository.get_stock_count(product_code)
+    except (OSError, RuntimeError, sqlite3.Error):
+        return 0
 
 
 def _load_orders() -> list[dict[str, object]]:
@@ -797,21 +801,9 @@ def _chunked(items: list[InlineKeyboardButton], size: int) -> list[list[InlineKe
 
 
 def _catalog_category_items(product_group: str = "account") -> list[dict[str, object]]:
-    try:
-        categories = StoreRepository(_resolve_store_db_path()).list_visible_categories(product_group)
-    except (OSError, RuntimeError, sqlite3.Error):
-        categories = []
-    if categories:
-        normalized_items: list[dict[str, object]] = []
-        for item in categories:
-            normalized_item = dict(item)
-            category_key = str(normalized_item.get("category_key", "")).strip()
-            if category_key:
-                direct_count = get_available_count(category_key)
-                normalized_item["available_count"] = max(int(normalized_item.get("available_count") or 0), direct_count)
-            normalized_items.append(normalized_item)
-        return normalized_items
-    return [{"category_key": key, "available_count": get_available_count(key)} for key in PRODUCT_ORDER] if product_group == "account" else []
+    if product_group != "account":
+        return []
+    return [{"category_key": key, "available_count": _menu_available_count(key)} for key in PRODUCT_ORDER]
 
 
 def _product_menu_keyboard(product_group: str = "account") -> InlineKeyboardMarkup:
@@ -835,7 +827,7 @@ def _product_list_text() -> str:
     lines = ["🎁 SẢN PHẨM", ""]
     for item in _catalog_category_items():
         product_name = str(item["category_key"]).upper()
-        label, _, _ = get_product_status_for_menu(product_name)
+        label = f"{'🟢' if int(item['available_count'] or 0) > 0 else '🔴'} {product_name}"
         lines.append(label)
     return "\n".join(lines)
 

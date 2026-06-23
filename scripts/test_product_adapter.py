@@ -94,10 +94,13 @@ def main() -> None:
             button.callback_data for row in menu.inline_keyboard for button in row
         }
         assert "product:CHATGPT" in menu_callbacks
-        assert "product:VEO3 ULTRA" not in menu_callbacks
-        assert "product:CLAUDE AI" not in menu_callbacks
+        assert "product:VEO3 ULTRA" in menu_callbacks
+        assert "product:CANVA" in menu_callbacks
+        assert "product:AI" not in menu_callbacks
+        assert "🔴 AI" not in bot._product_list_text()
+        assert "🟢 AI" not in bot._product_list_text()
         assert "🟢 CHATGPT" in bot._product_list_text()
-        assert "VEO3 ULTRA" not in bot._product_list_text()
+        assert "🔴 CANVA" in bot._product_list_text()
 
         direct_db_path = root / "direct-store.db"
         bot._initialize_store_db(direct_db_path)
@@ -121,7 +124,9 @@ def main() -> None:
             button.callback_data for row in bot._product_menu_keyboard().inline_keyboard for button in row
         }
         assert "product:CHATGPT" in direct_menu_callbacks
+        assert "product:CANVA" in direct_menu_callbacks
         assert bot.get_available_count("CHATGPT", store_db_path=direct_db_path) == 3
+        assert bot.get_available_count("CANVA", store_db_path=direct_db_path) == 0
 
         empty_db_path = root / "empty-store.db"
         bot._initialize_store_db(empty_db_path)
