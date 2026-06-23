@@ -30,6 +30,13 @@ CATALOG_COLUMNS = {
     "description": "TEXT NOT NULL DEFAULT ''",
 }
 
+ORDER_COLUMNS = {
+    "inventory_source": "TEXT NOT NULL DEFAULT 'sqlite'",
+    "duration_days": "INTEGER",
+    "expire_date": "TEXT NOT NULL DEFAULT ''",
+    "lifetime": "INTEGER NOT NULL DEFAULT 0 CHECK (lifetime IN (0, 1))",
+}
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(microsecond=0)
@@ -80,6 +87,10 @@ class StoreRepository:
             for name, definition in CATALOG_COLUMNS.items():
                 if name not in columns:
                     connection.execute(f"ALTER TABLE products ADD COLUMN {name} {definition}")
+            order_columns = {row[1] for row in connection.execute("PRAGMA table_info(orders)")}
+            for name, definition in ORDER_COLUMNS.items():
+                if name not in order_columns:
+                    connection.execute(f"ALTER TABLE orders ADD COLUMN {name} {definition}")
 
     def list_active_products(self) -> list[dict[str, Any]]:
         with self._session() as connection:
@@ -101,17 +112,188 @@ class StoreRepository:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def _order_row_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        delivery = str(data.get("delivery_ref", "") or "")
+        data["delivery"] = delivery
+        data["license_file"] = delivery
+        data["inventory_source"] = str(data.get("inventory_source", "") or "sqlite")
+        data["price_vnd"] = int(data.get("unit_price_vnd", 0) or 0)
+        data["unit_price"] = int(data.get("unit_price_vnd", 0) or 0)
+        data["amount"] = int(data.get("total_vnd", 0) or 0)
+        data["total"] = int(data.get("total_vnd", 0) or 0)
+        data["status"] = str(data.get("payment_status", "") or "pending")
+        data["package_code"] = str(data.get("product_code", "") or "")
+        data["expire_date"] = str(data.get("expire_date", "") or "")
+        data["lifetime"] = bool(int(data.get("lifetime", 0) or 0))
+        return data
+
+    def list_orders(self) -> list[dict[str, Any]]:
+        with self._session() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, order_id, telegram_user_id, username, product_id, product_code,
+                       product_name, package_name, quantity, unit_price_vnd, total_vnd,
+                       delivery_type, machine_id, plan, payment_method, payment_status,
+                       order_status, transaction_id, created_at, expire_at, paid_at,
+                       delivered_at, delivery_ref, inventory_source, duration_days,
+                       expire_date, lifetime
+                FROM orders
+                ORDER BY created_at, order_id
+                """
+            ).fetchall()
+        return [self._order_row_to_dict(row) for row in rows]
+
+    def find_order(self, order_id: str) -> dict[str, Any] | None:
+        with self._session() as connection:
+            row = connection.execute(
+                """
+                SELECT id, order_id, telegram_user_id, username, product_id, product_code,
+                       product_name, package_name, quantity, unit_price_vnd, total_vnd,
+                       delivery_type, machine_id, plan, payment_method, payment_status,
+                       order_status, transaction_id, created_at, expire_at, paid_at,
+                       delivered_at, delivery_ref, inventory_source, duration_days,
+                       expire_date, lifetime
+                FROM orders
+                WHERE order_id = ?
+                """,
+                (order_id,),
+            ).fetchone()
+        return self._order_row_to_dict(row) if row else None
+
+    def list_pending_orders(self) -> list[dict[str, Any]]:
+        with self._session() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, order_id, telegram_user_id, username, product_id, product_code,
+                       product_name, package_name, quantity, unit_price_vnd, total_vnd,
+                       delivery_type, machine_id, plan, payment_method, payment_status,
+                       order_status, transaction_id, created_at, expire_at, paid_at,
+                       delivered_at, delivery_ref, inventory_source, duration_days,
+                       expire_date, lifetime
+                FROM orders
+                WHERE payment_status = 'pending'
+                ORDER BY created_at, order_id
+                """
+            ).fetchall()
+        return [self._order_row_to_dict(row) for row in rows]
+
+    def upsert_order(self, order: dict[str, Any]) -> dict[str, Any]:
+        order_id = str(order.get("order_id", "")).strip()
+        if not order_id:
+            raise ValueError("order_id must not be empty")
+        now = _utc_now_iso()
+        total_vnd = int(order.get("total_vnd", order.get("total", order.get("amount", 0))) or 0)
+        unit_price_vnd = int(order.get("unit_price_vnd", order.get("unit_price", order.get("price_vnd", 0))) or 0)
+        delivery_ref = str(order.get("delivery_ref", order.get("delivery", order.get("license_file", ""))) or "")
+        payload = (
+            str(order.get("id", uuid.uuid4())),
+            order_id,
+            int(order.get("telegram_user_id", 0) or 0),
+            str(order.get("username", "") or ""),
+            str(order.get("product_id", "") or ""),
+            str(order.get("product_code", order.get("package_code", "")) or ""),
+            str(order.get("product_name", "") or ""),
+            str(order.get("package_name", "") or ""),
+            int(order.get("quantity", 1) or 1),
+            unit_price_vnd,
+            total_vnd,
+            str(order.get("delivery_type", "account") or "account"),
+            str(order.get("machine_id", "") or ""),
+            str(order.get("plan", "") or ""),
+            str(order.get("payment_method", "") or ""),
+            str(order.get("payment_status", "pending") or "pending"),
+            str(order.get("order_status", order.get("payment_status", "pending")) or "pending"),
+            str(order.get("transaction_id", "") or ""),
+            str(order.get("created_at", now) or now),
+            str(order.get("expire_at", "") or ""),
+            str(order.get("paid_at", "") or ""),
+            str(order.get("delivered_at", "") or ""),
+            delivery_ref,
+            str(order.get("inventory_source", "sqlite") or "sqlite"),
+            order.get("duration_days"),
+            str(order.get("expire_date", "") or ""),
+            1 if bool(order.get("lifetime", False)) else 0,
+        )
+        with self._session() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute("SELECT id FROM orders WHERE order_id = ?", (order_id,)).fetchone()
+            if existing:
+                connection.execute(
+                    """
+                    UPDATE orders
+                    SET telegram_user_id = ?, username = ?, product_id = ?, product_code = ?,
+                        product_name = ?, package_name = ?, quantity = ?, unit_price_vnd = ?,
+                        total_vnd = ?, delivery_type = ?, machine_id = ?, plan = ?,
+                        payment_method = ?, payment_status = ?, order_status = ?, transaction_id = ?,
+                        created_at = ?, expire_at = ?, paid_at = ?, delivered_at = ?, delivery_ref = ?,
+                        inventory_source = ?, duration_days = ?, expire_date = ?, lifetime = ?
+                    WHERE order_id = ?
+                    """,
+                    payload[2:] + (order_id,),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO orders
+                        (id, order_id, telegram_user_id, username, product_id, product_code,
+                         product_name, package_name, quantity, unit_price_vnd, total_vnd,
+                         delivery_type, machine_id, plan, payment_method, payment_status,
+                         order_status, transaction_id, created_at, expire_at, paid_at,
+                         delivered_at, delivery_ref, inventory_source, duration_days,
+                         expire_date, lifetime)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    payload,
+                )
+        return self.find_order(order_id) or {}
+
+    def update_order(self, order_id: str, **changes: Any) -> dict[str, Any] | None:
+        order = self.find_order(order_id)
+        if not order:
+            return None
+        if "payment_status" in changes and "status" not in changes:
+            changes["status"] = changes["payment_status"]
+        updates: dict[str, Any] = {}
+        for key, value in changes.items():
+            if key == "status":
+                updates["payment_status"] = value
+                updates["order_status"] = value if value else order.get("order_status", "")
+            elif key == "delivery":
+                updates["delivery_ref"] = value
+            elif key == "license_file":
+                updates["delivery_ref"] = value
+            elif key == "price_vnd":
+                updates["unit_price_vnd"] = value
+            elif key == "amount":
+                updates["total_vnd"] = value
+            elif key == "package_code":
+                updates["product_code"] = value
+            else:
+                updates[key] = value
+        assignments = ", ".join(f"{column} = ?" for column in updates)
+        values = list(updates.values()) + [order_id]
+        with self._session() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(f"UPDATE orders SET {assignments} WHERE order_id = ?", values)
+        return self.find_order(order_id)
+
+    def order_exists(self, order_id: str) -> bool:
+        with self._session() as connection:
+            row = connection.execute("SELECT 1 FROM orders WHERE order_id = ?", (order_id,)).fetchone()
+        return bool(row)
+
     def list_visible_categories(self, product_group: str = "account") -> list[dict[str, Any]]:
         with self._session() as connection:
             rows = connection.execute(
                 """
-                SELECT COALESCE(NULLIF(p.category_key, ''), NULLIF(p.name, ''), p.code) AS category_key,
+                SELECT UPPER(COALESCE(NULLIF(p.category_key, ''), NULLIF(p.name, ''), p.code)) AS category_key,
                        MIN(p.menu_order) AS menu_order,
                        SUM(CASE WHEN i.status = 'available' THEN 1 ELSE 0 END) AS available_count
                 FROM products
                 AS p LEFT JOIN inventory_items AS i ON i.product_id = p.id
                 WHERE p.active = 1 AND p.show_in_menu = 1 AND p.product_group = ?
-                GROUP BY COALESCE(NULLIF(p.category_key, ''), NULLIF(p.name, ''), p.code)
+                GROUP BY UPPER(COALESCE(NULLIF(p.category_key, ''), NULLIF(p.name, ''), p.code))
                 ORDER BY menu_order, category_key COLLATE NOCASE
                 """,
                 (product_group,),

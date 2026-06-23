@@ -82,10 +82,8 @@ def normalize_order_token(value: str) -> str:
 
 def find_pending_order(description: str, amount: int) -> dict[str, Any] | None:
     normalized_description = normalize_order_token(description)
-    for order in bank_checker.load_json_list(ORDERS_DB_PATH):
+    for order in bank_checker.load_pending_orders():
         order_id = str(order.get("order_id", ""))
-        if order.get("payment_status") != "pending":
-            continue
         if not order_id:
             continue
         normalized_order_id = normalize_order_token(order_id)

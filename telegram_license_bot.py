@@ -643,6 +643,12 @@ def _menu_available_count(product_key: str) -> int:
 
 
 def _load_orders() -> list[dict[str, object]]:
+    path = _resolve_store_db_path()
+    if path.is_file():
+        try:
+            return StoreRepository(path).list_orders()
+        except (OSError, RuntimeError, sqlite3.Error) as exc:
+            logger.warning("SQLite order lookup failed; using legacy orders_db.json: %s", exc)
     if not ORDERS_DB_PATH.exists():
         return []
     try:
@@ -657,7 +663,85 @@ def _load_orders() -> list[dict[str, object]]:
 
 
 def _save_orders(orders: list[dict[str, object]]) -> None:
+    path = _resolve_store_db_path()
+    if path.is_file():
+        try:
+            repository = StoreRepository(path)
+            for order in orders:
+                repository.upsert_order(order)
+            return
+        except (OSError, RuntimeError, sqlite3.Error) as exc:
+            logger.warning("SQLite order save failed; falling back to legacy JSON orders_db.json: %s", exc)
     ORDERS_DB_PATH.write_text(json.dumps(orders, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _load_legacy_orders_json() -> list[dict[str, object]]:
+    if not ORDERS_DB_PATH.exists():
+        return []
+    try:
+        data = json.loads(ORDERS_DB_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict) and isinstance(data.get("orders"), list):
+        return [item for item in data["orders"] if isinstance(item, dict)]
+    return []
+
+
+def _migrate_legacy_orders_to_sqlite(store_db_path: Path | str | None = None) -> int:
+    path = _resolve_store_db_path(store_db_path)
+    if not path.is_file() or not ORDERS_DB_PATH.exists():
+        return 0
+    try:
+        repository = StoreRepository(path)
+    except (OSError, RuntimeError, sqlite3.Error):
+        return 0
+    migrated = 0
+    for order in _load_legacy_orders_json():
+        order_id = str(order.get("order_id", "")).strip()
+        if not order_id or repository.order_exists(order_id):
+            continue
+        try:
+            delivery_type = str(order.get("delivery_type", "account") or "account")
+            payment_status = str(order.get("payment_status", "pending") or "pending")
+            existing_delivery = str(order.get("delivery", "") or "")
+            if delivery_type == "account" and not existing_delivery:
+                product_name = str(order.get("product_name", "") or order.get("product_id", "")).upper()
+                product_code = TELEGRAM_PRODUCT_CODE_MAP.get(product_name, product_name)
+                product = repository.get_product_details(product_code) if product_code else None
+                if product and product.get("active"):
+                    quantity = int(order.get("quantity", 1) or 1)
+                    if quantity > 0:
+                        repository.create_pending_account_order_and_reserve(
+                            order_id=order_id,
+                            telegram_user_id=int(order.get("telegram_user_id", 0) or 0),
+                            username=str(order.get("username", "") or ""),
+                            product_code=product_code,
+                            product_name=str(order.get("product_name", "") or product_name),
+                            package_name=str(order.get("package_name", "") or ""),
+                            quantity=quantity,
+                            unit_price_vnd=int(order.get("unit_price_vnd", order.get("unit_price", 0)) or 0),
+                            total_vnd=int(order.get("total_vnd", order.get("total", 0)) or 0),
+                            created_at=str(order.get("created_at", _utc_now_iso()) or _utc_now_iso()),
+                            expire_at=str(order.get("expire_at", "") or ""),
+                        )
+                        repository.update_order(order_id, inventory_source="sqlite")
+                        if payment_status == "paid" or str(order.get("order_status", "")).lower() == "delivered":
+                            transaction_id = str(order.get("transaction_id", "") or f"MIGRATED-{order_id}")
+                            repository.mark_order_paid(order_id, transaction_id)
+                            delivered_items = repository.deliver_reserved_items(order_id)
+                            if delivered_items:
+                                repository.update_order(order_id, delivery="\n".join(delivered_items))
+                        migrated += 1
+                        continue
+            if not str(order.get("inventory_source", "") or ""):
+                order["inventory_source"] = "sqlite" if delivery_type == "license" else "json"
+            repository.upsert_order(order)
+            migrated += 1
+        except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
+            logger.warning("Failed to migrate legacy JSON order %s to SQLite: %s", order_id, exc)
+    return migrated
 
 
 def _load_processed_transactions() -> list[dict[str, object]]:
@@ -671,7 +755,15 @@ def _load_processed_transactions() -> list[dict[str, object]]:
 
 
 def _find_order(order_id: str) -> dict[str, object] | None:
-    for order in reversed(_load_orders()):
+    path = _resolve_store_db_path()
+    if path.is_file():
+        try:
+            order = StoreRepository(path).find_order(order_id)
+            if order:
+                return order
+        except (OSError, RuntimeError, sqlite3.Error) as exc:
+            logger.warning("SQLite order lookup failed for %s; falling back to JSON: %s", order_id, exc)
+    for order in reversed(_load_orders() if not path.is_file() else []):
         if str(order.get("order_id", "")).upper() == order_id.upper():
             return order
     return None
@@ -680,6 +772,15 @@ def _find_order(order_id: str) -> dict[str, object] | None:
 def _update_order(order_id: str, **changes: object) -> dict[str, object] | None:
     if "payment_status" in changes and "status" not in changes:
         changes["status"] = changes["payment_status"]
+    path = _resolve_store_db_path()
+    if path.is_file():
+        try:
+            repository = StoreRepository(path)
+            updated = repository.update_order(order_id, **changes)
+            if updated:
+                return updated
+        except (OSError, RuntimeError, sqlite3.Error) as exc:
+            logger.warning("SQLite order update failed for %s; falling back to JSON: %s", order_id, exc)
     orders = _load_orders()
     for order in reversed(orders):
         if str(order.get("order_id", "")).upper() == order_id.upper():
@@ -787,6 +888,7 @@ def _create_license_sales_order(update: Update, product_id: str, machine_id: str
         "delivered_at": "",
         "delivery": "",
         "license_file": "",
+        "inventory_source": "license",
     }
     orders = _load_orders()
     orders.append(order)
@@ -2265,6 +2367,9 @@ def build_application() -> Application:
         _initialize_store_db(store_db_path)
     except sqlite3.Error as exc:
         raise SystemExit(f"Cannot initialize store database at {store_db_path}: {exc}") from exc
+    migrated_orders = _migrate_legacy_orders_to_sqlite(store_db_path)
+    if migrated_orders:
+        logger.info("Migrated %s legacy JSON order(s) into SQLite", migrated_orders)
 
     app = Application.builder().token(cfg["BOT_TOKEN"]).post_init(post_init).build()
     app.bot_data["admin_ids"] = admin_ids

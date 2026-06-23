@@ -167,7 +167,7 @@ def main() -> None:
         mapped_order = bot._create_sales_order(fake_update, "CHATGPT", "7D", 1)
         assert mapped_order["order_id"] == "ORD-MAPPED-1"
         assert mapped_order["inventory_source"] == "sqlite"
-        assert len(json.loads(orders_path.read_text(encoding="utf-8"))) == 1
+        assert len(bot.StoreRepository(db_path).list_orders()) == 1
         with closing(sqlite3.connect(db_path)) as connection:
             reserved = connection.execute(
                 "SELECT status, reserved_order_id FROM inventory_items WHERE id = 'chatgpt-item'"
@@ -210,7 +210,7 @@ def main() -> None:
             pass
         else:
             raise AssertionError("Mapped order without available inventory must be blocked")
-        assert len(json.loads(orders_path.read_text(encoding="utf-8"))) == 1
+        assert len(bot.StoreRepository(db_path).list_orders()) == 1
 
         with closing(sqlite3.connect(db_path)) as connection:
             with connection:
