@@ -86,6 +86,33 @@ class StoreRepositoryTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Insufficient available inventory"):
             self.store.reserve_inventory_items("ORD-TEST-002", "TEST_PRODUCT", 2)
 
+    def test_canonical_account_product_codes_resolve_legacy_product_rows(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        initial_stock = self.store.get_stock_count("CHATGPT")
+        item_id = self.store.add_inventory_item("CHATGPT", "legacy@example.com|pass")
+        self.assertTrue(item_id)
+        self.assertEqual(self.store.get_stock_count("CHATGPT"), initial_stock + 1)
+        reserved = self.store.create_pending_account_order_and_reserve(
+            order_id="ORD-LEGACY-CHATGPT",
+            telegram_user_id=1,
+            username="Legacy Test",
+            product_code="CHATGPT",
+            product_name="CHATGPT",
+            package_name="7D",
+            quantity=1,
+            unit_price_vnd=1,
+            total_vnd=1,
+            created_at=now,
+            expire_at=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+        )
+        self.assertEqual(len(reserved), 1)
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            row = connection.execute(
+                "SELECT product_code, product_name FROM orders WHERE order_id = ?",
+                ("ORD-LEGACY-CHATGPT",),
+            ).fetchone()
+        self.assertEqual((row[0], row[1]), ("CHATGPT", "CHATGPT"))
+
     def test_release_expired_reservations_preserves_paid_and_delivered_items(self) -> None:
         for credential in ("expired@example.com|pass", "paid@example.com|pass", "delivered@example.com|pass"):
             self.store.add_inventory_item("TEST_PRODUCT", credential)

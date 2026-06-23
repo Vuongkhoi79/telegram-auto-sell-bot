@@ -624,6 +624,20 @@ def _menu_stock_product_code(product_key: str) -> str | None:
     return None
 
 
+def _reservation_product_code(product_name: str, package_code: str = "") -> str:
+    normalized_product_name = str(product_name or "").strip().upper()
+    canonical_code = _menu_stock_product_code(normalized_product_name)
+    if canonical_code:
+        return canonical_code
+    normalized_package_code = str(package_code or "").strip().upper()
+    if normalized_package_code:
+        package_canonical = _menu_stock_product_code(normalized_package_code)
+        if package_canonical:
+            return package_canonical
+        return normalized_package_code
+    return normalized_product_name
+
+
 def _menu_available_count(product_key: str) -> int:
     normalized_key = product_key.upper()
     product_code = _menu_stock_product_code(normalized_key)
@@ -708,7 +722,7 @@ def _migrate_legacy_orders_to_sqlite(store_db_path: Path | str | None = None) ->
             existing_delivery = str(order.get("delivery", "") or "")
             if delivery_type == "account" and not existing_delivery:
                 product_name = str(order.get("product_name", "") or order.get("product_id", "")).upper()
-                product_code = TELEGRAM_PRODUCT_CODE_MAP.get(product_name, product_name)
+                product_code = _reservation_product_code(product_name)
                 product = repository.get_product_details(product_code) if product_code else None
                 if product and product.get("active"):
                     quantity = int(order.get("quantity", 1) or 1)
@@ -797,13 +811,16 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
         raise InventoryReservationError("Sản phẩm hiện đã hết hàng, vui lòng quay lại sau.")
     unit_price = int(package["price_vnd"])
     now = _utc_now()
+    reservation_product_code = _reservation_product_code(product_name, str(package.get("product_code", "")))
+    use_sqlite_reservation = bool(package.get("reservation_sqlite"))
     order = {
         "order_id": _make_order_id(product_name),
         "telegram_user_id": int(user.id) if user else "",
         "username": _user_label(user) if user else "",
-        "product_id": str(package["product_code"]).upper() if package["source"] == "sqlite" else product_name.upper(),
+        "product_id": reservation_product_code if use_sqlite_reservation else product_name.upper(),
         "product_name": product_name,
         "package_name": str(package["display_name"]),
+        "product_code": reservation_product_code,
         "package_code": str(package["product_code"]),
         "quantity": int(quantity),
         "unit_price": int(unit_price),
@@ -820,7 +837,7 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
         "delivered_at": "",
         "delivery": "",
     }
-    product_code = str(package["product_code"]) if package.get("reservation_sqlite") else ""
+    product_code = reservation_product_code if use_sqlite_reservation else ""
     if product_code:
         try:
             StoreRepository(_resolve_store_db_path()).create_pending_account_order_and_reserve(

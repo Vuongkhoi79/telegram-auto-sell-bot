@@ -34,6 +34,7 @@ def main() -> None:
             first = bot._create_sales_order(update, "VEO3 ULTRA", "7D", 1)
             second = bot._create_sales_order(update, "VEO3 ULTRA", "7D", 1)
             assert first["order_id"] != second["order_id"]
+            assert first["product_code"] == "VEO3", first
 
             payment_text = bot._order_payment_text(first)
             assert first["order_id"] in payment_text

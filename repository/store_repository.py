@@ -37,6 +37,42 @@ ORDER_COLUMNS = {
     "lifetime": "INTEGER NOT NULL DEFAULT 0 CHECK (lifetime IN (0, 1))",
 }
 
+ACCOUNT_PRODUCT_CODE_ALIASES: dict[str, tuple[str, ...]] = {
+    "ADOBE": ("ADOBE-1M-PRIVATE",),
+    "ARTLIST": ("ARTLIST-1M-PRIVATE",),
+    "CANVA": ("CANVA-PRO-1M-PRIVATE",),
+    "CANVA PRO": ("CANVA-PRO-1M-PRIVATE",),
+    "CAPCUT": ("CAPCUT-PRO-1M-PRIVATE",),
+    "CAPCUT PRO": ("CAPCUT-PRO-1M-PRIVATE",),
+    "CHATGPT": ("GPT-PLUS-1M-PRIVATE",),
+    "CLAUDE": ("CLAUDE-PRO-1M-PRIVATE",),
+    "CLAUDE AI": ("CLAUDE-PRO-1M-PRIVATE",),
+    "CURSOR": ("CURSOR-PRO-1M-PRIVATE",),
+    "CURSOR AI": ("CURSOR-PRO-1M-PRIVATE",),
+    "ELEVEN": ("ELEVENLABS-1M-PRIVATE",),
+    "ELEVENLABS": ("ELEVENLABS-1M-PRIVATE",),
+    "GAMMA": ("GAMMA-1M-PRIVATE",),
+    "GAMMA AI": ("GAMMA-1M-PRIVATE",),
+    "GEMINI": ("GEM-AIPRO-1M-PRIVATE",),
+    "GEMINI AI": ("GEM-AIPRO-1M-PRIVATE",),
+    "GROK": ("GROK-SUPER-1M-PRIVATE",),
+    "GROK SUPER": ("GROK-SUPER-1M-PRIVATE",),
+    "HEYGEN": ("HEYGEN-1M-PRIVATE",),
+    "HEYGEN AI": ("HEYGEN-1M-PRIVATE",),
+    "HIGGFIELD": ("HIGGSFIELD-1M-PRIVATE",),
+    "HIGGSFIELD": ("HIGGSFIELD-1M-PRIVATE",),
+    "KLING": ("KLING-1M-PRIVATE",),
+    "KREA": ("KREA-1M-PRIVATE",),
+    "KREA AI": ("KREA-1M-PRIVATE",),
+    "OPENART": ("OPENART-1M-PRIVATE",),
+    "OPENART AI": ("OPENART-1M-PRIVATE",),
+    "SUNO": ("SUNO-1M-PRIVATE",),
+    "SUNO AI": ("SUNO-1M-PRIVATE",),
+    "VEO3": ("VEO3-1M-PRIVATE",),
+    "VEO3 ULTRA": ("VEO3-1M-PRIVATE",),
+    "VIEWMAX": ("VIEWMAX-1M-PRIVATE",),
+}
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(microsecond=0)
@@ -91,6 +127,25 @@ class StoreRepository:
             for name, definition in ORDER_COLUMNS.items():
                 if name not in order_columns:
                     connection.execute(f"ALTER TABLE orders ADD COLUMN {name} {definition}")
+
+    def _product_code_candidates(self, product_code: str) -> list[str]:
+        normalized = str(product_code or "").strip().upper()
+        candidates = [normalized] if normalized else []
+        for alias in ACCOUNT_PRODUCT_CODE_ALIASES.get(normalized, ()):
+            alias = str(alias).strip().upper()
+            if alias and alias not in candidates:
+                candidates.append(alias)
+        return candidates
+
+    def _resolve_active_product(self, connection: sqlite3.Connection, product_code: str) -> sqlite3.Row | None:
+        for candidate in self._product_code_candidates(product_code):
+            row = connection.execute(
+                "SELECT id, code, name, active FROM products WHERE code = ? AND active = 1",
+                (candidate,),
+            ).fetchone()
+            if row:
+                return row
+        return None
 
     def list_active_products(self) -> list[dict[str, Any]]:
         with self._session() as connection:
@@ -192,7 +247,7 @@ class StoreRepository:
             int(order.get("telegram_user_id", 0) or 0),
             str(order.get("username", "") or ""),
             str(order.get("product_id", "") or ""),
-            str(order.get("product_code", order.get("package_code", "")) or ""),
+            str(order.get("product_code", order.get("product_id", order.get("package_code", ""))) or ""),
             str(order.get("product_name", "") or ""),
             str(order.get("package_name", "") or ""),
             int(order.get("quantity", 1) or 1),
@@ -318,28 +373,36 @@ class StoreRepository:
     def get_product_details(self, product_code: str) -> dict[str, Any] | None:
         """Read one product and its import metadata without changing inventory state."""
         with self._session() as connection:
-            row = connection.execute(
-                """
-                SELECT id, code, name, active, delivery_type, category, account_type,
-                       duration, price_vnd, warranty_days, note
-                FROM products
-                WHERE code = ?
-                """,
-                (product_code.upper(),),
-            ).fetchone()
+            row = None
+            for candidate in self._product_code_candidates(product_code):
+                row = connection.execute(
+                    """
+                    SELECT id, code, name, active, delivery_type, category, account_type,
+                           duration, price_vnd, warranty_days, note
+                    FROM products
+                    WHERE code = ?
+                    """,
+                    (candidate,),
+                ).fetchone()
+                if row:
+                    break
         return dict(row) if row else None
 
     def get_stock_count(self, product_code: str) -> int:
         with self._session() as connection:
-            row = connection.execute(
-                """
-                SELECT COUNT(*) AS stock
-                FROM inventory_items AS item
-                JOIN products AS product ON product.id = item.product_id
-                WHERE product.code = ? AND item.status = 'available'
-                """,
-                (product_code.upper(),),
-            ).fetchone()
+            row = None
+            for candidate in self._product_code_candidates(product_code):
+                row = connection.execute(
+                    """
+                    SELECT COUNT(*) AS stock
+                    FROM inventory_items AS item
+                    JOIN products AS product ON product.id = item.product_id
+                    WHERE product.code = ? AND item.status = 'available'
+                    """,
+                    (candidate,),
+                ).fetchone()
+                if row and int(row["stock"] or 0) > 0:
+                    break
         return int(row["stock"] if row else 0)
 
     def get_stock_summary(self) -> list[dict[str, Any]]:
@@ -375,9 +438,7 @@ class StoreRepository:
         now = _utc_now_iso()
         item_id = str(uuid.uuid4())
         with self._session() as connection:
-            product = connection.execute(
-                "SELECT id FROM products WHERE code = ?", (product_code.upper(),)
-            ).fetchone()
+            product = self._resolve_active_product(connection, product_code)
             if not product:
                 raise ValueError(f"Unknown product code: {product_code}")
             duplicate = connection.execute(
@@ -403,9 +464,19 @@ class StoreRepository:
     def set_product_active(self, product_code: str, active: bool) -> None:
         now = _utc_now_iso()
         with self._session() as connection:
+            product = None
+            for candidate in self._product_code_candidates(product_code):
+                product = connection.execute(
+                    "SELECT id, code, name, active FROM products WHERE code = ?",
+                    (candidate,),
+                ).fetchone()
+                if product:
+                    break
+            if not product:
+                raise ValueError(f"Unknown product code: {product_code}")
             result = connection.execute(
-                "UPDATE products SET active = ?, updated_at = ? WHERE code = ?",
-                (1 if active else 0, now, product_code.upper()),
+                "UPDATE products SET active = ?, updated_at = ? WHERE id = ?",
+                (1 if active else 0, now, product["id"]),
             )
             if result.rowcount != 1:
                 raise ValueError(f"Unknown product code: {product_code}")
@@ -491,9 +562,7 @@ class StoreRepository:
                 ).fetchall()
                 return [str(row["inventory_item_id"]) for row in rows]
 
-            product = connection.execute(
-                "SELECT id FROM products WHERE code = ? AND active = 1", (product_code.upper(),)
-            ).fetchone()
+            product = self._resolve_active_product(connection, product_code)
             if not product:
                 raise ValueError(f"Mapped SQLite product is unavailable: {product_code}")
             items = connection.execute(
@@ -577,17 +646,21 @@ class StoreRepository:
                 raise ValueError(f"Unknown order ID: {order_id}")
             if order["payment_status"] != "pending" or order["order_status"] not in {"pending", "reserved"}:
                 raise ValueError(f"Order cannot reserve inventory: {order_id}")
-            items = connection.execute(
-                """
-                SELECT item.id, item.secret_value
-                FROM inventory_items AS item
-                JOIN products AS product ON product.id = item.product_id
-                WHERE product.code = ? AND item.status = 'available'
-                ORDER BY item.created_at, item.id
-                LIMIT ?
-                """,
-                (product_code.upper(), quantity),
-            ).fetchall()
+            items = []
+            for candidate in self._product_code_candidates(product_code):
+                items = connection.execute(
+                    """
+                    SELECT item.id, item.secret_value
+                    FROM inventory_items AS item
+                    JOIN products AS product ON product.id = item.product_id
+                    WHERE product.code = ? AND item.status = 'available'
+                    ORDER BY item.created_at, item.id
+                    LIMIT ?
+                    """,
+                    (candidate, quantity),
+                ).fetchall()
+                if len(items) == quantity:
+                    break
             if len(items) != quantity:
                 raise ValueError(f"Insufficient available inventory for {product_code}")
             connection.execute(
