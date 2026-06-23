@@ -135,10 +135,10 @@ def main() -> None:
         assert bot._menu_available_count("GROK SUPER") == 3
         assert bot._menu_available_count("CANVA") == 0
         direct_menu_labels = [button.text for row in bot._product_menu_keyboard().inline_keyboard for button in row]
-        assert "🟢 CHATGPT (còn 3)" in direct_menu_labels
-        assert "🟢 GEMINI AI (còn 3)" in direct_menu_labels
-        assert "🟢 GROK SUPER (còn 3)" in direct_menu_labels
-        assert "🔴 CANVA (hết hàng)" in direct_menu_labels
+        assert "\U0001f7e2 CHATGPT (3)" in direct_menu_labels
+        assert "\U0001f7e2 GEMINI AI (3)" in direct_menu_labels
+        assert "\U0001f7e2 GROK SUPER (3)" in direct_menu_labels
+        assert "\U0001f534 CANVA (0)" in direct_menu_labels
 
         empty_db_path = root / "empty-store.db"
         bot._initialize_store_db(empty_db_path)
@@ -206,7 +206,7 @@ def main() -> None:
             for button in row
             if button.callback_data == "product:CHATGPT"
         ]
-        assert red_menu_buttons == ["🔴 CHATGPT (hết hàng)"], red_menu_buttons
+        assert red_menu_buttons == ["\U0001f534 CHATGPT (0)"], red_menu_buttons
 
         try:
             bot._create_sales_order(fake_update, "CHATGPT", "7D", 1)

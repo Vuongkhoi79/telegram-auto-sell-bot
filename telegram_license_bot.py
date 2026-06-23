@@ -1022,7 +1022,7 @@ def _product_menu_keyboard(product_group: str = "account") -> InlineKeyboardMark
         product_name = str(item["category_key"]).upper()
         available_count = int(item["available_count"] or 0)
         available = available_count > 0
-        stock_label = f"(còn {available_count})" if available else "(hết hàng)"
+        stock_label = f"({available_count})"
         label = f"{'🟢' if available else '🔴'} {product_name} {stock_label}"
         buttons.append(InlineKeyboardButton(label, callback_data=f"product:{product_name}"))
     rows.extend(_chunked(buttons, 3))
