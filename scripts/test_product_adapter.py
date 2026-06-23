@@ -99,34 +99,46 @@ def main() -> None:
         assert "product:AI" not in menu_callbacks
         assert "🔴 AI" not in bot._product_list_text()
         assert "🟢 AI" not in bot._product_list_text()
-        assert "🟢 CHATGPT" in bot._product_list_text()
-        assert "🔴 CANVA" in bot._product_list_text()
+        assert "CHATGPT" in bot._product_list_text()
+        assert "CANVA" in bot._product_list_text()
 
         direct_db_path = root / "direct-store.db"
         bot._initialize_store_db(direct_db_path)
         with closing(sqlite3.connect(direct_db_path)) as connection:
             with connection:
-                connection.execute(
-                    """
-                    INSERT INTO products
-                        (id, code, name, active, delivery_type, created_at, updated_at, price_vnd, warranty_days, category_key)
-                    VALUES (?, ?, ?, 1, 'account', ?, ?, ?, ?, ?)
-                    """,
-                    ("chatgpt-direct", "CHATGPT", "ChatGPT Direct", now, now, 70000, 7, "CHATGPT"),
-                )
-                for index in range(3):
+                for product_id, code, name in (
+                    ("chatgpt-direct", "CHATGPT", "ChatGPT Direct"),
+                    ("gemini-direct", "GEMINI", "Gemini Direct"),
+                    ("grok-direct", "GROK", "Grok Direct"),
+                ):
                     connection.execute(
-                        "INSERT INTO inventory_items (id, product_id, secret_value, status, created_at) VALUES (?, ?, ?, 'available', ?)",
-                        (f"chatgpt-direct-item-{index}", "chatgpt-direct", f"direct{index}@example.com|pass", now),
+                        """
+                        INSERT INTO products
+                            (id, code, name, active, delivery_type, created_at, updated_at, price_vnd, warranty_days, category_key)
+                        VALUES (?, ?, ?, 1, 'account', ?, ?, ?, ?, ?)
+                        """,
+                        (product_id, code, name, now, now, 70000, 7, code),
                     )
+                    for index in range(3):
+                        connection.execute(
+                            "INSERT INTO inventory_items (id, product_id, secret_value, status, created_at) VALUES (?, ?, ?, 'available', ?)",
+                            (f"{product_id}-item-{index}", product_id, f"{code.lower()}{index}@example.com|pass", now),
+                        )
         os.environ["STORE_DB_PATH"] = str(direct_db_path)
         direct_menu_callbacks = {
             button.callback_data for row in bot._product_menu_keyboard().inline_keyboard for button in row
         }
         assert "product:CHATGPT" in direct_menu_callbacks
         assert "product:CANVA" in direct_menu_callbacks
-        assert bot.get_available_count("CHATGPT", store_db_path=direct_db_path) == 3
-        assert bot.get_available_count("CANVA", store_db_path=direct_db_path) == 0
+        assert bot._menu_available_count("CHATGPT") == 3
+        assert bot._menu_available_count("GEMINI AI") == 3
+        assert bot._menu_available_count("GROK SUPER") == 3
+        assert bot._menu_available_count("CANVA") == 0
+        direct_menu_labels = [button.text for row in bot._product_menu_keyboard().inline_keyboard for button in row]
+        assert "🟢 CHATGPT" in direct_menu_labels
+        assert "🟢 GEMINI AI" in direct_menu_labels
+        assert "🟢 GROK SUPER" in direct_menu_labels
+        assert "🟢 CANVA" not in direct_menu_labels
 
         empty_db_path = root / "empty-store.db"
         bot._initialize_store_db(empty_db_path)

@@ -583,9 +583,50 @@ def _telegram_product_key_for_sqlite_code(product_code: str) -> str:
     return normalized_code
 
 
+def _menu_stock_product_code(product_key: str) -> str | None:
+    normalized_key = product_key.upper()
+    if normalized_key.startswith("CHATGPT"):
+        return "CHATGPT"
+    if normalized_key.startswith("GEMINI"):
+        return "GEMINI"
+    if normalized_key.startswith("GROK"):
+        return "GROK"
+    if normalized_key.startswith("CAPCUT"):
+        return "CAPCUT"
+    if normalized_key.startswith("VEO3"):
+        return "VEO3"
+    if normalized_key.startswith("CLAUDE"):
+        return "CLAUDE"
+    if normalized_key.startswith("ELEVEN"):
+        return "ELEVENLABS"
+    if normalized_key.startswith("HEYGEN"):
+        return "HEYGEN"
+    if normalized_key.startswith("SUNO"):
+        return "SUNO"
+    if normalized_key.startswith("GAMMA"):
+        return "GAMMA"
+    if normalized_key.startswith("CURSOR"):
+        return "CURSOR"
+    if normalized_key.startswith("CANVA"):
+        return "CANVA"
+    if normalized_key.startswith("ADOBE"):
+        return "ADOBE"
+    if normalized_key.startswith("VIEWMAX"):
+        return "VIEWMAX"
+    if normalized_key.startswith("ARTLIST"):
+        return "ARTLIST"
+    if normalized_key.startswith("KREA"):
+        return "KREA"
+    if normalized_key.startswith("KLING"):
+        return "KLING"
+    if normalized_key.startswith("HIGG"):
+        return "HIGGSFIELD"
+    return None
+
+
 def _menu_available_count(product_key: str) -> int:
     normalized_key = product_key.upper()
-    product_code = TELEGRAM_PRODUCT_CODE_MAP.get(normalized_key)
+    product_code = _menu_stock_product_code(normalized_key)
     if not product_code:
         return 0
     path = _resolve_store_db_path()
