@@ -805,6 +805,13 @@ def _update_order(order_id: str, **changes: object) -> dict[str, object] | None:
 
 
 def _create_sales_order(update: Update, product_name: str, package_name: str, quantity: int) -> dict[str, object]:
+    logger.debug(
+        "ENTER _create_sales_order product_name=%s package_name=%s quantity=%s user_id=%s",
+        product_name,
+        package_name,
+        quantity,
+        getattr(getattr(update, "effective_user", None), "id", None),
+    )
     user = update.effective_user
     package = _get_package_info(product_name, package_name)
     if not package or int(package["available_count"]) < int(quantity):
@@ -813,6 +820,16 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
     now = _utc_now()
     reservation_product_code = _reservation_product_code(product_name, str(package.get("product_code", "")))
     use_sqlite_reservation = bool(package.get("reservation_sqlite"))
+    logger.debug(
+        "SELECTED PRODUCT reservation_product_code=%s package_product_code=%s package_source=%s reservation_sqlite=%s display_name=%s available_count=%s unit_price=%s",
+        reservation_product_code,
+        package.get("product_code"),
+        package.get("source"),
+        use_sqlite_reservation,
+        package.get("display_name"),
+        package.get("available_count"),
+        unit_price,
+    )
     order = {
         "order_id": _make_order_id(product_name),
         "telegram_user_id": int(user.id) if user else "",
@@ -840,6 +857,15 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
     product_code = reservation_product_code if use_sqlite_reservation else ""
     if product_code:
         try:
+            logger.debug(
+                "BEFORE create_pending_account_order_and_reserve order_id=%s product_code=%s product_name=%s quantity=%s unit_price=%s total=%s",
+                order["order_id"],
+                product_code,
+                order["product_name"],
+                order["quantity"],
+                order["unit_price"],
+                order["total"],
+            )
             StoreRepository(_resolve_store_db_path()).create_pending_account_order_and_reserve(
                 order_id=str(order["order_id"]),
                 telegram_user_id=int(order["telegram_user_id"]),
@@ -853,8 +879,13 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
                 created_at=str(order["created_at"]),
                 expire_at=str(order["expire_at"]),
             )
+            logger.debug(
+                "AFTER create_pending_account_order_and_reserve order_id=%s product_code=%s",
+                order["order_id"],
+                product_code,
+            )
         except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
-            logger.warning(
+            logger.exception(
                 "Mapped account order %s was not created because SQLite reservation failed: %s",
                 order["order_id"],
                 exc,
@@ -867,6 +898,13 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
     orders = _load_orders()
     orders.append(order)
     _save_orders(orders)
+    logger.debug(
+        "RETURN _create_sales_order order_id=%s inventory_source=%s product_code=%s package_code=%s",
+        order["order_id"],
+        order["inventory_source"],
+        order["product_code"],
+        order["package_code"],
+    )
     return order
 
 

@@ -544,6 +544,15 @@ class StoreRepository:
         Repeating the same order_id returns its existing reservation without
         allocating any additional inventory.
         """
+        logger = __import__("logging").getLogger(__name__)
+        logger.debug(
+            "ENTER create_pending_account_order_and_reserve order_id=%s product_code=%s quantity=%s unit_price_vnd=%s total_vnd=%s",
+            order_id,
+            product_code,
+            quantity,
+            unit_price_vnd,
+            total_vnd,
+        )
         if quantity <= 0:
             raise ValueError("quantity must be positive")
         with self._session() as connection:
@@ -560,9 +569,22 @@ class StoreRepository:
                     """,
                     (existing["id"],),
                 ).fetchall()
-                return [str(row["inventory_item_id"]) for row in rows]
+                reserved = [str(row["inventory_item_id"]) for row in rows]
+                logger.debug(
+                    "EXIT create_pending_account_order_and_reserve existing_order order_id=%s reserved_inventory_ids=%s",
+                    order_id,
+                    reserved,
+                )
+                return reserved
 
             product = self._resolve_active_product(connection, product_code)
+            logger.debug(
+                "PRODUCT LOOKUP result order_id=%s product_code=%s found=%s product_id=%s",
+                order_id,
+                product_code,
+                bool(product),
+                product["id"] if product else None,
+            )
             if not product:
                 raise ValueError(f"Mapped SQLite product is unavailable: {product_code}")
             items = connection.execute(
@@ -574,6 +596,13 @@ class StoreRepository:
                 """,
                 (product["id"], quantity),
             ).fetchall()
+            logger.debug(
+                "AVAILABLE INVENTORY COUNT order_id=%s product_code=%s count=%s requested=%s",
+                order_id,
+                product_code,
+                len(items),
+                quantity,
+            )
             if len(items) != quantity:
                 raise ValueError(f"Insufficient available inventory for {product_code}")
 
@@ -619,6 +648,11 @@ class StoreRepository:
                     """,
                     (internal_order_id, item["id"], created_at),
                 )
+                logger.debug(
+                    "INSERT order_inventory_items order_id=%s inventory_item_id=%s state=reserved",
+                    order_id,
+                    item["id"],
+                )
                 connection.execute(
                     """
                     INSERT INTO inventory_movements
@@ -627,7 +661,13 @@ class StoreRepository:
                     """,
                     (str(uuid.uuid4()), item["id"], internal_order_id, created_at),
                 )
-        return [str(item["id"]) for item in items]
+        reserved = [str(item["id"]) for item in items]
+        logger.debug(
+            "COMMIT completed create_pending_account_order_and_reserve order_id=%s reserved_inventory_ids=%s",
+            order_id,
+            reserved,
+        )
+        return reserved
 
     def reserve_inventory_items(
         self, order_id: str, product_code: str, quantity: int, expire_minutes: int = 5
