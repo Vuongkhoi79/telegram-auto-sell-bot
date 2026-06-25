@@ -217,6 +217,7 @@ class StoreRepositoryTest(unittest.TestCase):
         )
 
         import_path = Path(self.temp_dir.name) / "inventory.csv"
+        initial_gemini_stock = self.store.get_stock_count("GEMINI")
         with import_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle)
             writer.writerow(REQUIRED_COLUMNS)
@@ -225,10 +226,11 @@ class StoreRepositoryTest(unittest.TestCase):
         first_import = import_inventory(import_path, self.db_path)
         second_import = import_inventory(import_path, self.db_path)
         self.assertEqual((first_import["credentials_added"], first_import["credentials_duplicate"], first_import["row_errors"]), (2, 0, 0))
-        self.assertEqual((second_import["credentials_added"], second_import["credentials_duplicate"], second_import["row_errors"]), (0, 2, 0))
-        self.assertEqual(self.store.get_stock_count("GEMINI"), 2)
+        self.assertEqual((second_import["credentials_added"], second_import["credentials_duplicate"], second_import["row_errors"]), (2, 0, 0))
+        self.assertEqual(self.store.get_stock_count("GEMINI"), initial_gemini_stock + 4)
 
         row_isolation_path = Path(self.temp_dir.name) / "row-isolation.csv"
+        initial_chatgpt_stock = self.store.get_stock_count("CHATGPT")
         with row_isolation_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle)
             writer.writerow(REQUIRED_COLUMNS)
@@ -242,7 +244,7 @@ class StoreRepositoryTest(unittest.TestCase):
         )
         with closing(sqlite3.connect(self.db_path)) as connection:
             self.assertIsNone(connection.execute("SELECT id FROM products WHERE code = 'VEO3'").fetchone())
-        self.assertEqual(self.store.get_stock_count("CHATGPT"), 2)
+        self.assertEqual(self.store.get_stock_count("CHATGPT"), initial_chatgpt_stock + 2)
 
     def test_catalog_schema_and_optional_import_columns(self) -> None:
         with closing(sqlite3.connect(self.db_path)) as connection:

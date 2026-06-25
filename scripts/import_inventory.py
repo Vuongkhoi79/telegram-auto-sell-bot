@@ -178,14 +178,6 @@ def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE) -
                     raise ValueError(f"Unknown product_code: {product_code}. Product must exist in products; import did not create it.")
                 product_id = product["id"]
 
-                exists = connection.execute(
-                    "SELECT 1 FROM inventory_items WHERE product_id = ? AND secret_value = ?",
-                    (product_id, credential),
-                ).fetchone()
-                if exists:
-                    connection.execute(f"RELEASE SAVEPOINT {savepoint}")
-                    report["credentials_duplicate"] += 1
-                    continue
                 item_id = str(uuid.uuid4())
                 connection.execute(
                     "INSERT INTO inventory_items (id, product_id, secret_value, status, created_at) VALUES (?, ?, ?, 'available', ?)",
