@@ -405,11 +405,11 @@ class StoreRepositoryTest(unittest.TestCase):
             self.assertFalse(any("90.000" in label or "199.000" in label or "499.000" in label for label in menu_buttons))
 
             package_buttons = [button.text for row in bot._package_keyboard("GEMINI AI").inline_keyboard for button in row]
-            self.assertIn("🎁 Gemini AI Pro - 70.000đ [8]", package_buttons)
+            self.assertIn("🎁 Gemini AI Pro\n💰 70.000đ\n📦 Còn: 8", package_buttons)
             self.assertFalse(any("90.000" in label or "199.000" in label or "499.000" in label for label in package_buttons))
             capcut_package_buttons = [button.text for row in bot._package_keyboard("CAPCUT PRO").inline_keyboard for button in row]
-            self.assertIn("🎁 CAPCUT PRO - 400.000đ [3]", capcut_package_buttons)
-            self.assertNotIn("🎁 CAPCUT PRO - 0đ [0]", capcut_package_buttons)
+            self.assertIn("🎁 CAPCUT PRO\n💰 400.000đ\n📦 Còn: 3", capcut_package_buttons)
+            self.assertNotIn("🎁 CAPCUT PRO\n💰 0đ\n📦 Còn: 0", capcut_package_buttons)
 
             package = bot._get_package_info("GEMINI AI", "GEMINI")
             self.assertIsNotNone(package)

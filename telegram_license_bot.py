@@ -69,7 +69,7 @@ TOOL_LICENSE_PRODUCTS = {
         "expire_date": "",
     },
     "TOOL_LIFETIME": {
-        "display_name": "🚀 Vĩnh viễn - 990.000đ",
+        "display_name": "💎 Vĩnh viễn - 990.000đ",
         "price": 990000,
         "delivery_type": "license",
         "plan": LIFETIME_PLAN,
@@ -317,6 +317,18 @@ def _format_vnd(amount: int) -> str:
     return f"{int(amount):,}".replace(",", ".")
 
 
+def _shop_separator() -> str:
+    return "\n\n"
+
+
+def _stock_icon(available_count: int) -> str:
+    return "🟢" if int(available_count or 0) > 0 else "🔴"
+
+
+def _clean_product_title(value: str) -> str:
+    return str(value or "").strip().upper()
+
+
 def _order_suffix(product_name: str) -> str:
     cleaned = "".join(ch for ch in product_name.upper() if ch.isalnum())
     return cleaned[:8] or "ORDER"
@@ -397,16 +409,14 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("🛍 Sản Phẩm", callback_data="menu_products"),
-                InlineKeyboardButton("🛠 Tool", callback_data="menu_tools"),
+                InlineKeyboardButton("🎁 Sản phẩm", callback_data="menu_products"),
+                InlineKeyboardButton("🤖 Tool", callback_data="menu_tools"),
             ],
             [
                 InlineKeyboardButton("💰 Nạp tiền", callback_data="menu_payment"),
-                InlineKeyboardButton("👤 TÀI KHOẢN", callback_data="menu_orders"),
+                InlineKeyboardButton("📦 Đơn hàng", callback_data="menu_orders"),
             ],
-            [InlineKeyboardButton("📦 Đơn hàng", callback_data="menu_orders"), InlineKeyboardButton("📦 Đơn đặt trước", callback_data="menu_orders")],
-            [InlineKeyboardButton("🌐 Đổi ngôn ngữ", callback_data="menu_main"), InlineKeyboardButton("💬 Hỗ trợ", callback_data="menu_support")],
-            [InlineKeyboardButton("Đóng", callback_data="menu_main")],
+            [InlineKeyboardButton("💬 Hỗ trợ", callback_data="menu_support")],
         ]
     )
 
@@ -414,11 +424,11 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
 def _ai_daily_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("📥 Tải Tool", callback_data="menu_download")],
+            [InlineKeyboardButton("🤖 Tải Tool", callback_data="menu_download")],
             [InlineKeyboardButton("🎁 Dùng thử 10 ngày", callback_data="menu_free")],
             [InlineKeyboardButton("💎 Mua license 365 ngày - 450.000đ", callback_data="license_product:TOOL_YEAR_365")],
-            [InlineKeyboardButton("📘 Hướng dẫn kích hoạt", callback_data="menu_help")],
-            [InlineKeyboardButton("↩️ Quay lại", callback_data="menu_main")],
+            [InlineKeyboardButton("🛡 Hướng dẫn kích hoạt", callback_data="menu_help")],
+            [InlineKeyboardButton("Quay lại", callback_data="menu_main")],
         ]
     )
 
@@ -438,7 +448,7 @@ def _upgrade_permanent_keyboard_for_machine(machine_id: str) -> InlineKeyboardMa
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("💎 Gia hạn 1 năm - 450.000đ", callback_data="license_product:TOOL_YEAR_365")],
-            [InlineKeyboardButton("🚀 Vĩnh viễn - 990.000đ", callback_data="license_product:TOOL_LIFETIME")],
+            [InlineKeyboardButton("💎 Vĩnh viễn - 990.000đ", callback_data="license_product:TOOL_LIFETIME")],
         ]
     )
 
@@ -448,7 +458,7 @@ def _paid_license_plan_keyboard(machine_id: str = "") -> InlineKeyboardMarkup:
     for product_id, product in TOOL_LICENSE_PRODUCTS.items():
         label = str(product["display_name"])
         rows.append([InlineKeyboardButton(label, callback_data=f"license_product:{product_id}")])
-    rows.append([InlineKeyboardButton("↩️ Quay lại", callback_data="menu_ai_daily")])
+    rows.append([InlineKeyboardButton("Quay lại", callback_data="menu_ai_daily")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1064,66 +1074,94 @@ def _product_menu_keyboard(product_group: str = "account") -> InlineKeyboardMark
     rows: list[list[InlineKeyboardButton]] = []
     buttons: list[InlineKeyboardButton] = []
     for item in _catalog_category_items(product_group):
-        product_name = str(item["category_key"]).upper()
+        product_name = _clean_product_title(str(item["category_key"]))
         available_count = int(item["available_count"] or 0)
-        available = available_count > 0
-        stock_label = f"({available_count})"
-        label = f"{'🟢' if available else '🔴'} {product_name} {stock_label}"
+        label = f"{_stock_icon(available_count)} {product_name} ({available_count})"
         buttons.append(InlineKeyboardButton(label, callback_data=f"product:{product_name}"))
     rows.extend(_chunked(buttons, 3))
-    rows.append([InlineKeyboardButton("↩️ Quay lại", callback_data="menu_main")])
+    rows.append([InlineKeyboardButton("Quay lại", callback_data="menu_main")])
     return InlineKeyboardMarkup(rows)
 
 
 def _start_help_text() -> str:
+    items = [
+        _clean_product_title(str(item["category_key"]))
+        for item in _catalog_category_items()
+        if int(item.get("available_count", 0) or 0) > 0
+    ]
+    if not items:
+        items = ["ChatGPT Plus", "Gemini AI Pro", "Grok Super", "Veo3", "CapCut Pro", "Claude", "Cursor"]
+    product_lines = "\n".join(f"🟢 {name}" for name in items[:8])
     return (
-        "🎉 CHÀO MỪNG\n\n"
-        "👋 Xin chào quý khách\n\n"
-        "Chào mừng bạn đến với\n"
-        "🤖 TÀI KHOẢN AI GIÁ RẺ\n\n\n\n"
-        "🚀 TẠI ĐÂY\n\n"
-        "🛒 Mua hàng tự động 24/7 - tiện lợi\n"
-        "💳 Thanh toán QR - xác nhận tức thì\n"
-        "📦 Nhận account ngay sau khi thanh toán\n\n\n\n"
-        "🛡 UY TÍN TẠO NÊN THƯƠNG HIỆU\n\n"
-        " Hệ thống tự động\n"
-        " Giao hàng nhanh\n"
-        "💬 Hỗ trợ khi cần\n\n\n\n"
-        "📞 LIÊN HỆ HỖ TRỢ\n\n"
+        "🤖 AI STORE PRO\n"
+        "💎 Tài khoản AI chính hãng\n"
+        "📦 Giao tự động 24/7\n"
+        "🏦 Thanh toán QR\n"
+        "🛡 Bảo hành theo từng gói"
+        f"{_shop_separator()}"
+        "🎁 Hệ thống đang bán\n"
+        f"{product_lines}"
+        f"{_shop_separator()}"
         "📱 Zalo: 0909968123\n"
-        " Hotline: 0909968123\n"
-        "💬 Telegram: @Aidaily79\n\n\n\n"
-        "🟢 Đây là bot tự động order 24/7\n\n"
-        "👇 Chọn chức năng bên dưới 👇"
+        "💬 Telegram: @Aidaily79"
+        f"{_shop_separator()}"
+        "Chọn chức năng bên dưới"
     )
 
 
 def _product_list_text() -> str:
-    lines = ["🎁 SẢN PHẨM", ""]
+    lines = ["🎁 Sản phẩm", ""]
     for item in _catalog_category_items():
-        product_name = str(item["category_key"]).upper()
-        label = f"{'🟢' if int(item['available_count'] or 0) > 0 else '🔴'} {product_name}"
+        product_name = _clean_product_title(str(item["category_key"]))
+        available_count = int(item["available_count"] or 0)
+        label = f"{_stock_icon(available_count)} {product_name} ({available_count})"
         lines.append(label)
     return "\n".join(lines)
 
 
 def _ai_daily_text() -> str:
     return (
-        "🎁 AI DAILY VIDEO CREATOR\n\n"
-        "Quà tặng miễn phí dành cho thành viên.\n\n"
-        "Text To Video\n"
-        "Image To Video\n"
-        "Grok Workflow\n"
-        "Đồng Bộ Nhân Vật\n"
-        "Viết Lại Kịch Bản"
+        "🤖 AI Daily Video Creator\n\n"
+        "Tool hỗ trợ tạo video AI.\n\n"
+        "🎁 Dùng thử 10 ngày\n"
+        "💎 License trả phí\n"
+        "🛡 Hỗ trợ kích hoạt"
     )
+
+
+def _packages_for_product(product_name: str) -> list[dict[str, object]]:
+    try:
+        return StoreRepository(_resolve_store_db_path()).list_packages_by_category(_catalog_lookup_key(product_name))
+    except (OSError, RuntimeError, sqlite3.Error):
+        return []
 
 
 def _product_detail_text(product_name: str, available: bool, stock: int) -> str:
     if product_name == AI_DAILY_PRODUCT_NAME:
         return _ai_daily_text()
+    packages = _packages_for_product(product_name)
+    prices = [int(package["price_vnd"]) for package in packages if int(package["price_vnd"] or 0) > 0]
+    warranty_days = 0
+    product = None
+    try:
+        product = StoreRepository(_resolve_store_db_path()).get_product_details(_catalog_lookup_key(product_name))
+    except (OSError, RuntimeError, sqlite3.Error):
+        product = None
+    if product:
+        warranty_days = int(product.get("warranty_days", 0) or 0)
     status_text = "Còn hàng" if available else "Hết hàng"
-    return f"{product_name}\n\nTrạng thái: {status_text}\nTồn kho: {stock}"
+    price_text = f"{_format_vnd(min(prices))}đ" if prices else "Liên hệ"
+    warranty_text = f"{warranty_days} ngày" if warranty_days else "Theo từng gói"
+    return (
+        f"💎 {_clean_product_title(product_name)}"
+        f"{_shop_separator()}"
+        f"{_stock_icon(stock)} {status_text}\n"
+        f"📦 Tồn kho: {stock}\n"
+        f"💰 Giá từ: {price_text}\n"
+        f"🛡 Bảo hành: {warranty_text}"
+        f"{_shop_separator()}"
+        "Chọn gói"
+    )
 
 
 def _product_detail_keyboard(product_name: str, available: bool) -> InlineKeyboardMarkup:
@@ -1131,30 +1169,27 @@ def _product_detail_keyboard(product_name: str, available: bool) -> InlineKeyboa
         return _ai_daily_keyboard()
     if available:
         return _package_keyboard(product_name)
-    return InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Quay lại sản phẩm", callback_data="menu_products")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("Quay lại sản phẩm", callback_data="menu_products")]])
 
 
 def _package_keyboard(product_name: str) -> InlineKeyboardMarkup:
     rows = []
-    try:
-        packages = StoreRepository(_resolve_store_db_path()).list_packages_by_category(_catalog_lookup_key(product_name))
-    except (OSError, RuntimeError, sqlite3.Error):
-        packages = []
+    packages = _packages_for_product(product_name)
     if packages:
         rows.extend(
             [InlineKeyboardButton(
-                f"🎁 {package['display_name']} - {_format_vnd(int(package['price_vnd']))}đ [{int(package['available_count'] or 0)}]",
+                f"🎁 {package['display_name']}\n💰 {_format_vnd(int(package['price_vnd']))}đ\n📦 Còn: {int(package['available_count'] or 0)}",
                 callback_data=f"pkg:{product_name}:{package['product_code']}",
             )]
             for package in packages
         )
     else:
         rows.extend(
-            [InlineKeyboardButton(f"🎁 Gói {name} - {_format_vnd(price)}đ", callback_data=f"pkg:{product_name}:{name}")]
+            [InlineKeyboardButton(f"🎁 {name}\n💰 {_format_vnd(price)}đ", callback_data=f"pkg:{product_name}:{name}")]
             for name, price in PRODUCT_PACKAGES.items()
         )
-    rows.append([InlineKeyboardButton("↩️ Quay lại sản phẩm", callback_data="menu_products")])
-    rows.append([InlineKeyboardButton("🏠 Quay lại Menu", callback_data="menu_main")])
+    rows.append([InlineKeyboardButton("Quay lại sản phẩm", callback_data="menu_products")])
+    rows.append([InlineKeyboardButton("Menu chính", callback_data="menu_main")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1164,9 +1199,9 @@ def _quantity_keyboard(product_name: str, package_name: str) -> InlineKeyboardMa
         for qty in QUANTITY_OPTIONS
     ]
     rows = _chunked(buttons, 3)
-    rows.append([InlineKeyboardButton("📝 Nhập số khác", callback_data=f"manualqty:{product_name}:{package_name}")])
-    rows.append([InlineKeyboardButton("↩️ Quay lại gói", callback_data=f"product:{product_name}")])
-    rows.append([InlineKeyboardButton("Đóng", callback_data="menu_main")])
+    rows.append([InlineKeyboardButton("Nhập số khác", callback_data=f"manualqty:{product_name}:{package_name}")])
+    rows.append([InlineKeyboardButton("Quay lại gói", callback_data=f"product:{product_name}")])
+    rows.append([InlineKeyboardButton("Menu chính", callback_data="menu_main")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1174,11 +1209,11 @@ def _payment_choice_keyboard(order_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("💳 ACB", callback_data=f"pay_acb:{order_id}"),
-                InlineKeyboardButton("💰 Trừ ví", callback_data=f"pay_wallet:{order_id}"),
+                InlineKeyboardButton("🏦 Chuyển khoản QR", callback_data=f"pay_acb:{order_id}"),
+                InlineKeyboardButton("💰 Ví", callback_data=f"pay_wallet:{order_id}"),
             ],
-            [InlineKeyboardButton("↩️ Quay lại sản phẩm", callback_data="menu_products")],
-            [InlineKeyboardButton("🏠 Quay lại Menu", callback_data="menu_main")],
+            [InlineKeyboardButton("Quay lại sản phẩm", callback_data="menu_products")],
+            [InlineKeyboardButton("Menu chính", callback_data="menu_main")],
         ]
     )
 
@@ -1186,8 +1221,8 @@ def _payment_choice_keyboard(order_id: str) -> InlineKeyboardMarkup:
 def _qr_payment_keyboard(order_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("✅ Tôi đã chuyển khoản", callback_data=f"paid_notify:{order_id}")],
-            [InlineKeyboardButton("❌ Hủy giao dịch", callback_data=f"cancel_order:{order_id}")],
+            [InlineKeyboardButton("Đã chuyển khoản", callback_data=f"paid_notify:{order_id}")],
+            [InlineKeyboardButton("Hủy giao dịch", callback_data=f"cancel_order:{order_id}")],
         ]
     )
 
@@ -1199,24 +1234,20 @@ def _payment_info_text(context: ContextTypes.DEFAULT_TYPE, product_name: str = "
     bank_account_name = payment_service.config.bank_account_name or "Chua cau hinh"
     note = payment_service.build_transfer_note("ORDER", product_name.replace(" ", "")[:8] or "PAY")
     return (
-        "💳 THANH TOÁN\n\n"
-        f"- Ngân hàng: {bank_name}\n"
-        f"- Số tài khoản: {bank_account}\n"
-        f"- Chủ tài khoản: {bank_account_name}\n"
-        f"- Nội dung chuyển khoản: {note}\n\n"
-        "Sau khi chuyển khoản, vui lòng gửi bill cho hỗ trợ để được xác nhận."
+        "🏦 Thanh toán"
+        f"{_shop_separator()}"
+        f"Ngân hàng: {bank_name}\n"
+        f"Số tài khoản: {bank_account}\n"
+        f"Chủ tài khoản: {bank_account_name}\n"
+        f"Nội dung: {note}"
+        f"{_shop_separator()}"
+        "Sau khi chuyển khoản, hệ thống sẽ xác nhận đơn."
     )
 
 
 def _package_text(product_name: str) -> str:
     stock = _menu_available_count(product_name)
-    status_text = "Còn hàng" if stock > 0 else "Hết hàng"
-    return (
-        f"{product_name}\n\n"
-        f"Trạng thái: {status_text}\n"
-        f"Tồn kho: {stock}\n\n"
-        "Vui lòng chọn gói bên dưới."
-    )
+    return _product_detail_text(product_name, stock > 0, stock)
 
 
 def _quantity_text(product_name: str, package_name: str) -> str:
@@ -1224,29 +1255,46 @@ def _quantity_text(product_name: str, package_name: str) -> str:
     unit_price = int(package["price_vnd"]) if package else 0
     available_count = int(package["available_count"]) if package else 0
     display_name = str(package["display_name"]) if package else package_name
+    warranty_days = 0
+    if package:
+        try:
+            product = StoreRepository(_resolve_store_db_path()).get_product_details(str(package["product_code"]))
+            warranty_days = int(product.get("warranty_days", 0) or 0) if product else 0
+        except (OSError, RuntimeError, sqlite3.Error):
+            warranty_days = 0
+    warranty_text = f"{warranty_days} ngày" if warranty_days else "Theo từng gói"
     return (
-        "Chọn số lượng\n\n"
-        f"📦 Sản phẩm: {product_name}\n"
-        f"🎁 Gói: {display_name}\n"
-        f"📦 Số lượng còn lại: {available_count}\n"
-        f"💵 Đơn giá: {_format_vnd(unit_price)}đ"
+        f"💎 {_clean_product_title(display_name)}"
+        f"{_shop_separator()}"
+        f"💰 Giá: {_format_vnd(unit_price)}đ\n"
+        f"📦 Kho: {available_count}\n"
+        f"🛡 Bảo hành: {warranty_text}\n"
+        "Giao ngay sau thanh toán"
+        f"{_shop_separator()}"
+        "Chọn số lượng"
     )
 
 
 def _order_payment_text(order: dict[str, object]) -> str:
     balance = 0
     return (
-        "Chọn cách thanh toán\n\n"
-        "🧾 Chi tiết đơn\n"
-        f"🆔 Mã đơn: {order.get('order_id', '')}\n"
-        f"📦 Sản phẩm: {order.get('product_name', '')}\n"
-        f"🎁 Gói: {order.get('package_name', '')}\n"
-        f"🔢 Số lượng: {order.get('quantity', '')}\n"
-        f"💵 Đơn giá: {_format_vnd(int(order.get('unit_price', 0)))}đ\n\n"
-        f"💰 Tổng thanh toán: {_format_vnd(int(order.get('total', 0)))}đ\n"
-        f"💳 Số dư: {_format_vnd(balance)}đ\n\n"
-        "Ví: trừ số dư nếu đủ\n"
-        "ACB: chuyển khoản ngân hàng"
+        "🧾 Đơn hàng"
+        f"{_shop_separator()}"
+        "📦 Sản phẩm\n"
+        f"{order.get('package_name', '')}"
+        f"{_shop_separator()}"
+        "💰 Đơn giá\n"
+        f"{_format_vnd(int(order.get('unit_price', 0)))}đ"
+        f"{_shop_separator()}"
+        "📦 Số lượng\n"
+        f"{order.get('quantity', '')}"
+        f"{_shop_separator()}"
+        "💰 Thành tiền\n"
+        f"{_format_vnd(int(order.get('total', 0)))}đ"
+        f"{_shop_separator()}"
+        f"💰 Số dư\n{_format_vnd(balance)}đ"
+        f"{_shop_separator()}"
+        "Chọn phương thức thanh toán"
     )
 
 
@@ -1263,12 +1311,12 @@ def _build_vietqr_url(order: dict[str, object], payment_service: PaymentService)
 
 def _qr_caption(order: dict[str, object], payment_service: PaymentService) -> str:
     return (
-        "📲 MÃ QR THANH TOÁN\n\n"
+        "🏦 Chuyển khoản QR\n\n"
         f"💰 Số tiền: {_format_vnd(int(order.get('total', 0)))}đ\n"
         f"🏦 Ngân hàng: {payment_service.config.bank_name}\n"
-        f"👤 Tài khoản: {payment_service.config.bank_account_name}\n"
-        f"🔢 STK: {payment_service.config.bank_account}\n"
-        f"📝 Nội dung CK: {order.get('order_id', '')}\n\n"
+        f"Tài khoản: {payment_service.config.bank_account_name}\n"
+        f"STK: {payment_service.config.bank_account}\n"
+        f"Nội dung: {order.get('order_id', '')}\n\n"
         "Mã Order có hiệu lực trong 5 phút.\n"
         "Sau khi chuyển khoản, hệ thống sẽ xác nhận đơn."
     )
@@ -1292,7 +1340,7 @@ async def _send_license_file(update: Update, license_path: str | None) -> None:
 
 
 async def _send_products(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False, product_group: str = "account") -> None:
-    text = "🎁 SẢN PHẨM\n\nChọn sản phẩm:" if product_group == "account" else "🛠 TOOL\n\nChọn sản phẩm:"
+    text = "🎁 Sản phẩm\n\nChọn sản phẩm" if product_group == "account" else "🤖 Tool\n\nChọn sản phẩm"
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=_product_menu_keyboard(product_group))
     else:
@@ -1329,7 +1377,7 @@ async def _send_product_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         stock = int(product_info["available_count"])
         if not available:
             text = "Sản phẩm hiện đã hết hàng, vui lòng quay lại sau."
-            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Quay lại sản phẩm", callback_data="menu_products")]])
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Quay lại sản phẩm", callback_data="menu_products")]])
             if edit and update.callback_query:
                 await update.callback_query.edit_message_text(text, reply_markup=keyboard)
             else:
@@ -1421,16 +1469,20 @@ async def _send_paid_notify(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         return
     await _notify_admins_order_pending(context, order)
     await update.callback_query.edit_message_caption(
-        caption="Bot đã ghi nhận bạn đã chuyển khoản. Admin sẽ xác nhận đơn trong thời gian sớm nhất.",
+        caption=(
+            "🏦 Đã ghi nhận chuyển khoản\n\n"
+            "Hệ thống đang kiểm tra thanh toán.\n"
+            "Tài khoản sẽ được chuẩn bị ngay sau khi xác nhận."
+        ),
         reply_markup=_main_menu_keyboard(),
     )
 
 
 async def _send_orders(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
     text = (
-        "📦 ĐƠN HÀNG\n\n"
-        "Chức năng này dùng để xem và quản lý đơn hàng của bạn.\n"
-        "Nếu bạn đã nhận license, hãy kiểm tra lại trong mục Kích hoạt của tool."
+        "📦 Đơn hàng\n\n"
+        "Theo dõi đơn đã tạo và trạng thái giao hàng.\n"
+        "Nếu cần hỗ trợ, gửi mã đơn cho admin."
     )
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=_main_menu_keyboard())
@@ -1449,9 +1501,9 @@ async def _send_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, *, e
 async def _send_download(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
     download_url = context.application.bot_data.get("tool_download_url", "")
     text = (
-        f"Tải AI Daily Video Creator tại đây: {download_url}"
+        f"🤖 AI Daily Video Creator\n\nLink tải:\n{download_url}"
         if download_url
-        else "Admin chưa cấu hình link tải Tool. Vui lòng liên hệ hỗ trợ."
+        else "🤖 AI Daily Video Creator\n\nAdmin chưa cấu hình link tải. Vui lòng liên hệ hỗ trợ."
     )
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=_ai_daily_keyboard())
@@ -1571,7 +1623,7 @@ def _paid_license_prompt_text(product_id: str) -> str:
             "Sau khi thanh toán/xác nhận, bot sẽ gửi file license 365 ngày."
         )
     return (
-        "🚀 Bản vĩnh viễn - 990.000đ\n\n"
+        "💎 Bản vĩnh viễn - 990.000đ\n\n"
         "Vui lòng gửi Machine ID của bạn.\n"
         "Sau khi thanh toán/xác nhận, bot sẽ gửi file license vĩnh viễn."
     )
@@ -1957,7 +2009,7 @@ async def fulfill_order(context: ContextTypes.DEFAULT_TYPE, order_id: str) -> di
                 await context.bot.send_message(
                     chat_id=int(customer_id),
                     text=(
-                        "Thanh toán thành công.\n"
+                        "💰 Thanh toán thành công\n\n"
                         f"Bot đã cấp license {plan_label}.\n"
                         f"Order ID: {order_id}\n"
                         f"Machine ID: {sales_order.get('machine_id', '')}"
@@ -1989,14 +2041,14 @@ async def fulfill_order(context: ContextTypes.DEFAULT_TYPE, order_id: str) -> di
         customer_id = sales_order.get("telegram_user_id")
         if customer_id:
             customer_text = (
-                "Thanh toán thành công.\n\n"
-                f"Order ID: {order_id}\n"
-                f"Sản phẩm: {sales_order.get('product_name', '')}\n"
-                f"Gói: {sales_order.get('package_name', '')}\n"
-                f"Số lượng: {sales_order.get('quantity', '')}"
+                "💰 Thanh toán thành công\n\n"
+                "Đang chuẩn bị tài khoản...\n\n"
+                f"🧾 Đơn hàng: {order_id}\n"
+                f"🎁 Gói: {sales_order.get('package_name', '')}\n"
+                f"📦 Số lượng: {sales_order.get('quantity', '')}"
             )
             if delivery_text:
-                customer_text += f"\n\nThông tin nhận hàng:\n{delivery_text}"
+                customer_text += f"\n\n🎁 Giao hàng thành công\n\n{delivery_text}"
             else:
                 customer_text += "\n\nAdmin sẽ xử lý giao hàng cho bạn."
             await context.bot.send_message(chat_id=int(customer_id), text=customer_text)
