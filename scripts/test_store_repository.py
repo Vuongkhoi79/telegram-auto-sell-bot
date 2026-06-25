@@ -385,8 +385,13 @@ class StoreRepositoryTest(unittest.TestCase):
                     """,
                     ("catalog-capcut-zero", "CATALOG-CAPCUT-ZERO", "CAPCUT PRO", now, now),
                 )
+                connection.execute("UPDATE products SET category_key = 'AI' WHERE code = 'GEMINI'")
+                connection.execute("UPDATE products SET name = 'CAPCUT' WHERE code = 'CAPCUT'")
+            StoreRepository(self.db_path)
             prices = dict(connection.execute("SELECT code, price_vnd FROM products WHERE code IN ('GEMINI', 'CAPCUT')").fetchall())
+            names = dict(connection.execute("SELECT code, name FROM products WHERE code IN ('GEMINI', 'CAPCUT')").fetchall())
         self.assertEqual(prices["GEMINI"], 70000)
+        self.assertEqual(names["CAPCUT"], "CAPCUT PRO")
 
         previous_store_db_path = os.environ.get("STORE_DB_PATH")
         previous_make_order_id = bot._make_order_id
