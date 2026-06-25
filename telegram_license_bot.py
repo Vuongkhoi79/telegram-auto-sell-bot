@@ -43,6 +43,7 @@ from license_service import (
 from payment_service import PaymentConfig, PaymentService
 from repository.store_repository import StoreRepository
 from scripts.import_inventory import import_inventory
+from scripts.sales_flow_state import log_sales_state
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 IMPORTS_DIR = PROJECT_ROOT / "imports"
@@ -839,8 +840,10 @@ def _update_order(order_id: str, **changes: object) -> dict[str, object] | None:
 
 
 def _create_sales_order(update: Update, product_name: str, package_name: str, quantity: int) -> dict[str, object]:
+    callback_data = str(getattr(getattr(update, "callback_query", None), "data", "") or "")
     logger.debug(
-        "ENTER _create_sales_order product_name=%s package_name=%s quantity=%s user_id=%s",
+        "ENTER _create_sales_order callback_data=%s product_name=%s package_name=%s quantity=%s user_id=%s",
+        callback_data,
         product_name,
         package_name,
         quantity,
@@ -848,11 +851,24 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
     )
     user = update.effective_user
     package = _get_package_info(product_name, package_name)
+    logger.debug(
+        "PACKAGE RESOLUTION callback_data=%s product_name=%s package_name=%s product_id=%s package_id=%s category_key=%s product_code=%s display_name=%s available_before=%s",
+        callback_data,
+        product_name,
+        package_name,
+        package.get("product_id") if package else None,
+        package.get("product_code") if package else None,
+        package.get("category_key") if package else None,
+        package.get("product_code") if package else None,
+        package.get("display_name") if package else None,
+        package.get("available_count") if package else None,
+    )
     if not package or int(package["available_count"]) < int(quantity):
         raise InventoryReservationError("Sản phẩm hiện đã hết hàng, vui lòng quay lại sau.")
     unit_price = int(package["price_vnd"])
     now = _utc_now()
-    reservation_product_code = _reservation_product_code(product_name, str(package.get("product_code", "")))
+    selected_package_code = str(package.get("product_code", "") or "").strip().upper()
+    reservation_product_code = selected_package_code or _reservation_product_code(product_name, str(package.get("product_code", "")))
     reserve_with_sqlite = False
     reservation_repo: StoreRepository | None = None
     if reservation_product_code:
@@ -863,7 +879,8 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
         except (OSError, RuntimeError, sqlite3.Error):
             reserve_with_sqlite = False
     logger.debug(
-        "SELECTED PRODUCT reservation_product_code=%s package_product_code=%s package_source=%s reserve_with_sqlite=%s display_name=%s available_count=%s unit_price=%s",
+        "SELECTED PRODUCT callback_data=%s reservation_product_code=%s package_product_code=%s package_source=%s reserve_with_sqlite=%s display_name=%s available_before=%s unit_price=%s",
+        callback_data,
         reservation_product_code,
         package.get("product_code"),
         package.get("source"),
@@ -900,11 +917,15 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
     if product_code:
         try:
             logger.debug(
-                "BEFORE create_pending_account_order_and_reserve order_id=%s product_code=%s product_name=%s quantity=%s unit_price=%s total=%s",
+                "BEFORE create_pending_account_order_and_reserve callback_data=%s order_id=%s product_code=%s product_id=%s package_id=%s category_key=%s requested_quantity=%s available_before=%s unit_price=%s total=%s",
+                callback_data,
                 order["order_id"],
                 product_code,
-                order["product_name"],
-                order["quantity"],
+                reservation_product_code if reserve_with_sqlite else product_name.upper(),
+                package.get("product_id"),
+                package.get("category_key"),
+                quantity,
+                package.get("available_count"),
                 order["unit_price"],
                 order["total"],
             )
@@ -926,9 +947,11 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
             order["product_code"] = reservation_product_code
             order["inventory_source"] = "sqlite"
             logger.debug(
-                "AFTER create_pending_account_order_and_reserve order_id=%s product_code=%s",
+                "AFTER create_pending_account_order_and_reserve callback_data=%s order_id=%s product_code=%s reserved_after=%s",
+                callback_data,
                 order["order_id"],
                 product_code,
+                order["quantity"],
             )
         except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
             logger.exception(
@@ -1679,35 +1702,49 @@ def _paid_license_prompt_text(product_id: str) -> str:
 
 
 def _get_package_info(product_key: str, package_key: str) -> dict[str, object] | None:
+    product_key_norm = str(product_key or "").strip().upper()
+    package_key_norm = str(package_key or "").strip().upper()
     try:
         repository = StoreRepository(_resolve_store_db_path())
-        package = repository.get_product_details(package_key)
-        if package and package["active"]:
-            return {
-                "product_code": str(package["code"]),
-                "display_name": str(package["name"]),
-                "price_vnd": int(package["price_vnd"]),
-                "available_count": repository.get_stock_count(str(package["code"])),
-                "source": "sqlite",
-                "reservation_sqlite": True,
-            }
         packages = repository.list_packages_by_category(_catalog_lookup_key(product_key))
         for package in packages:
-            if str(package["product_code"]).upper() == str(package_key).upper():
+            candidate_codes = {
+                str(package.get("product_code", "") or "").strip().upper(),
+                str(package.get("code", "") or "").strip().upper(),
+                str(package.get("display_name", "") or "").strip().upper(),
+                str(package.get("name", "") or "").strip().upper(),
+            }
+            if package_key_norm in candidate_codes or _menu_stock_product_code(package_key_norm) in candidate_codes:
                 return {
+                    "product_id": str(package["id"]),
                     "product_code": str(package["product_code"]),
+                    "category_key": str(package.get("category_key") or product_key_norm),
                     "display_name": str(package["display_name"]),
                     "price_vnd": int(package["price_vnd"]),
                     "available_count": int(package["available_count"] or 0),
                     "source": "sqlite",
                     "reservation_sqlite": True,
                 }
+        package = repository.get_product_details(package_key)
+        if package and package["active"]:
+            return {
+                "product_id": str(package["id"]),
+                "product_code": str(package["code"]),
+                "category_key": str(package.get("category_key") or product_key_norm),
+                "display_name": str(package["name"]),
+                "price_vnd": int(package["price_vnd"]),
+                "available_count": repository.get_stock_count(str(package["code"])),
+                "source": "sqlite",
+                "reservation_sqlite": True,
+            }
     except (OSError, RuntimeError, sqlite3.Error):
         pass
     if package_key in PRODUCT_PACKAGES:
         product_info = get_product_display_info(product_key)
         return {
             "product_code": str(product_info.get("product_code") or product_key.upper()),
+            "product_id": str(product_info.get("product_code") or product_key.upper()),
+            "category_key": product_key_norm,
             "display_name": package_key,
             "price_vnd": PRODUCT_PACKAGES[package_key],
             "available_count": int(product_info["available_count"]),
@@ -2507,6 +2544,12 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await query.edit_message_text(_ai_daily_text(), reply_markup=_ai_daily_keyboard())
     elif data.startswith("pkg:"):
         _, product_name, package_name = data.split(":", 2)
+        logger.debug(
+            "CALLBACK pkg callback_data=%s product_name=%s package_name=%s",
+            data,
+            product_name,
+            package_name,
+        )
         package = _get_package_info(product_name, package_name)
         if not package or int(package["available_count"]) <= 0:
             await query.edit_message_text("Gói không hợp lệ.", reply_markup=_product_menu_keyboard())
@@ -2514,6 +2557,21 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await _send_quantity_choice(update, product_name, package_name, edit=True)
     elif data.startswith("qty:"):
         _, product_name, package_name, raw_qty = data.split(":", 3)
+        logger.debug(
+            "CALLBACK qty callback_data=%s product_name=%s package_name=%s requested_quantity=%s",
+            data,
+            product_name,
+            package_name,
+            raw_qty,
+        )
+        log_sales_state(
+            "qty_before_reserve",
+            _catalog_lookup_key(product_name),
+            callback_data=data,
+            package_id=package_name,
+            quantity=int(raw_qty),
+            database_path=context.application.bot_data.get("store_db_path"),
+        )
         if not _get_package_info(product_name, package_name):
             await query.edit_message_text("Gói không hợp lệ.", reply_markup=_product_menu_keyboard())
             return
@@ -2525,6 +2583,15 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         except InventoryReservationError as exc:
             await query.edit_message_text(str(exc), reply_markup=_product_menu_keyboard())
             return
+        log_sales_state(
+            "qty_after_reserve",
+            str(order.get("product_code") or _catalog_lookup_key(product_name)),
+            order_id=str(order.get("order_id", "")),
+            callback_data=data,
+            package_id=str(order.get("package_code", package_name)),
+            quantity=int(order.get("quantity", raw_qty)),
+            database_path=context.application.bot_data.get("store_db_path"),
+        )
         if update.effective_user and getattr(context, "user_data", None) is not None:
             context.user_data["pending_order_id"] = str(order.get("order_id", ""))
         await _send_payment_choice(update, order, edit=True)

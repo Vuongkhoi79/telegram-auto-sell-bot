@@ -474,24 +474,80 @@ class StoreRepositoryTest(unittest.TestCase):
             self.assertEqual(bot._menu_available_count("GEMINI AI"), 8)
             self.assertEqual(bot._menu_available_count("CAPCUT PRO"), 3)
 
-            bot._make_order_id = lambda _product_name: "ORD-GEMINI-2"
+            bot._make_order_id = lambda _product_name: "ORD-GEMINI-1"
             fake_update = type(
                 "FakeOrderUpdate",
                 (),
                 {"effective_user": type("FakeUser", (), {"id": 42, "full_name": "Test User", "username": ""})()},
             )()
-            order = bot._create_sales_order(fake_update, "GEMINI AI", "GEMINI", 2)
+            order = bot._create_sales_order(fake_update, "GEMINI AI", "GEMINI", 1)
             self.assertEqual(order["unit_price"], 70000)
-            self.assertEqual(order["total"], 140000)
-            persisted = StoreRepository(self.db_path).find_order("ORD-GEMINI-2")
+            self.assertEqual(order["total"], 70000)
+            persisted = StoreRepository(self.db_path).find_order("ORD-GEMINI-1")
             self.assertIsNotNone(persisted)
-            self.assertEqual((persisted["unit_price_vnd"], persisted["total_vnd"], persisted["quantity"]), (70000, 140000, 2))
+            self.assertEqual((persisted["unit_price_vnd"], persisted["total_vnd"], persisted["quantity"]), (70000, 70000, 1))
+            self.assertEqual(StoreRepository(self.db_path).get_stock_count("GEMINI"), 7)
         finally:
             bot._make_order_id = previous_make_order_id
             if previous_store_db_path is None:
                 os.environ.pop("STORE_DB_PATH", None)
             else:
                 os.environ["STORE_DB_PATH"] = previous_store_db_path
+
+    def test_quantity_reservation_boundaries_follow_available_stock(self) -> None:
+        def fresh_repo_with_stock(stock: int) -> StoreRepository:
+            db_path = Path(self.temp_dir.name) / f"gemini-stock-{stock}.db"
+            with closing(sqlite3.connect(PROJECT_ROOT / "database" / "store.db")) as source, closing(sqlite3.connect(db_path)) as target:
+                source.backup(target)
+            repo = StoreRepository(db_path)
+            with closing(sqlite3.connect(db_path)) as connection:
+                with connection:
+                    product = connection.execute(
+                        "SELECT id FROM products WHERE code IN ('GEMINI', 'GEM-AIPRO-1M-PRIVATE') ORDER BY CASE WHEN code = 'GEMINI' THEN 0 ELSE 1 END LIMIT 1"
+                    ).fetchone()
+                    self.assertIsNotNone(product)
+                    connection.execute("DELETE FROM inventory_items WHERE product_id = ?", (product[0],))
+            for index in range(stock):
+                repo.add_inventory_item("GEMINI", f"qty{stock}-{index}@example.com|pass")
+            self.assertEqual(repo.get_stock_count("GEMINI"), stock)
+            return repo
+
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        cases = ((1, 8, True), (5, 3, False), (8, 8, True), (9, 8, False))
+        for requested, stock, should_succeed in cases:
+            repo = fresh_repo_with_stock(stock)
+            order_id = f"ORD-QTY-{stock}-{requested}"
+            if should_succeed:
+                reserved = repo.create_pending_account_order_and_reserve(
+                    order_id=order_id,
+                    telegram_user_id=1,
+                    username="Quantity Test",
+                    product_code="GEMINI",
+                    product_name="GEMINI AI",
+                    package_name="Gemini AI Pro",
+                    quantity=requested,
+                    unit_price_vnd=70000,
+                    total_vnd=70000 * requested,
+                    created_at=now,
+                    expire_at=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+                )
+                self.assertEqual(len(reserved), requested)
+                self.assertEqual(repo.get_stock_count("GEMINI"), stock - requested)
+            else:
+                with self.assertRaisesRegex(ValueError, "Insufficient available inventory"):
+                    repo.create_pending_account_order_and_reserve(
+                        order_id=order_id,
+                        telegram_user_id=1,
+                        username="Quantity Test",
+                        product_code="GEMINI",
+                        product_name="GEMINI AI",
+                        package_name="Gemini AI Pro",
+                        quantity=requested,
+                        unit_price_vnd=70000,
+                        total_vnd=70000 * requested,
+                        created_at=now,
+                        expire_at=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+                    )
 
     def test_catalog_schema_and_optional_import_columns(self) -> None:
         with closing(sqlite3.connect(self.db_path)) as connection:
