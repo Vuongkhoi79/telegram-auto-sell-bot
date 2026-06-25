@@ -37,6 +37,10 @@ OPTIONAL_COLUMNS = (
 )
 IMPORT_COLUMNS = tuple(dict.fromkeys((*REQUIRED_COLUMNS, *OPTIONAL_COLUMNS)))
 SKIPPED_SHEET_NAMES = {"README", "HƯỚNG DẪN", "HUONG DAN", "TEMPLATE"}
+DEFAULT_PRODUCT_DISPLAY_NAMES = {
+    "CAPCUT": "CAPCUT PRO",
+    "GEMINI": "Gemini AI Pro",
+}
 ALLOWED_PRODUCT_CODES = {
     "CHATGPT",
     "GEMINI",
@@ -142,6 +146,7 @@ def product_display_name(product_code: str, row: dict[str, Any]) -> str:
     return (
         text(row.get("package_name"))
         or text(row.get("plan_name"))
+        or DEFAULT_PRODUCT_DISPLAY_NAMES.get(product_code)
         or text(row.get("product_name"))
         or product_code
     )

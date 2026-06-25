@@ -1041,14 +1041,17 @@ def _catalog_category_items(product_group: str = "account") -> list[dict[str, ob
         try:
             rows = StoreRepository(path).list_visible_categories(product_group)
             if rows:
-                return [
+                catalog_items = [
                     {
                         "category_key": _catalog_display_name(str(row["category_key"])),
                         "lookup_key": str(row["category_key"]).upper(),
                         "available_count": int(row["available_count"] or 0),
                     }
                     for row in rows
+                    if _menu_stock_product_code(str(row["category_key"]))
                 ]
+                if catalog_items:
+                    return catalog_items
         except (OSError, RuntimeError, sqlite3.Error):
             pass
     return [

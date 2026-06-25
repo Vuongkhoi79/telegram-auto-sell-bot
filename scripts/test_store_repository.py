@@ -271,7 +271,7 @@ class StoreRepositoryTest(unittest.TestCase):
         self.assertEqual(report["stock"], {"CAPCUT": 2, "GEMINI": 2})
         with closing(sqlite3.connect(self.db_path)) as connection:
             capcut = connection.execute("SELECT code, name, category, delivery_type, price_vnd FROM products WHERE code = 'CAPCUT'").fetchone()
-        self.assertEqual(capcut, ("CAPCUT", "CAPCUT", "account", "account", 100))
+        self.assertEqual(capcut, ("CAPCUT", "CAPCUT PRO", "account", "account", 100))
 
     def test_replace_preserves_reserved_and_delivered_inventory(self) -> None:
         workbook_path = Path(self.temp_dir.name) / "replace.xlsx"
@@ -365,6 +365,26 @@ class StoreRepositoryTest(unittest.TestCase):
         report = import_inventory(workbook_path, self.db_path, mode="replace")
         self.assertEqual(report["stock"], {"GEMINI": 8, "CAPCUT": 3})
         with closing(sqlite3.connect(self.db_path)) as connection:
+            now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+            with connection:
+                connection.execute(
+                    """
+                    INSERT INTO products
+                        (id, code, name, active, delivery_type, created_at, updated_at,
+                         category, category_key, price_vnd, product_group)
+                    VALUES (?, ?, ?, 1, 'account', ?, ?, 'AI', 'AI', 0, 'account')
+                    """,
+                    ("old-ai-category", "OLD-AI-CATEGORY", "AI", now, now),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO products
+                        (id, code, name, active, delivery_type, created_at, updated_at,
+                         category_key, price_vnd, product_group)
+                    VALUES (?, ?, ?, 1, 'account', ?, ?, 'CAPCUT', 0, 'account')
+                    """,
+                    ("catalog-capcut-zero", "CATALOG-CAPCUT-ZERO", "CAPCUT PRO", now, now),
+                )
             prices = dict(connection.execute("SELECT code, price_vnd FROM products WHERE code IN ('GEMINI', 'CAPCUT')").fetchall())
         self.assertEqual(prices["GEMINI"], 70000)
 
@@ -375,11 +395,16 @@ class StoreRepositoryTest(unittest.TestCase):
             menu_buttons = [button.text for row in bot._product_menu_keyboard().inline_keyboard for button in row]
             self.assertIn("🟢 GEMINI AI (8)", menu_buttons)
             self.assertIn("🟢 CAPCUT PRO (3)", menu_buttons)
+            self.assertNotIn("🟢 AI (8)", menu_buttons)
+            self.assertFalse(any(label in {"🟢 AI (0)", "🔴 AI (0)", "🟢 AI (8)", "🔴 AI (8)"} for label in menu_buttons))
             self.assertFalse(any("90.000" in label or "199.000" in label or "499.000" in label for label in menu_buttons))
 
             package_buttons = [button.text for row in bot._package_keyboard("GEMINI AI").inline_keyboard for button in row]
             self.assertIn("🎁 Gemini AI Pro - 70.000đ [8]", package_buttons)
             self.assertFalse(any("90.000" in label or "199.000" in label or "499.000" in label for label in package_buttons))
+            capcut_package_buttons = [button.text for row in bot._package_keyboard("CAPCUT PRO").inline_keyboard for button in row]
+            self.assertIn("🎁 CAPCUT PRO - 400.000đ [3]", capcut_package_buttons)
+            self.assertNotIn("🎁 CAPCUT PRO - 0đ [0]", capcut_package_buttons)
 
             package = bot._get_package_info("GEMINI AI", "GEMINI")
             self.assertIsNotNone(package)

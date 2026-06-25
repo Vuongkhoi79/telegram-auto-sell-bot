@@ -342,13 +342,14 @@ class StoreRepository:
         with self._session() as connection:
             rows = connection.execute(
                 """
-                SELECT UPPER(COALESCE(NULLIF(p.category_key, ''), NULLIF(p.name, ''), p.code)) AS category_key,
+                SELECT UPPER(p.category_key) AS category_key,
                        MIN(p.menu_order) AS menu_order,
                        SUM(CASE WHEN i.status = 'available' THEN 1 ELSE 0 END) AS available_count
                 FROM products
                 AS p LEFT JOIN inventory_items AS i ON i.product_id = p.id
                 WHERE p.active = 1 AND p.show_in_menu = 1 AND p.product_group = ?
-                GROUP BY UPPER(COALESCE(NULLIF(p.category_key, ''), NULLIF(p.name, ''), p.code))
+                  AND NULLIF(p.category_key, '') IS NOT NULL
+                GROUP BY UPPER(p.category_key)
                 ORDER BY menu_order, category_key COLLATE NOCASE
                 """,
                 (product_group,),
@@ -368,6 +369,7 @@ class StoreRepository:
                   AND UPPER(COALESCE(NULLIF(p.category_key, ''), NULLIF(p.category, ''), p.code)) = ?
                 GROUP BY p.id, p.code, p.name, p.category_key, p.description,
                          p.price_vnd, p.active, p.menu_order, p.product_group
+                HAVING available_count > 0 OR p.price_vnd > 0
                 ORDER BY p.menu_order, p.name COLLATE NOCASE, p.code
                 """,
                 (product_group, category_key.upper()),
