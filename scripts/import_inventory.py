@@ -19,10 +19,13 @@ from typing import Any, Iterator
 
 from openpyxl import load_workbook
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from repository.store_repository import ACCOUNT_PRODUCT_CODE_ALIASES
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATABASE = PROJECT_ROOT / "database" / "store.db"
 REQUIRED_COLUMNS = (
     "product_code", "category", "product_name", "account_type", "duration",
@@ -30,6 +33,7 @@ REQUIRED_COLUMNS = (
 )
 OPTIONAL_COLUMNS = ("category_key", "menu_order", "show_in_menu", "product_group", "description", "email", "password", "2fa", "recovery_email")
 IMPORT_COLUMNS = tuple(dict.fromkeys((*REQUIRED_COLUMNS, *OPTIONAL_COLUMNS)))
+SKIPPED_SHEET_NAMES = {"README", "HƯỚNG DẪN", "HUONG DAN", "TEMPLATE"}
 ALLOWED_PRODUCT_CODES = {
     "CHATGPT",
     "GEMINI",
@@ -94,6 +98,16 @@ def validate_product_code(product_code: str) -> None:
         raise ValueError(f"Unsupported product_code: {product_code}. Allowed product_code values: {allowed}")
 
 
+def canonical_product_code(product_code: str) -> str:
+    normalized = text(product_code).upper()
+    if normalized in ALLOWED_PRODUCT_CODES:
+        return normalized
+    for canonical, aliases in ACCOUNT_PRODUCT_CODE_ALIASES.items():
+        if normalized in {alias.upper() for alias in aliases}:
+            return canonical
+    return normalized
+
+
 def product_code_candidates(product_code: str) -> list[str]:
     candidates = [product_code]
     for alias in ACCOUNT_PRODUCT_CODE_ALIASES.get(product_code, ()):
@@ -112,6 +126,60 @@ def find_existing_product(connection: sqlite3.Connection, product_code: str) -> 
         if row:
             return row
     return None
+
+
+def find_product_by_code(connection: sqlite3.Connection, product_code: str) -> sqlite3.Row | None:
+    return connection.execute(
+        "SELECT id, code FROM products WHERE code = ? AND active = 1",
+        (product_code,),
+    ).fetchone()
+
+
+def parse_int(value: Any, default: int = 0) -> int:
+    raw = text(value)
+    if not raw:
+        return default
+    return int(float(raw))
+
+
+def ensure_product(
+    connection: sqlite3.Connection,
+    product_code: str,
+    row: dict[str, Any],
+    now: str,
+) -> sqlite3.Row:
+    product = find_product_by_code(connection, product_code)
+    if product:
+        return product
+
+    product_id = str(uuid.uuid4())
+    price_vnd = parse_int(row.get("price_vnd"), 0)
+    connection.execute(
+        """
+        INSERT INTO products
+            (id, code, name, active, delivery_type, created_at, updated_at,
+             category, account_type, duration, price_vnd, warranty_days, note,
+             category_key, product_group)
+        VALUES (?, ?, ?, 1, 'account', ?, ?, 'account', ?, ?, ?, ?, ?, ?, 'account')
+        """,
+        (
+            product_id,
+            product_code,
+            product_code,
+            now,
+            now,
+            text(row.get("account_type")),
+            text(row.get("duration")),
+            price_vnd,
+            parse_int(row.get("warranty_days"), 0),
+            text(row.get("note")),
+            product_code,
+        ),
+    )
+    return connection.execute(
+        "SELECT id, code FROM products WHERE id = ?",
+        (product_id,),
+    ).fetchone()
 
 
 def read_rows(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
@@ -134,36 +202,144 @@ def read_rows(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
         raise ValueError("Input must be an .xlsx or .csv file")
     workbook = load_workbook(path, read_only=True, data_only=True)
     try:
-        sheet = workbook.active
-        header = [text(value).lower() for value in next(sheet.iter_rows(min_row=1, max_row=1, values_only=True))]
-        positions = {name: index for index, name in enumerate(header) if name}
-        if "product_code" not in positions:
-            raise ValueError("Missing required column: product_code")
-        if "credential_text" not in positions and not {"email", "password"}.issubset(positions):
-            raise ValueError("Missing credential columns: use credential_text or email/password")
-        for row_number, values in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
-            if not any(value is not None and text(value) for value in values):
+        for sheet in workbook.worksheets:
+            sheet_code = text(sheet.title).upper()
+            if sheet_code in SKIPPED_SHEET_NAMES:
                 continue
-            yield row_number, {
-                column: values[positions[column]] if column in positions and positions[column] < len(values) else ""
-                for column in IMPORT_COLUMNS
-            }
+            header_row = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True), None)
+            if not header_row:
+                continue
+            header = [text(value).lower() for value in header_row]
+            positions = {name: index for index, name in enumerate(header) if name}
+            if "credential_text" not in positions and not {"email", "password"}.issubset(positions):
+                raise ValueError(f"Sheet {sheet.title}: missing credential columns: use credential_text or email/password")
+            sheet_is_product = sheet_code in ALLOWED_PRODUCT_CODES
+            if not sheet_is_product and "product_code" not in positions:
+                raise ValueError(f"Sheet {sheet.title}: missing required column: product_code")
+            for row_number, values in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
+                if not any(value is not None and text(value) for value in values):
+                    continue
+                row = {
+                    column: values[positions[column]] if column in positions and positions[column] < len(values) else ""
+                    for column in IMPORT_COLUMNS
+                }
+                if sheet_is_product:
+                    row["product_code"] = sheet_code
+                yield row_number, row
     finally:
         workbook.close()
 
 
-def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE) -> dict[str, Any]:
+def disable_available_inventory(connection: sqlite3.Connection, product_id: str, now: str) -> int:
+    rows = connection.execute(
+        "SELECT id FROM inventory_items WHERE product_id = ? AND status = 'available'",
+        (product_id,),
+    ).fetchall()
+    for row in rows:
+        connection.execute(
+            "UPDATE inventory_items SET status = 'disabled', disabled_at = ? WHERE id = ?",
+            (now, row["id"]),
+        )
+        connection.execute(
+            """
+            INSERT INTO inventory_movements
+                (id, inventory_item_id, action, source, created_at)
+            VALUES (?, ?, 'disable', 'import_inventory_replace', ?)
+            """,
+            (str(uuid.uuid4()), row["id"], now),
+        )
+    return len(rows)
+
+
+def available_stock_for_code(connection: sqlite3.Connection, product_code: str) -> int:
+    exact = find_product_by_code(connection, product_code)
+    if exact:
+        row = connection.execute(
+            "SELECT COUNT(*) AS stock FROM inventory_items WHERE product_id = ? AND status = 'available'",
+            (exact["id"],),
+        ).fetchone()
+        return int(row["stock"] or 0)
+
+    total = 0
+    for candidate in product_code_candidates(product_code):
+        row = connection.execute(
+            """
+            SELECT COUNT(*) AS stock
+            FROM inventory_items AS i
+            JOIN products AS p ON p.id = i.product_id
+            WHERE p.code = ? AND i.status = 'available'
+            """,
+            (candidate,),
+        ).fetchone()
+        total += int(row["stock"] or 0)
+    return total
+
+
+def should_auto_create_product(product_code: str) -> bool:
+    return product_code == "CAPCUT"
+
+
+def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE, mode: str = "replace") -> dict[str, Any]:
+    if mode not in {"append", "replace"}:
+        raise ValueError("mode must be append or replace")
     if not database_path.is_file():
         raise FileNotFoundError(f"Store database not found: {database_path}")
     report: dict[str, Any] = {
         "products_created": 0, "products_updated": 0, "credentials_added": 0,
-        "credentials_duplicate": 0, "row_errors": 0, "invalid_rows": 0,
+        "credentials_duplicate": 0, "credentials_disabled": 0, "row_errors": 0, "invalid_rows": 0,
         "errors": [], "stock": {},
     }
+    rows = list(read_rows(input_path))
+    product_seed_rows: dict[str, dict[str, Any]] = {}
+    for _, row in rows:
+        product_code = text(row.get("product_code")).upper()
+        if product_code and product_code not in product_seed_rows:
+            product_seed_rows[product_code] = row
+
     with closing(sqlite3.connect(database_path)) as connection, connection:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
-        for row_index, (row_number, row) in enumerate(read_rows(input_path), start=1):
+        replaced_product_ids: set[str] = set()
+        imported_codes: list[str] = []
+        imported_code_seen: set[str] = set()
+
+        def add_imported_code(product_code: str) -> None:
+            canonical = canonical_product_code(product_code)
+            if canonical not in imported_code_seen:
+                imported_codes.append(canonical)
+                imported_code_seen.add(canonical)
+
+        for product_code, row in product_seed_rows.items():
+            savepoint = f"inventory_product_{len(imported_codes) + 1}"
+            connection.execute(f"SAVEPOINT {savepoint}")
+            try:
+                try:
+                    validate_product_code(product_code)
+                except ValueError:
+                    connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+                    continue
+                now = utc_now_iso()
+                product = find_product_by_code(connection, product_code) if should_auto_create_product(product_code) else find_existing_product(connection, product_code)
+                if not product:
+                    if should_auto_create_product(product_code):
+                        product = ensure_product(connection, product_code, row, now)
+                        report["products_created"] += 1
+                    else:
+                        connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+                        continue
+                add_imported_code(product_code)
+                if mode == "replace" and product["id"] not in replaced_product_ids:
+                    report["credentials_disabled"] += disable_available_inventory(connection, product["id"], now)
+                    replaced_product_ids.add(product["id"])
+                connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+            except Exception as exc:
+                connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+                report["row_errors"] += 1
+                report["invalid_rows"] += 1
+                report["errors"].append(f"product {product_code}: {exc}")
+
+        for row_index, (row_number, row) in enumerate(rows, start=1):
             savepoint = f"inventory_row_{row_index}"
             connection.execute(f"SAVEPOINT {savepoint}")
             try:
@@ -175,7 +351,11 @@ def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE) -
                 now = utc_now_iso()
                 product = find_existing_product(connection, product_code)
                 if not product:
-                    raise ValueError(f"Unknown product_code: {product_code}. Product must exist in products; import did not create it.")
+                    if should_auto_create_product(product_code):
+                        product = ensure_product(connection, product_code, row, now)
+                        report["products_created"] += 1
+                    else:
+                        raise ValueError(f"Unknown product_code: {product_code}. Product must exist in products; import did not create it.")
                 product_id = product["id"]
 
                 item_id = str(uuid.uuid4())
@@ -193,21 +373,17 @@ def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE) -
                 )
                 connection.execute(f"RELEASE SAVEPOINT {savepoint}")
                 report["credentials_added"] += 1
+                add_imported_code(product_code)
             except Exception as exc:
                 connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
                 connection.execute(f"RELEASE SAVEPOINT {savepoint}")
                 report["row_errors"] += 1
                 report["invalid_rows"] += 1
                 report["errors"].append(f"row {row_number}: {exc}")
-        stock_rows = connection.execute(
-            """
-            SELECT p.code, COUNT(i.id) AS stock
-            FROM products AS p
-            LEFT JOIN inventory_items AS i ON i.product_id = p.id AND i.status = 'available'
-            GROUP BY p.id, p.code ORDER BY p.code
-            """
-        ).fetchall()
-        report["stock"] = {row["code"]: int(row["stock"]) for row in stock_rows}
+        report["stock"] = {
+            code: available_stock_for_code(connection, code)
+            for code in imported_codes
+        }
     return report
 
 
@@ -244,10 +420,10 @@ def self_test() -> None:
         assert report["credentials_added"] == 3, report
         assert report["credentials_duplicate"] == 0, report
         assert report["row_errors"] == 0, report
-        assert {code: report["stock"][code] for code in ("GPT-PLUS-1M-PRIVATE", "GEM-AIPRO-1M-PRIVATE", "GROK-SUPER-1M-PRIVATE")} == {
-            "GPT-PLUS-1M-PRIVATE": 1,
-            "GEM-AIPRO-1M-PRIVATE": 1,
-            "GROK-SUPER-1M-PRIVATE": 1,
+        assert report["stock"] == {
+            "GEMINI": 1,
+            "CHATGPT": 1,
+            "GROK": 1,
         }, report
         print_report(report)
         print("SELF-TEST: PASS")
@@ -257,6 +433,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Import account inventory from .xlsx or .csv")
     parser.add_argument("input", nargs="?", type=Path, help="Excel or CSV source file")
     parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE, help="Path to store.db")
+    parser.add_argument("--mode", choices=("append", "replace"), default="replace", help="append to stock or replace available stock for imported products")
     parser.add_argument("--self-test", action="store_true", help="Run isolated Gemini/ChatGPT/Grok import test")
     args = parser.parse_args()
     if args.self_test:
@@ -264,7 +441,7 @@ def main() -> int:
         return 0
     if not args.input:
         parser.error("input is required unless --self-test is used")
-    report = import_inventory(args.input, args.database)
+    report = import_inventory(args.input, args.database, args.mode)
     print_report(report)
     return 1 if report["row_errors"] else 0
 

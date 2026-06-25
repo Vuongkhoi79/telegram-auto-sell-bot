@@ -9,6 +9,8 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from openpyxl import Workbook
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -217,20 +219,18 @@ class StoreRepositoryTest(unittest.TestCase):
         )
 
         import_path = Path(self.temp_dir.name) / "inventory.csv"
-        initial_gemini_stock = self.store.get_stock_count("GEMINI")
         with import_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle)
             writer.writerow(REQUIRED_COLUMNS)
             writer.writerow(["GEMINI", "AI", "Gemini", "private", "30D", 100, 7, "import1@example.com|pass", "", 1])
             writer.writerow(["GEMINI", "AI", "Gemini", "private", "30D", 100, 7, "import2@example.com|pass|2fa", "", 1])
         first_import = import_inventory(import_path, self.db_path)
-        second_import = import_inventory(import_path, self.db_path)
+        second_import = import_inventory(import_path, self.db_path, mode="append")
         self.assertEqual((first_import["credentials_added"], first_import["credentials_duplicate"], first_import["row_errors"]), (2, 0, 0))
         self.assertEqual((second_import["credentials_added"], second_import["credentials_duplicate"], second_import["row_errors"]), (2, 0, 0))
-        self.assertEqual(self.store.get_stock_count("GEMINI"), initial_gemini_stock + 4)
+        self.assertEqual(self.store.get_stock_count("GEMINI"), 4)
 
         row_isolation_path = Path(self.temp_dir.name) / "row-isolation.csv"
-        initial_chatgpt_stock = self.store.get_stock_count("CHATGPT")
         with row_isolation_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle)
             writer.writerow(REQUIRED_COLUMNS)
@@ -244,7 +244,96 @@ class StoreRepositoryTest(unittest.TestCase):
         )
         with closing(sqlite3.connect(self.db_path)) as connection:
             self.assertIsNone(connection.execute("SELECT id FROM products WHERE code = 'VEO3'").fetchone())
-        self.assertEqual(self.store.get_stock_count("CHATGPT"), initial_chatgpt_stock + 2)
+        self.assertEqual(self.store.get_stock_count("CHATGPT"), 2)
+
+    def test_import_workbook_multi_sheet_reports_canonical_codes(self) -> None:
+        workbook_path = Path(self.temp_dir.name) / "multi-sheet.xlsx"
+        workbook = Workbook()
+        default_sheet = workbook.active
+        default_sheet.title = "README"
+        default_sheet.append(["ignored"])
+        for sheet_name, credentials in {
+            "GEMINI": ("gemini1@example.com|pass", "gemini2@example.com|pass|2fa"),
+            "CAPCUT": ("capcut1@example.com|pass", "capcut2@example.com|pass"),
+        }.items():
+            sheet = workbook.create_sheet(sheet_name)
+            sheet.append(REQUIRED_COLUMNS)
+            for credential in credentials:
+                sheet.append([sheet_name, "AI", sheet_name, "personal", "30D", 100, 7, credential, "", 1])
+        workbook.save(workbook_path)
+        workbook.close()
+
+        report = import_inventory(workbook_path, self.db_path)
+
+        self.assertEqual((report["credentials_added"], report["row_errors"]), (4, 0))
+        self.assertEqual(report["stock"], {"CAPCUT": 2, "GEMINI": 2})
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            capcut = connection.execute("SELECT code, name, category, delivery_type, price_vnd FROM products WHERE code = 'CAPCUT'").fetchone()
+        self.assertEqual(capcut, ("CAPCUT", "CAPCUT", "account", "account", 100))
+
+    def test_replace_preserves_reserved_and_delivered_inventory(self) -> None:
+        workbook_path = Path(self.temp_dir.name) / "replace.xlsx"
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "GEMINI"
+        sheet.append(REQUIRED_COLUMNS)
+        sheet.append(["GEMINI", "AI", "Gemini", "personal", "30D", 100, 7, "new1@example.com|pass", "", 1])
+        sheet.append(["GEMINI", "AI", "Gemini", "personal", "30D", 100, 7, "new2@example.com|pass", "", 1])
+        workbook.save(workbook_path)
+        workbook.close()
+
+        available_id = self.store.add_inventory_item("GEMINI", "old-available@example.com|pass")
+        reserved_id = self.store.add_inventory_item("GEMINI", "old-reserved@example.com|pass")
+        delivered_id = self.store.add_inventory_item("GEMINI", "old-delivered@example.com|pass")
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            with connection:
+                connection.execute("UPDATE inventory_items SET status = 'reserved' WHERE id = ?", (reserved_id,))
+                connection.execute("UPDATE inventory_items SET status = 'delivered' WHERE id = ?", (delivered_id,))
+
+        report = import_inventory(workbook_path, self.db_path, mode="replace")
+
+        self.assertEqual((report["credentials_added"], report["row_errors"]), (2, 0))
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            states = dict(connection.execute(
+                "SELECT id, status FROM inventory_items WHERE id IN (?, ?, ?)",
+                (available_id, reserved_id, delivered_id),
+            ).fetchall())
+        self.assertEqual(states[available_id], "disabled")
+        self.assertEqual(states[reserved_id], "reserved")
+        self.assertEqual(states[delivered_id], "delivered")
+
+    def test_capcut_auto_created_when_missing_product(self) -> None:
+        workbook_path = Path(self.temp_dir.name) / "capcut.xlsx"
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "CAPCUT"
+        sheet.append(REQUIRED_COLUMNS)
+        sheet.append(["", "AI", "CapCut Pro", "personal", "365D", 400000, 365, "capcut@example.com|pass", "", 1])
+        workbook.save(workbook_path)
+        workbook.close()
+
+        report = import_inventory(workbook_path, self.db_path)
+
+        self.assertEqual((report["products_created"], report["credentials_added"], report["row_errors"]), (1, 1, 0))
+        self.assertEqual(report["stock"], {"CAPCUT": 1})
+
+    def test_replace_reimport_same_workbook_does_not_double_stock(self) -> None:
+        workbook_path = Path(self.temp_dir.name) / "repeat-replace.xlsx"
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "CAPCUT"
+        sheet.append(REQUIRED_COLUMNS)
+        for credential in ("one@example.com|pass", "two@example.com|pass", "three@example.com|pass"):
+            sheet.append(["CAPCUT", "AI", "CAPCUT", "personal", "365D", 400000, 365, credential, "", 1])
+        workbook.save(workbook_path)
+        workbook.close()
+
+        first = import_inventory(workbook_path, self.db_path, mode="replace")
+        second = import_inventory(workbook_path, self.db_path, mode="replace")
+
+        self.assertEqual((first["credentials_added"], first["row_errors"]), (3, 0))
+        self.assertEqual((second["credentials_added"], second["row_errors"]), (3, 0))
+        self.assertEqual(second["stock"], {"CAPCUT": 3})
 
     def test_catalog_schema_and_optional_import_columns(self) -> None:
         with closing(sqlite3.connect(self.db_path)) as connection:
