@@ -146,7 +146,7 @@ class StoreRepositoryTest(unittest.TestCase):
         self.store.mark_account_order_paid_for_fulfillment("ORD-DELIVERED")
         self.assertEqual(len(self.store.deliver_reserved_items("ORD-DELIVERED")), 1)
 
-        self.assertEqual(self.store.release_expired_reservations(), 1)
+        self.assertEqual(self.store.release_expired_reservations(5), 1)
         with closing(sqlite3.connect(self.db_path)) as connection:
             order_items = {
                 row[0]: (row[1], row[2], row[3])
@@ -163,7 +163,64 @@ class StoreRepositoryTest(unittest.TestCase):
         self.assertEqual(order_items["ORD-EXPIRED"], ("available", "", "released"))
         self.assertEqual(order_items["ORD-PAID"][0], "reserved")
         self.assertEqual(order_items["ORD-DELIVERED"][0], "delivered")
-        self.assertEqual(self.store.release_expired_reservations(), 0)
+        self.assertEqual(self.store.release_expired_reservations(5), 0)
+
+    def test_release_order_reservation_returns_stock_before_payment(self) -> None:
+        for credential in ("release1@example.com|pass", "release2@example.com|pass"):
+            self.store.add_inventory_item("TEST_PRODUCT", credential)
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        self.store.create_pending_account_order_and_reserve(
+            order_id="ORD-RELEASE-001",
+            telegram_user_id=1,
+            username="Test User",
+            product_code="TEST_PRODUCT",
+            product_name="Test Product",
+            package_name="TEST",
+            quantity=2,
+            unit_price_vnd=1,
+            total_vnd=2,
+            created_at=now,
+            expire_at=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+        )
+        self.assertEqual(self.store.get_stock_count("TEST_PRODUCT"), 0)
+        released = self.store.release_order_reservation("ORD-RELEASE-001")
+        self.assertEqual(released, 2)
+        self.assertEqual(self.store.get_stock_count("TEST_PRODUCT"), 2)
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            rows = dict(connection.execute(
+                "SELECT secret_value, status FROM inventory_items WHERE secret_value LIKE 'release%@example.com|pass'"
+            ).fetchall())
+        self.assertEqual(set(rows.values()), {"available"})
+
+    def test_paid_order_is_not_released_by_timeout_and_still_delivers(self) -> None:
+        for credential in ("paid-timeout1@example.com|pass", "paid-timeout2@example.com|pass"):
+            self.store.add_inventory_item("TEST_PRODUCT", credential)
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        order_id = "ORD-PAID-TIMEOUT"
+        self.store.create_pending_account_order_and_reserve(
+            order_id=order_id,
+            telegram_user_id=1,
+            username="Test User",
+            product_code="TEST_PRODUCT",
+            product_name="Test Product",
+            package_name="TEST",
+            quantity=2,
+            unit_price_vnd=1,
+            total_vnd=2,
+            created_at=now.isoformat(),
+            expire_at=(now + timedelta(minutes=5)).isoformat(),
+        )
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            with connection:
+                connection.execute(
+                    "UPDATE inventory_items SET reserved_at = ? WHERE reserved_order_id = ?",
+                    ((now - timedelta(minutes=6)).isoformat(), order_id),
+                )
+        self.store.mark_account_order_paid_for_fulfillment(order_id)
+        self.assertEqual(self.store.release_expired_reservations(5), 0)
+        delivered = self.store.deliver_reserved_items(order_id)
+        self.assertEqual(len(delivered), 2)
+        self.assertEqual(self.store.get_stock_count("TEST_PRODUCT"), 0)
 
     def test_admin_stock_operations_and_repeat_import(self) -> None:
         item_ids = [

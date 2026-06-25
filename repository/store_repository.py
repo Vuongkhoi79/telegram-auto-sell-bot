@@ -768,20 +768,26 @@ class StoreRepository:
                 )
         return [{"id": item["id"], "credential_text": item["secret_value"]} for item in items]
 
-    def release_expired_reservations(self) -> int:
+    def release_expired_reservations(self, expire_minutes: int = 5) -> int:
+        if expire_minutes <= 0:
+            raise ValueError("expire_minutes must be positive")
         now = _utc_now_iso()
+        threshold = (datetime.now(timezone.utc).replace(microsecond=0) - timedelta(minutes=expire_minutes)).isoformat()
         released = 0
         with self._session() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
                 """
-                SELECT oi.order_id, oi.inventory_item_id
-                FROM order_inventory_items AS oi
-                JOIN orders AS o ON o.id = oi.order_id
-                WHERE oi.state = 'reserved' AND o.payment_status = 'pending'
-                  AND o.expire_at IS NOT NULL AND o.expire_at <= ?
+                SELECT i.id AS inventory_item_id, i.reserved_order_id, o.id AS order_row_id
+                FROM inventory_items AS i
+                LEFT JOIN orders AS o ON o.order_id = i.reserved_order_id
+                WHERE i.status = 'reserved'
+                  AND i.reserved_at IS NOT NULL
+                  AND i.reserved_at <= ?
+                  AND COALESCE(o.payment_status, 'pending') = 'pending'
+                  AND COALESCE(o.order_status, 'pending') NOT IN ('paid', 'delivered', 'manual_delivery', 'cancelled', 'expired', 'failed')
                 """,
-                (now,),
+                (threshold,),
             ).fetchall()
             for row in rows:
                 connection.execute(
@@ -792,13 +798,22 @@ class StoreRepository:
                     """,
                     (row["inventory_item_id"],),
                 )
+                if row["order_row_id"]:
+                    connection.execute(
+                        """
+                        UPDATE order_inventory_items
+                        SET state = 'released', released_at = ?
+                        WHERE order_id = ? AND inventory_item_id = ? AND state = 'reserved'
+                        """,
+                        (now, row["order_row_id"], row["inventory_item_id"]),
+                    )
                 connection.execute(
-                    "UPDATE order_inventory_items SET state = 'released', released_at = ? WHERE order_id = ? AND inventory_item_id = ?",
-                    (now, row["order_id"], row["inventory_item_id"]),
-                )
-                connection.execute(
-                    "INSERT INTO inventory_movements (id, inventory_item_id, action, order_id, source, created_at) VALUES (?, ?, 'release', ?, 'store_repository', ?)",
-                    (str(uuid.uuid4()), row["inventory_item_id"], row["order_id"], now),
+                    """
+                    INSERT INTO inventory_movements
+                        (id, inventory_item_id, action, order_id, source, created_at)
+                    VALUES (?, ?, 'release', ?, 'reservation_timeout', ?)
+                    """,
+                    (str(uuid.uuid4()), row["inventory_item_id"], row["order_row_id"], now),
                 )
                 released += 1
             if rows:
@@ -806,6 +821,70 @@ class StoreRepository:
                     "UPDATE orders SET order_status = 'expired', payment_status = 'expired' WHERE payment_status = 'pending' AND expire_at IS NOT NULL AND expire_at <= ?",
                     (now,),
                 )
+        __import__("logging").getLogger(__name__).info("Released expired reservations: %s", released)
+        return released
+
+    def release_order_reservation(self, order_id: str) -> int:
+        order_id = str(order_id or "").strip()
+        if not order_id:
+            raise ValueError("order_id must not be empty")
+        now = _utc_now_iso()
+        released = 0
+        with self._session() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            order = connection.execute(
+                "SELECT id, payment_status, order_status FROM orders WHERE order_id = ?",
+                (order_id,),
+            ).fetchone()
+            if not order:
+                return 0
+            if order["payment_status"] != "pending" or order["order_status"] not in {"pending", "reserved"}:
+                return 0
+            rows = connection.execute(
+                """
+                SELECT id
+                FROM inventory_items
+                WHERE status = 'reserved' AND reserved_order_id = ?
+                ORDER BY created_at, id
+                """,
+                (order_id,),
+            ).fetchall()
+            for row in rows:
+                connection.execute(
+                    """
+                    UPDATE inventory_items
+                    SET status = 'available', reserved_order_id = NULL, reserved_at = NULL
+                    WHERE id = ? AND status = 'reserved'
+                    """,
+                    (row["id"],),
+                )
+                connection.execute(
+                    """
+                    UPDATE order_inventory_items
+                    SET state = 'released', released_at = ?
+                    WHERE order_id = ? AND inventory_item_id = ? AND state = 'reserved'
+                    """,
+                    (now, order["id"], row["id"]),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO inventory_movements
+                        (id, inventory_item_id, action, order_id, source, created_at)
+                    VALUES (?, ?, 'release', ?, 'order_release', ?)
+                    """,
+                    (str(uuid.uuid4()), row["id"], order["id"], now),
+                )
+                released += 1
+            if order["payment_status"] == "pending" and order["order_status"] in {"pending", "reserved"}:
+                connection.execute(
+                    """
+                    UPDATE orders
+                    SET payment_status = 'cancelled', order_status = 'cancelled'
+                    WHERE id = ?
+                    """,
+                    (order["id"],),
+                )
+        __import__("logging").getLogger(__name__).info("Released order reservation: order_id=%s, count=%s", order_id, released)
         return released
 
     def mark_order_paid(self, order_id: str, transaction_id: str) -> bool:

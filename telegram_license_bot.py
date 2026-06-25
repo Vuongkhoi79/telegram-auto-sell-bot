@@ -1011,10 +1011,51 @@ def _release_expired_sqlite_reservations(store_db_path: Path | str | None = None
         logger.warning("SQLite reservation cleanup skipped; store database is missing: %s", path)
         return 0
     try:
-        return StoreRepository(path).release_expired_reservations()
+        return StoreRepository(path).release_expired_reservations(5)
     except (OSError, RuntimeError, sqlite3.Error) as exc:
         logger.exception("SQLite reservation cleanup failed: %s", exc)
         return 0
+
+
+def _release_order_reservation(order_id: str, *, store_db_path: Path | str | None = None) -> int:
+    path = _resolve_store_db_path(store_db_path)
+    if not path.is_file():
+        return 0
+    try:
+        return StoreRepository(path).release_order_reservation(order_id)
+    except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
+        logger.exception("SQLite order reservation release failed for %s: %s", order_id, exc)
+        return 0
+
+
+def _latest_pending_order_id_for_user(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> str:
+    pending_order_id = str((getattr(context, "user_data", {}) or {}).get("pending_order_id", "") or "").strip()
+    path = _resolve_store_db_path()
+    try:
+        orders = StoreRepository(path).list_orders() if path.is_file() else _load_orders()
+    except (OSError, RuntimeError, sqlite3.Error):
+        orders = _load_orders()
+    for order in reversed(orders):
+        if int(order.get("telegram_user_id", 0) or 0) != int(user_id):
+            continue
+        if str(order.get("payment_status", "")).lower() != "pending":
+            continue
+        if str(order.get("order_status", "")).lower() not in {"pending", "reserved"}:
+            continue
+        order_id = str(order.get("order_id", "")).strip()
+        if order_id:
+            return order_id
+    return pending_order_id
+
+
+def _release_current_user_reservation(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> int:
+    order_id = _latest_pending_order_id_for_user(context, user_id)
+    if not order_id:
+        return 0
+    released = _release_order_reservation(order_id, store_db_path=context.application.bot_data.get("store_db_path"))
+    if released and getattr(context, "user_data", None) is not None:
+        context.user_data.pop("pending_order_id", None)
+    return released
 
 
 async def sqlite_reservation_cleanup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1340,6 +1381,9 @@ async def _send_license_file(update: Update, license_path: str | None) -> None:
 
 
 async def _send_products(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False, product_group: str = "account") -> None:
+    if update.effective_user:
+        _release_current_user_reservation(context, update.effective_user.id)
+    _release_expired_sqlite_reservations(context.application.bot_data.get("store_db_path"))
     text = "🎁 Sản phẩm\n\nChọn sản phẩm" if product_group == "account" else "🤖 Tool\n\nChọn sản phẩm"
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=_product_menu_keyboard(product_group))
@@ -1348,6 +1392,9 @@ async def _send_products(update: Update, context: ContextTypes.DEFAULT_TYPE, *, 
 
 
 async def _send_product_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, product_name: str, *, edit: bool = False) -> None:
+    if update.effective_user:
+        _release_current_user_reservation(context, update.effective_user.id)
+    _release_expired_sqlite_reservations(context.application.bot_data.get("store_db_path"))
     available = True
     if product_name == AI_DAILY_PRODUCT_NAME:
         text = (
@@ -1419,6 +1466,7 @@ async def _send_payment_choice(update: Update, order: dict[str, object], *, edit
 
 
 async def _send_acb_qr(update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: str) -> None:
+    _release_expired_sqlite_reservations(context.application.bot_data.get("store_db_path"))
     order = _find_order(order_id)
     query = update.callback_query
     message = query.message if query and getattr(query, "message", None) else update.effective_message
@@ -1463,6 +1511,7 @@ async def _notify_admins_order_pending(context: ContextTypes.DEFAULT_TYPE, order
 
 
 async def _send_paid_notify(update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: str) -> None:
+    _release_expired_sqlite_reservations(context.application.bot_data.get("store_db_path"))
     order = _find_order(order_id)
     if not order:
         await update.callback_query.edit_message_text("Không tìm thấy đơn hàng.", reply_markup=_main_menu_keyboard())
@@ -1797,6 +1846,9 @@ async def _maybe_issue_deeplink_license(update: Update, context: ContextTypes.DE
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user:
+        _release_expired_sqlite_reservations(context.application.bot_data.get("store_db_path"))
+        _release_current_user_reservation(context, update.effective_user.id)
     args = context.args or []
     machine_id = ""
     if args:
@@ -1977,6 +2029,7 @@ def _issue_license_for_sales_order(license_service: LicenseService, order: dict[
 
 
 async def fulfill_order(context: ContextTypes.DEFAULT_TYPE, order_id: str) -> dict[str, object]:
+    _release_expired_sqlite_reservations(context.application.bot_data.get("store_db_path"))
     sales_order = _find_order(order_id)
     if sales_order:
         if str(sales_order.get("delivery_type", "account")) == "license":
@@ -2018,6 +2071,8 @@ async def fulfill_order(context: ContextTypes.DEFAULT_TYPE, order_id: str) -> di
                 if license_path and Path(license_path).exists():
                     with Path(license_path).open("rb") as handle:
                         await context.bot.send_document(chat_id=int(customer_id), document=InputFile(handle, filename=Path(license_path).name))
+                if getattr(context, "user_data", None) is not None:
+                    context.user_data.pop("pending_order_id", None)
             return {
                 "ok": True,
                 "type": "license",
@@ -2052,6 +2107,8 @@ async def fulfill_order(context: ContextTypes.DEFAULT_TYPE, order_id: str) -> di
             else:
                 customer_text += "\n\nAdmin sẽ xử lý giao hàng cho bạn."
             await context.bot.send_message(chat_id=int(customer_id), text=customer_text)
+            if getattr(context, "user_data", None) is not None:
+                context.user_data.pop("pending_order_id", None)
         if not delivery_text:
             await _notify_admins_paid_without_delivery(context, updated_order or sales_order, delivery_message)
         return {
@@ -2142,6 +2199,7 @@ async def cmd_cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.effective_message.reply_text("Dung: /cancel_order <order_id>")
         return
     order_id = args[0].strip()
+    _release_order_reservation(order_id, store_db_path=context.application.bot_data.get("store_db_path"))
     order = _update_order(order_id, payment_status="cancelled", order_status="cancelled")
     if not order:
         await update.effective_message.reply_text("Không tìm thấy order.")
@@ -2431,6 +2489,8 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await query.answer()
     data = query.data or ""
     if data == "menu_main":
+        if update.effective_user:
+            _release_current_user_reservation(context, update.effective_user.id)
         await query.edit_message_text(_start_help_text(), reply_markup=_main_menu_keyboard())
     elif data == "menu_products":
         await _send_products(update, context, edit=True)
@@ -2458,10 +2518,15 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await query.edit_message_text("Gói không hợp lệ.", reply_markup=_product_menu_keyboard())
             return
         try:
+            if update.effective_user:
+                _release_current_user_reservation(context, update.effective_user.id)
+            _release_expired_sqlite_reservations(context.application.bot_data.get("store_db_path"))
             order = _create_sales_order(update, product_name, package_name, int(raw_qty))
         except InventoryReservationError as exc:
             await query.edit_message_text(str(exc), reply_markup=_product_menu_keyboard())
             return
+        if update.effective_user and getattr(context, "user_data", None) is not None:
+            context.user_data["pending_order_id"] = str(order.get("order_id", ""))
         await _send_payment_choice(update, order, edit=True)
     elif data.startswith("pay_acb:"):
         order_id = data.split(":", 1)[1].strip()
@@ -2477,6 +2542,7 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await _send_paid_notify(update, context, order_id)
     elif data.startswith("cancel_order:"):
         order_id = data.split(":", 1)[1].strip()
+        _release_order_reservation(order_id, store_db_path=context.application.bot_data.get("store_db_path"))
         _update_order(order_id, payment_status="cancelled", order_status="cancelled")
         if query.message and query.message.caption:
             await query.edit_message_caption(caption="Giao dịch đã hủy.", reply_markup=_main_menu_keyboard())
@@ -2484,6 +2550,8 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await query.edit_message_text("Giao dịch đã hủy.", reply_markup=_main_menu_keyboard())
     elif data.startswith("product:"):
         product_name = data.split(":", 1)[1].strip()
+        if update.effective_user:
+            _release_current_user_reservation(context, update.effective_user.id)
         await _send_product_detail(update, context, product_name, edit=True)
     elif data.startswith("buy:"):
         product_name = data.split(":", 1)[1].strip()
