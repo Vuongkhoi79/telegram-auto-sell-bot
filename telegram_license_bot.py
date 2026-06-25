@@ -1031,7 +1031,26 @@ def _product_menu_keyboard(product_group: str = "account") -> InlineKeyboardMark
 
 
 def _start_help_text() -> str:
-    return "Chọn chức năng bên dưới:"
+    return (
+        "🎉 CHÀO MỪNG\n\n"
+        "👋 Xin chào quý khách\n\n"
+        "Chào mừng bạn đến với\n"
+        "🤖 TÀI KHOẢN AI GIÁ RẺ\n\n\n\n"
+        "🚀 TẠI ĐÂY\n\n"
+        "🛒 Mua hàng tự động 24/7 - tiện lợi\n"
+        "💳 Thanh toán QR - xác nhận tức thì\n"
+        "📦 Nhận account ngay sau khi thanh toán\n\n\n\n"
+        "🛡 UY TÍN TẠO NÊN THƯƠNG HIỆU\n\n"
+        " Hệ thống tự động\n"
+        " Giao hàng nhanh\n"
+        "💬 Hỗ trợ khi cần\n\n\n\n"
+        "📞 LIÊN HỆ HỖ TRỢ\n\n"
+        "📱 Zalo: 0909968123\n"
+        " Hotline: 0909968123\n"
+        "💬 Telegram: @Aidaily79\n\n\n\n"
+        "🟢 Đây là bot tự động order 24/7\n\n"
+        "👇 Vui lòng chọn chức năng bên dưới 👇"
+    )
 
 
 def _product_list_text() -> str:
