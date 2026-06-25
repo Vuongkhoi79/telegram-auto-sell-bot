@@ -48,6 +48,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 IMPORTS_DIR = PROJECT_ROOT / "imports"
 INVENTORY_PATH = PROJECT_ROOT / "inventory.json"
 ORDERS_DB_PATH = PROJECT_ROOT / "orders_db.json"
+DEFAULT_ORDERS_DB_PATH = ORDERS_DB_PATH
 PROCESSED_TRANSACTIONS_PATH = PROJECT_ROOT / "processed_transactions.json"
 AI_DAILY_PRODUCT_NAME = "AI DAILY VIDEO CREATOR"
 DEFAULT_DOWNLOAD_URL = "https://drive.google.com/file/d/1LtCqibeDyg11hmagprhFz6zkwgquwow5/view?usp=sharing"
@@ -100,6 +101,10 @@ PRODUCT_ORDER = [
     "VEO3 ULTRA",
     "VIEWMAX",
 ]
+CATALOG_DISPLAY_NAMES = {
+    "CAPCUT": "CAPCUT PRO",
+    "GEMINI": "GEMINI AI",
+}
 
 # UI callback keys stay unchanged. Add aliases here when extending the catalog.
 TELEGRAM_PRODUCT_CODE_MAP = {
@@ -475,6 +480,10 @@ def _resolve_store_db_path(store_db_path: Path | str | None = None) -> Path:
     return path if path.is_absolute() else PROJECT_ROOT / path
 
 
+def _sqlite_orders_enabled() -> bool:
+    return bool(os.environ.get("STORE_DB_PATH")) or ORDERS_DB_PATH == DEFAULT_ORDERS_DB_PATH
+
+
 def _json_product_display_info(product_key: str) -> dict[str, object]:
     normalized_key = product_key.upper()
     item = _load_inventory().get(normalized_key)
@@ -505,6 +514,9 @@ def get_product_display_info(
     """Read mapped product metadata from SQLite; otherwise retain JSON fallback."""
     normalized_key = product_key.upper()
     candidate_codes: list[str] = [normalized_key]
+    canonical_code = _menu_stock_product_code(normalized_key)
+    if canonical_code and canonical_code not in candidate_codes:
+        candidate_codes.append(canonical_code)
     mapped_code = TELEGRAM_PRODUCT_CODE_MAP.get(normalized_key, "")
     if mapped_code and mapped_code not in candidate_codes:
         candidate_codes.append(mapped_code)
@@ -577,10 +589,22 @@ def get_available_count(product_key: str, *, store_db_path: Path | str | None = 
 
 def _telegram_product_key_for_sqlite_code(product_code: str) -> str:
     normalized_code = product_code.upper()
+    if normalized_code in CATALOG_DISPLAY_NAMES:
+        return CATALOG_DISPLAY_NAMES[normalized_code]
     for product_key in PRODUCT_ORDER:
         if TELEGRAM_PRODUCT_CODE_MAP.get(product_key) == normalized_code:
             return product_key
     return normalized_code
+
+
+def _catalog_display_name(category_key: str) -> str:
+    normalized_key = str(category_key or "").strip().upper()
+    return CATALOG_DISPLAY_NAMES.get(normalized_key, normalized_key)
+
+
+def _catalog_lookup_key(product_name: str) -> str:
+    normalized_name = str(product_name or "").strip().upper()
+    return _menu_stock_product_code(normalized_name) or normalized_name
 
 
 def _menu_stock_product_code(product_key: str) -> str | None:
@@ -658,7 +682,7 @@ def _menu_available_count(product_key: str) -> int:
 
 def _load_orders() -> list[dict[str, object]]:
     path = _resolve_store_db_path()
-    if path.is_file():
+    if _sqlite_orders_enabled() and path.is_file():
         try:
             return StoreRepository(path).list_orders()
         except (OSError, RuntimeError, sqlite3.Error) as exc:
@@ -678,7 +702,7 @@ def _load_orders() -> list[dict[str, object]]:
 
 def _save_orders(orders: list[dict[str, object]]) -> None:
     path = _resolve_store_db_path()
-    if path.is_file():
+    if _sqlite_orders_enabled() and path.is_file():
         try:
             repository = StoreRepository(path)
             for order in orders:
@@ -770,14 +794,14 @@ def _load_processed_transactions() -> list[dict[str, object]]:
 
 def _find_order(order_id: str) -> dict[str, object] | None:
     path = _resolve_store_db_path()
-    if path.is_file():
+    if _sqlite_orders_enabled() and path.is_file():
         try:
             order = StoreRepository(path).find_order(order_id)
             if order:
                 return order
         except (OSError, RuntimeError, sqlite3.Error) as exc:
             logger.warning("SQLite order lookup failed for %s; falling back to JSON: %s", order_id, exc)
-    for order in reversed(_load_orders() if not path.is_file() else []):
+    for order in reversed(_load_orders() if not (_sqlite_orders_enabled() and path.is_file()) else []):
         if str(order.get("order_id", "")).upper() == order_id.upper():
             return order
     return None
@@ -787,7 +811,7 @@ def _update_order(order_id: str, **changes: object) -> dict[str, object] | None:
     if "payment_status" in changes and "status" not in changes:
         changes["status"] = changes["payment_status"]
     path = _resolve_store_db_path()
-    if path.is_file():
+    if _sqlite_orders_enabled() and path.is_file():
         try:
             repository = StoreRepository(path)
             updated = repository.update_order(order_id, **changes)
@@ -1012,7 +1036,25 @@ def _chunked(items: list[InlineKeyboardButton], size: int) -> list[list[InlineKe
 def _catalog_category_items(product_group: str = "account") -> list[dict[str, object]]:
     if product_group != "account":
         return []
-    return [{"category_key": key, "available_count": _menu_available_count(key)} for key in PRODUCT_ORDER]
+    path = _resolve_store_db_path()
+    if path.is_file():
+        try:
+            rows = StoreRepository(path).list_visible_categories(product_group)
+            if rows:
+                return [
+                    {
+                        "category_key": _catalog_display_name(str(row["category_key"])),
+                        "lookup_key": str(row["category_key"]).upper(),
+                        "available_count": int(row["available_count"] or 0),
+                    }
+                    for row in rows
+                ]
+        except (OSError, RuntimeError, sqlite3.Error):
+            pass
+    return [
+        {"category_key": key, "lookup_key": _menu_stock_product_code(key) or key, "available_count": _menu_available_count(key)}
+        for key in PRODUCT_ORDER
+    ]
 
 
 def _product_menu_keyboard(product_group: str = "account") -> InlineKeyboardMarkup:
@@ -1049,7 +1091,7 @@ def _start_help_text() -> str:
         " Hotline: 0909968123\n"
         "💬 Telegram: @Aidaily79\n\n\n\n"
         "🟢 Đây là bot tự động order 24/7\n\n"
-        "👇 Vui lòng chọn chức năng bên dưới 👇"
+        "👇 Chọn chức năng bên dưới 👇"
     )
 
 
@@ -1092,13 +1134,13 @@ def _product_detail_keyboard(product_name: str, available: bool) -> InlineKeyboa
 def _package_keyboard(product_name: str) -> InlineKeyboardMarkup:
     rows = []
     try:
-        packages = StoreRepository(_resolve_store_db_path()).list_packages_by_category(product_name.upper())
+        packages = StoreRepository(_resolve_store_db_path()).list_packages_by_category(_catalog_lookup_key(product_name))
     except (OSError, RuntimeError, sqlite3.Error):
         packages = []
     if packages:
         rows.extend(
             [InlineKeyboardButton(
-                f"🎁 {package['display_name']} - {_format_vnd(int(package['price_vnd']))}đ",
+                f"🎁 {package['display_name']} - {_format_vnd(int(package['price_vnd']))}đ [{int(package['available_count'] or 0)}]",
                 callback_data=f"pkg:{product_name}:{package['product_code']}",
             )]
             for package in packages
@@ -1164,9 +1206,12 @@ def _payment_info_text(context: ContextTypes.DEFAULT_TYPE, product_name: str = "
 
 
 def _package_text(product_name: str) -> str:
+    stock = _menu_available_count(product_name)
+    status_text = "Còn hàng" if stock > 0 else "Hết hàng"
     return (
-        "Chọn gói sản phẩm\n\n"
-        f"📦 Sản phẩm: {product_name}\n"
+        f"{product_name}\n\n"
+        f"Trạng thái: {status_text}\n"
+        f"Tồn kho: {stock}\n\n"
         "Vui lòng chọn gói bên dưới."
     )
 
@@ -1174,10 +1219,13 @@ def _package_text(product_name: str) -> str:
 def _quantity_text(product_name: str, package_name: str) -> str:
     package = _get_package_info(product_name, package_name)
     unit_price = int(package["price_vnd"]) if package else 0
+    available_count = int(package["available_count"]) if package else 0
+    display_name = str(package["display_name"]) if package else package_name
     return (
         "Chọn số lượng\n\n"
         f"📦 Sản phẩm: {product_name}\n"
-        f"🎁 Gói: {package_name}\n"
+        f"🎁 Gói: {display_name}\n"
+        f"📦 Số lượng còn lại: {available_count}\n"
         f"💵 Đơn giá: {_format_vnd(unit_price)}đ"
     )
 
@@ -1262,7 +1310,7 @@ async def _send_product_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         )
     else:
         try:
-            has_packages = bool(StoreRepository(_resolve_store_db_path()).list_packages_by_category(product_name.upper()))
+            has_packages = bool(StoreRepository(_resolve_store_db_path()).list_packages_by_category(_catalog_lookup_key(product_name)))
         except (OSError, RuntimeError, sqlite3.Error):
             has_packages = False
         if has_packages:
@@ -1527,6 +1575,31 @@ def _paid_license_prompt_text(product_id: str) -> str:
 
 
 def _get_package_info(product_key: str, package_key: str) -> dict[str, object] | None:
+    try:
+        repository = StoreRepository(_resolve_store_db_path())
+        package = repository.get_product_details(package_key)
+        if package and package["active"]:
+            return {
+                "product_code": str(package["code"]),
+                "display_name": str(package["name"]),
+                "price_vnd": int(package["price_vnd"]),
+                "available_count": repository.get_stock_count(str(package["code"])),
+                "source": "sqlite",
+                "reservation_sqlite": True,
+            }
+        packages = repository.list_packages_by_category(_catalog_lookup_key(product_key))
+        for package in packages:
+            if str(package["product_code"]).upper() == str(package_key).upper():
+                return {
+                    "product_code": str(package["product_code"]),
+                    "display_name": str(package["display_name"]),
+                    "price_vnd": int(package["price_vnd"]),
+                    "available_count": int(package["available_count"] or 0),
+                    "source": "sqlite",
+                    "reservation_sqlite": True,
+                }
+    except (OSError, RuntimeError, sqlite3.Error):
+        pass
     if package_key in PRODUCT_PACKAGES:
         product_info = get_product_display_info(product_key)
         return {
@@ -1537,21 +1610,7 @@ def _get_package_info(product_key: str, package_key: str) -> dict[str, object] |
             "source": "legacy",
             "reservation_sqlite": product_info["source"] == "store.db",
         }
-    try:
-        repository = StoreRepository(_resolve_store_db_path())
-        package = repository.get_product_details(package_key)
-        if not package or not package["active"]:
-            return None
-        return {
-            "product_code": str(package["code"]),
-            "display_name": str(package["name"]),
-            "price_vnd": int(package["price_vnd"]),
-            "available_count": repository.get_stock_count(str(package["code"])),
-            "source": "sqlite",
-            "reservation_sqlite": True,
-        }
-    except (OSError, RuntimeError, sqlite3.Error):
-        return None
+    return None
 
 
 async def _create_paid_license_order(update: Update, context: ContextTypes.DEFAULT_TYPE, machine_id: str, product_id: str, *, edit: bool = False) -> None:

@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 import csv
+import os
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,6 +18,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from repository.store_repository import StoreRepository
 from scripts.import_inventory import OPTIONAL_COLUMNS, REQUIRED_COLUMNS, import_inventory
 from scripts.cleanup_demo_inventory import cleanup_demo_inventory
+import telegram_license_bot as bot
 
 
 class StoreRepositoryTest(unittest.TestCase):
@@ -303,6 +305,10 @@ class StoreRepositoryTest(unittest.TestCase):
         self.assertEqual(states[delivered_id], "delivered")
 
     def test_capcut_auto_created_when_missing_product(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            with connection:
+                connection.execute("DELETE FROM inventory_items WHERE product_id IN (SELECT id FROM products WHERE code = 'CAPCUT')")
+                connection.execute("DELETE FROM products WHERE code = 'CAPCUT'")
         workbook_path = Path(self.temp_dir.name) / "capcut.xlsx"
         workbook = Workbook()
         sheet = workbook.active
@@ -334,6 +340,71 @@ class StoreRepositoryTest(unittest.TestCase):
         self.assertEqual((first["credentials_added"], first["row_errors"]), (3, 0))
         self.assertEqual((second["credentials_added"], second["row_errors"]), (3, 0))
         self.assertEqual(second["stock"], {"CAPCUT": 3})
+
+    def test_telegram_catalog_menu_and_order_use_sqlite_price_and_stock(self) -> None:
+        for code in ("GEMINI", "GEM-AIPRO-1M-PRIVATE", "CAPCUT", "CAPCUT-PRO-1M-PRIVATE"):
+            with closing(sqlite3.connect(self.db_path)) as connection:
+                with connection:
+                    connection.execute("DELETE FROM inventory_items WHERE product_id IN (SELECT id FROM products WHERE code = ?)", (code,))
+                    connection.execute("DELETE FROM products WHERE code = ?", (code,))
+
+        workbook_path = Path(self.temp_dir.name) / "telegram-catalog.xlsx"
+        workbook = Workbook()
+        gemini = workbook.active
+        gemini.title = "GEMINI"
+        gemini.append(REQUIRED_COLUMNS)
+        for index in range(8):
+            gemini.append(["GEMINI", "AI", "Gemini AI Pro", "personal", "30D", 70000, 30, f"gemini{index}@example.com|pass", "", 1])
+        capcut = workbook.create_sheet("CAPCUT")
+        capcut.append(REQUIRED_COLUMNS)
+        for index in range(3):
+            capcut.append(["CAPCUT", "AI", "CAPCUT PRO", "personal", "365D", 400000, 365, f"capcut{index}@example.com|pass", "", 1])
+        workbook.save(workbook_path)
+        workbook.close()
+
+        report = import_inventory(workbook_path, self.db_path, mode="replace")
+        self.assertEqual(report["stock"], {"GEMINI": 8, "CAPCUT": 3})
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            prices = dict(connection.execute("SELECT code, price_vnd FROM products WHERE code IN ('GEMINI', 'CAPCUT')").fetchall())
+        self.assertEqual(prices["GEMINI"], 70000)
+
+        previous_store_db_path = os.environ.get("STORE_DB_PATH")
+        previous_make_order_id = bot._make_order_id
+        try:
+            os.environ["STORE_DB_PATH"] = str(self.db_path)
+            menu_buttons = [button.text for row in bot._product_menu_keyboard().inline_keyboard for button in row]
+            self.assertIn("🟢 GEMINI AI (8)", menu_buttons)
+            self.assertIn("🟢 CAPCUT PRO (3)", menu_buttons)
+            self.assertFalse(any("90.000" in label or "199.000" in label or "499.000" in label for label in menu_buttons))
+
+            package_buttons = [button.text for row in bot._package_keyboard("GEMINI AI").inline_keyboard for button in row]
+            self.assertIn("🎁 Gemini AI Pro - 70.000đ [8]", package_buttons)
+            self.assertFalse(any("90.000" in label or "199.000" in label or "499.000" in label for label in package_buttons))
+
+            package = bot._get_package_info("GEMINI AI", "GEMINI")
+            self.assertIsNotNone(package)
+            self.assertEqual((package["price_vnd"], package["available_count"]), (70000, 8))
+            self.assertEqual(bot._menu_available_count("GEMINI AI"), 8)
+            self.assertEqual(bot._menu_available_count("CAPCUT PRO"), 3)
+
+            bot._make_order_id = lambda _product_name: "ORD-GEMINI-2"
+            fake_update = type(
+                "FakeOrderUpdate",
+                (),
+                {"effective_user": type("FakeUser", (), {"id": 42, "full_name": "Test User", "username": ""})()},
+            )()
+            order = bot._create_sales_order(fake_update, "GEMINI AI", "GEMINI", 2)
+            self.assertEqual(order["unit_price"], 70000)
+            self.assertEqual(order["total"], 140000)
+            persisted = StoreRepository(self.db_path).find_order("ORD-GEMINI-2")
+            self.assertIsNotNone(persisted)
+            self.assertEqual((persisted["unit_price_vnd"], persisted["total_vnd"], persisted["quantity"]), (70000, 140000, 2))
+        finally:
+            bot._make_order_id = previous_make_order_id
+            if previous_store_db_path is None:
+                os.environ.pop("STORE_DB_PATH", None)
+            else:
+                os.environ["STORE_DB_PATH"] = previous_store_db_path
 
     def test_catalog_schema_and_optional_import_columns(self) -> None:
         with closing(sqlite3.connect(self.db_path)) as connection:

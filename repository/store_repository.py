@@ -359,16 +359,20 @@ class StoreRepository:
         with self._session() as connection:
             rows = connection.execute(
                 """
-                SELECT id, code AS product_code, name AS display_name, category_key,
-                       description, price_vnd, active, menu_order, product_group
-                FROM products
-                WHERE active = 1 AND product_group = ?
-                  AND COALESCE(NULLIF(category_key, ''), NULLIF(category, ''), code) = ?
-                ORDER BY menu_order, display_name COLLATE NOCASE, product_code
+                SELECT p.id, p.code AS product_code, p.name AS display_name, p.category_key,
+                       p.description, p.price_vnd, p.active, p.menu_order, p.product_group,
+                       SUM(CASE WHEN i.status = 'available' THEN 1 ELSE 0 END) AS available_count
+                FROM products AS p
+                LEFT JOIN inventory_items AS i ON i.product_id = p.id
+                WHERE p.active = 1 AND p.product_group = ?
+                  AND UPPER(COALESCE(NULLIF(p.category_key, ''), NULLIF(p.category, ''), p.code)) = ?
+                GROUP BY p.id, p.code, p.name, p.category_key, p.description,
+                         p.price_vnd, p.active, p.menu_order, p.product_group
+                ORDER BY p.menu_order, p.name COLLATE NOCASE, p.code
                 """,
                 (product_group, category_key.upper()),
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [{**dict(row), "available_count": int(row["available_count"] or 0)} for row in rows]
 
     def get_product_details(self, product_code: str) -> dict[str, Any] | None:
         """Read one product and its import metadata without changing inventory state."""
@@ -390,8 +394,20 @@ class StoreRepository:
 
     def get_stock_count(self, product_code: str) -> int:
         with self._session() as connection:
+            candidates = self._product_code_candidates(product_code)
+            if candidates:
+                exact_product = connection.execute(
+                    "SELECT id FROM products WHERE code = ?",
+                    (candidates[0],),
+                ).fetchone()
+                if exact_product:
+                    row = connection.execute(
+                        "SELECT COUNT(*) AS stock FROM inventory_items WHERE product_id = ? AND status = 'available'",
+                        (exact_product["id"],),
+                    ).fetchone()
+                    return int(row["stock"] if row else 0)
             row = None
-            for candidate in self._product_code_candidates(product_code):
+            for candidate in candidates:
                 row = connection.execute(
                     """
                     SELECT COUNT(*) AS stock

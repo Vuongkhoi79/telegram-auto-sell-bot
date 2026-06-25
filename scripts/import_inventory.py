@@ -31,7 +31,10 @@ REQUIRED_COLUMNS = (
     "product_code", "category", "product_name", "account_type", "duration",
     "price_vnd", "warranty_days", "credential_text", "note", "active",
 )
-OPTIONAL_COLUMNS = ("category_key", "menu_order", "show_in_menu", "product_group", "description", "email", "password", "2fa", "recovery_email")
+OPTIONAL_COLUMNS = (
+    "category_key", "menu_order", "show_in_menu", "product_group", "description",
+    "package_name", "plan_name", "email", "password", "2fa", "recovery_email",
+)
 IMPORT_COLUMNS = tuple(dict.fromkeys((*REQUIRED_COLUMNS, *OPTIONAL_COLUMNS)))
 SKIPPED_SHEET_NAMES = {"README", "HƯỚNG DẪN", "HUONG DAN", "TEMPLATE"}
 ALLOWED_PRODUCT_CODES = {
@@ -135,11 +138,49 @@ def find_product_by_code(connection: sqlite3.Connection, product_code: str) -> s
     ).fetchone()
 
 
+def product_display_name(product_code: str, row: dict[str, Any]) -> str:
+    return (
+        text(row.get("package_name"))
+        or text(row.get("plan_name"))
+        or text(row.get("product_name"))
+        or product_code
+    )
+
+
 def parse_int(value: Any, default: int = 0) -> int:
     raw = text(value)
     if not raw:
         return default
     return int(float(raw))
+
+
+def sync_product_metadata(
+    connection: sqlite3.Connection,
+    product_id: str,
+    product_code: str,
+    row: dict[str, Any],
+    now: str,
+) -> None:
+    connection.execute(
+        """
+        UPDATE products
+        SET name = ?, updated_at = ?, category = 'account', account_type = ?,
+            duration = ?, price_vnd = ?, warranty_days = ?, note = ?,
+            category_key = ?, product_group = 'account', active = 1, delivery_type = 'account'
+        WHERE id = ?
+        """,
+        (
+            product_display_name(product_code, row),
+            now,
+            text(row.get("account_type")),
+            text(row.get("duration")),
+            parse_int(row.get("price_vnd"), 0),
+            parse_int(row.get("warranty_days"), 0),
+            text(row.get("note")),
+            product_code,
+            product_id,
+        ),
+    )
 
 
 def ensure_product(
@@ -150,10 +191,10 @@ def ensure_product(
 ) -> sqlite3.Row:
     product = find_product_by_code(connection, product_code)
     if product:
+        sync_product_metadata(connection, product["id"], product_code, row, now)
         return product
 
     product_id = str(uuid.uuid4())
-    price_vnd = parse_int(row.get("price_vnd"), 0)
     connection.execute(
         """
         INSERT INTO products
@@ -165,12 +206,12 @@ def ensure_product(
         (
             product_id,
             product_code,
-            product_code,
+            product_display_name(product_code, row),
             now,
             now,
             text(row.get("account_type")),
             text(row.get("duration")),
-            price_vnd,
+            parse_int(row.get("price_vnd"), 0),
             parse_int(row.get("warranty_days"), 0),
             text(row.get("note")),
             product_code,
@@ -225,6 +266,7 @@ def read_rows(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
                 }
                 if sheet_is_product:
                     row["product_code"] = sheet_code
+                    row["__sheet_product"] = True
                 yield row_number, row
     finally:
         workbook.close()
@@ -251,6 +293,15 @@ def disable_available_inventory(connection: sqlite3.Connection, product_id: str,
     return len(rows)
 
 
+def active_product_ids_for_code(connection: sqlite3.Connection, product_code: str) -> list[str]:
+    product_ids: list[str] = []
+    for candidate in product_code_candidates(product_code):
+        row = find_product_by_code(connection, candidate)
+        if row and row["id"] not in product_ids:
+            product_ids.append(row["id"])
+    return product_ids
+
+
 def available_stock_for_code(connection: sqlite3.Connection, product_code: str) -> int:
     exact = find_product_by_code(connection, product_code)
     if exact:
@@ -275,8 +326,8 @@ def available_stock_for_code(connection: sqlite3.Connection, product_code: str) 
     return total
 
 
-def should_auto_create_product(product_code: str) -> bool:
-    return product_code == "CAPCUT"
+def should_use_canonical_product(product_code: str, row: dict[str, Any]) -> bool:
+    return product_code == "CAPCUT" or bool(row.get("__sheet_product"))
 
 
 def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE, mode: str = "replace") -> dict[str, Any]:
@@ -319,18 +370,24 @@ def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE, m
                     connection.execute(f"RELEASE SAVEPOINT {savepoint}")
                     continue
                 now = utc_now_iso()
-                product = find_product_by_code(connection, product_code) if should_auto_create_product(product_code) else find_existing_product(connection, product_code)
+                use_canonical_product = should_use_canonical_product(product_code, row)
+                product = find_product_by_code(connection, product_code) if use_canonical_product else find_existing_product(connection, product_code)
                 if not product:
-                    if should_auto_create_product(product_code):
+                    if use_canonical_product:
                         product = ensure_product(connection, product_code, row, now)
                         report["products_created"] += 1
                     else:
                         connection.execute(f"RELEASE SAVEPOINT {savepoint}")
                         continue
+                elif use_canonical_product:
+                    sync_product_metadata(connection, product["id"], product_code, row, now)
+                    report["products_updated"] += 1
                 add_imported_code(product_code)
-                if mode == "replace" and product["id"] not in replaced_product_ids:
-                    report["credentials_disabled"] += disable_available_inventory(connection, product["id"], now)
-                    replaced_product_ids.add(product["id"])
+                if mode == "replace":
+                    for product_id in active_product_ids_for_code(connection, product_code):
+                        if product_id not in replaced_product_ids:
+                            report["credentials_disabled"] += disable_available_inventory(connection, product_id, now)
+                            replaced_product_ids.add(product_id)
                 connection.execute(f"RELEASE SAVEPOINT {savepoint}")
             except Exception as exc:
                 connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
@@ -349,9 +406,10 @@ def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE, m
                 validate_product_code(product_code)
                 credential = credential_from_row(row)
                 now = utc_now_iso()
-                product = find_existing_product(connection, product_code)
+                use_canonical_product = should_use_canonical_product(product_code, row)
+                product = find_product_by_code(connection, product_code) if use_canonical_product else find_existing_product(connection, product_code)
                 if not product:
-                    if should_auto_create_product(product_code):
+                    if use_canonical_product:
                         product = ensure_product(connection, product_code, row, now)
                         report["products_created"] += 1
                     else:
