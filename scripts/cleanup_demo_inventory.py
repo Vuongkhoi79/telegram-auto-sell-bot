@@ -8,7 +8,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DEMO_PRODUCT_CODES = {"CHATGPT", "GEMINI", "GROK"}
+DEMO_PRODUCT_CODES = {
+    "CHATGPT",
+    "GEMINI",
+    "GROK",
+    "GPT-PLUS-1M-PRIVATE",
+    "GEM-AIPRO-1M-PRIVATE",
+    "GROK-SUPER-1M-PRIVATE",
+}
 
 
 def cleanup_demo_inventory(database_path: Path, demo_codes: set[str] | None = None) -> int:

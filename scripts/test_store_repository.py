@@ -220,41 +220,29 @@ class StoreRepositoryTest(unittest.TestCase):
         with import_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle)
             writer.writerow(REQUIRED_COLUMNS)
-            writer.writerow(["IMPORT_PRODUCT", "AI", "Import Product", "private", "30D", 100, 7, "import1@example.com|pass", "", 1])
-            writer.writerow(["IMPORT_PRODUCT", "AI", "Import Product", "private", "30D", 100, 7, "import2@example.com|pass|2fa", "", 1])
+            writer.writerow(["GEMINI", "AI", "Gemini", "private", "30D", 100, 7, "import1@example.com|pass", "", 1])
+            writer.writerow(["GEMINI", "AI", "Gemini", "private", "30D", 100, 7, "import2@example.com|pass|2fa", "", 1])
         first_import = import_inventory(import_path, self.db_path)
         second_import = import_inventory(import_path, self.db_path)
         self.assertEqual((first_import["credentials_added"], first_import["credentials_duplicate"], first_import["row_errors"]), (2, 0, 0))
         self.assertEqual((second_import["credentials_added"], second_import["credentials_duplicate"], second_import["row_errors"]), (0, 2, 0))
-        self.assertEqual(self.store.get_stock_count("IMPORT_PRODUCT"), 2)
+        self.assertEqual(self.store.get_stock_count("GEMINI"), 2)
 
-        with closing(sqlite3.connect(self.db_path)) as connection:
-            with connection:
-                connection.execute(
-                    """
-                    CREATE TRIGGER reject_row_failure
-                    BEFORE INSERT ON inventory_items
-                    WHEN (SELECT code FROM products WHERE id = NEW.product_id) = 'ROW_FAILURE'
-                    BEGIN
-                        SELECT RAISE(ABORT, 'forced row failure');
-                    END
-                    """
-                )
         row_isolation_path = Path(self.temp_dir.name) / "row-isolation.csv"
         with row_isolation_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle)
             writer.writerow(REQUIRED_COLUMNS)
-            writer.writerow(["ROW_SUCCESS", "AI", "Row Success", "private", "30D", 100, 7, "success1@example.com|pass", "", 1])
-            writer.writerow(["ROW_FAILURE", "AI", "Row Failure", "private", "30D", 100, 7, "failure@example.com|pass", "", 1])
-            writer.writerow(["ROW_SUCCESS", "AI", "Row Success", "private", "30D", 100, 7, "success2@example.com|pass", "", 1])
+            writer.writerow(["CHATGPT", "AI", "ChatGPT", "private", "30D", 100, 7, "success1@example.com|pass", "", 1])
+            writer.writerow(["VEO3", "AI", "VEO3", "private", "30D", 100, 7, "missing@example.com|pass", "", 1])
+            writer.writerow(["CHATGPT", "AI", "ChatGPT", "private", "30D", 100, 7, "success2@example.com|pass", "", 1])
         row_isolation = import_inventory(row_isolation_path, self.db_path)
         self.assertEqual(
             (row_isolation["products_created"], row_isolation["credentials_added"], row_isolation["invalid_rows"]),
-            (1, 2, 1),
+            (0, 2, 1),
         )
         with closing(sqlite3.connect(self.db_path)) as connection:
-            self.assertIsNone(connection.execute("SELECT id FROM products WHERE code = 'ROW_FAILURE'").fetchone())
-        self.assertEqual(self.store.get_stock_count("ROW_SUCCESS"), 2)
+            self.assertIsNone(connection.execute("SELECT id FROM products WHERE code = 'VEO3'").fetchone())
+        self.assertEqual(self.store.get_stock_count("CHATGPT"), 2)
 
     def test_catalog_schema_and_optional_import_columns(self) -> None:
         with closing(sqlite3.connect(self.db_path)) as connection:
@@ -264,16 +252,12 @@ class StoreRepositoryTest(unittest.TestCase):
         catalog_path = Path(self.temp_dir.name) / "catalog.csv"
         with catalog_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle)
-            writer.writerow([*REQUIRED_COLUMNS, *OPTIONAL_COLUMNS])
-            writer.writerow(["GPT-A", "CHATGPT", "ChatGPT Apple", "private", "1M", 10, 1, "a@example.com|pass", "", 1, "CHATGPT", 20, 1, "account", "Apple package"])
-            writer.writerow(["GPT-B", "CHATGPT", "ChatGPT BHF", "private", "1M", 20, 1, "b@example.com|pass", "", 1, "CHATGPT", 10, 1, "account", "BHF package"])
-            writer.writerow(["TOOL-A", "TOOL", "Video Tool", "tool", "1M", 30, 0, "tool@example.com|pass", "", 1, "VIDEO_TOOL", 1, 1, "tool", "Tool package"])
+            writer.writerow(["product_code", "email", "password", "2fa"])
+            writer.writerow(["CHATGPT", "a@example.com", "pass", "2fa"])
+            writer.writerow(["NOT_ALLOWED", "b@example.com", "pass", "2fa"])
         report = import_inventory(catalog_path, self.db_path)
-        self.assertEqual((report["credentials_added"], report["invalid_rows"]), (3, 0))
-        self.assertIn("CHATGPT", [row["category_key"] for row in self.store.list_visible_categories()])
-        packages = self.store.list_packages_by_category("CHATGPT")
-        self.assertEqual([row["product_code"] for row in packages], ["GPT-B", "GPT-A"])
-        self.assertEqual([row["category_key"] for row in self.store.list_visible_categories("tool")], ["VIDEO_TOOL"])
+        self.assertEqual((report["credentials_added"], report["invalid_rows"]), (1, 1))
+        self.assertTrue(any("Unsupported product_code: NOT_ALLOWED" in error for error in report["errors"]))
 
         with closing(sqlite3.connect(self.db_path)) as connection:
             with connection:
