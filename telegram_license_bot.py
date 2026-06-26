@@ -841,25 +841,28 @@ def _update_order(order_id: str, **changes: object) -> dict[str, object] | None:
 
 def _create_sales_order(update: Update, product_name: str, package_name: str, quantity: int) -> dict[str, object]:
     callback_data = str(getattr(getattr(update, "callback_query", None), "data", "") or "")
+    user_id = getattr(getattr(update, "effective_user", None), "id", None)
     logger.debug(
-        "ENTER _create_sales_order callback_data=%s product_name=%s package_name=%s quantity=%s user_id=%s",
+        "ORDER_CREATE_START callback_data=%s user_id=%s product_name=%s package_name=%s quantity=%s",
         callback_data,
+        user_id,
         product_name,
         package_name,
         quantity,
-        getattr(getattr(update, "effective_user", None), "id", None),
     )
     user = update.effective_user
     package = _get_package_info(product_name, package_name)
     logger.debug(
-        "PACKAGE RESOLUTION callback_data=%s product_name=%s package_name=%s product_id=%s package_id=%s category_key=%s product_code=%s display_name=%s available_before=%s",
+        "PACKAGE_RESOLVED callback_data=%s user_id=%s product_name=%s package_name=%s product_id=%s package_id=%s category_key=%s product_code=%s package_code=%s display_name=%s available_before=%s",
         callback_data,
+        user_id,
         product_name,
         package_name,
         package.get("product_id") if package else None,
         package.get("product_code") if package else None,
         package.get("category_key") if package else None,
         package.get("product_code") if package else None,
+        package.get("package_code") if package else None,
         package.get("display_name") if package else None,
         package.get("available_count") if package else None,
     )
@@ -879,14 +882,17 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
         except (OSError, RuntimeError, sqlite3.Error):
             reserve_with_sqlite = False
     logger.debug(
-        "SELECTED PRODUCT callback_data=%s reservation_product_code=%s package_product_code=%s package_source=%s reserve_with_sqlite=%s display_name=%s available_before=%s unit_price=%s",
+        "RESERVE_START callback_data=%s user_id=%s reservation_product_code=%s package_id=%s package_code=%s package_source=%s reserve_with_sqlite=%s display_name=%s available_before=%s requested_quantity=%s unit_price=%s",
         callback_data,
+        user_id,
         reservation_product_code,
-        package.get("product_code"),
+        package.get("product_id"),
+        package.get("package_code") or package.get("product_code"),
         package.get("source"),
         reserve_with_sqlite,
         package.get("display_name"),
         package.get("available_count"),
+        quantity,
         unit_price,
     )
     order = {
@@ -916,19 +922,7 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
     product_code = reservation_product_code if reserve_with_sqlite else ""
     if product_code:
         try:
-            logger.debug(
-                "BEFORE create_pending_account_order_and_reserve callback_data=%s order_id=%s product_code=%s product_id=%s package_id=%s category_key=%s requested_quantity=%s available_before=%s unit_price=%s total=%s",
-                callback_data,
-                order["order_id"],
-                product_code,
-                reservation_product_code if reserve_with_sqlite else product_name.upper(),
-                package.get("product_id"),
-                package.get("category_key"),
-                quantity,
-                package.get("available_count"),
-                order["unit_price"],
-                order["total"],
-            )
+            logger.debug("RESERVE_CALL callback_data=%s order_id=%s product_code=%s quantity=%s", callback_data, order["order_id"], product_code, quantity)
             assert reservation_repo is not None
             reservation_repo.create_pending_account_order_and_reserve(
                 order_id=str(order["order_id"]),
@@ -947,17 +941,20 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
             order["product_code"] = reservation_product_code
             order["inventory_source"] = "sqlite"
             logger.debug(
-                "AFTER create_pending_account_order_and_reserve callback_data=%s order_id=%s product_code=%s reserved_after=%s",
+                "RESERVE_OK callback_data=%s order_id=%s product_code=%s reserved_after=%s available_before=%s",
                 callback_data,
                 order["order_id"],
                 product_code,
                 order["quantity"],
+                package.get("available_count"),
             )
         except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
             logger.exception(
-                "Mapped account order %s was not created because SQLite reservation failed: %s",
+                "RESERVE_FAIL callback_data=%s order_id=%s product_code=%s quantity=%s",
+                callback_data,
                 order["order_id"],
-                exc,
+                product_code,
+                quantity,
             )
             raise InventoryReservationError("Sản phẩm hiện đã hết hàng, vui lòng quay lại sau.") from exc
     else:
@@ -967,11 +964,13 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
     orders.append(order)
     _save_orders(orders)
     logger.debug(
-        "RETURN _create_sales_order order_id=%s inventory_source=%s product_code=%s package_code=%s",
+        "ORDER_CREATED callback_data=%s order_id=%s inventory_source=%s product_code=%s package_code=%s amount_vnd=%s",
+        callback_data,
         order["order_id"],
         order["inventory_source"],
         order["product_code"],
         order["package_code"],
+        order["total"],
     )
     return order
 
@@ -1515,25 +1514,91 @@ async def _send_quantity_choice(update: Update, product_name: str, package_name:
 
 
 async def _send_payment_choice(update: Update, order: dict[str, object], *, edit: bool = False) -> None:
-    text = _order_payment_text(order)
-    keyboard = _payment_choice_keyboard(str(order.get("order_id", "")))
+    callback_data = str(getattr(getattr(update, "callback_query", None), "data", "") or "")
+    user_id = getattr(getattr(update, "effective_user", None), "id", None)
+    chat_id = getattr(getattr(getattr(update, "effective_message", None), "chat", None), "id", None)
+    message_id = getattr(getattr(update, "callback_query", None), "message", None)
+    message_id = getattr(message_id, "message_id", None)
     logger.debug(
-        "SALES_STAGE stage=payment_choice user_id=%s callback_data=%s order_id=%s product_code=%s package_code=%s quantity=%s available_by_reserve_query=%s",
-        getattr(getattr(update, "effective_user", None), "id", None),
-        getattr(getattr(update, "callback_query", None), "data", "") if getattr(update, "callback_query", None) else "",
+        "PAYMENT_BUILD_START callback_data=%s user_id=%s chat_id=%s message_id=%s order_id=%s product_code=%s package_code=%s quantity=%s amount_vnd=%s bank_account=%s",
+        callback_data,
+        user_id,
+        chat_id,
+        message_id,
         str(order.get("order_id", "")),
         str(order.get("product_code", order.get("product_id", "")) or ""),
         str(order.get("package_code", "")),
         int(order.get("quantity", 0) or 0),
-        _menu_available_count(str(order.get("product_code", order.get("product_id", "")) or "")),
+        int(order.get("total", 0) or 0),
+        order.get("bank_account", ""),
     )
-    if edit and update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=keyboard)
+    text = _order_payment_text(order)
+    keyboard = _payment_choice_keyboard(str(order.get("order_id", "")))
+    logger.debug(
+        "PAYMENT_BUILD_OK callback_data=%s order_id=%s amount_vnd=%s",
+        callback_data,
+        str(order.get("order_id", "")),
+        int(order.get("total", 0) or 0),
+    )
+    logger.debug(
+        "TELEGRAM_SEND_START callback_data=%s order_id=%s edit=%s",
+        callback_data,
+        str(order.get("order_id", "")),
+        edit,
+    )
+    try:
+        if edit and update.callback_query:
+            await update.callback_query.edit_message_text(text, reply_markup=keyboard)
+        else:
+            await update.effective_message.reply_text(text, reply_markup=keyboard)
+        logger.debug(
+            "TELEGRAM_SEND_OK callback_data=%s order_id=%s branch=payment_choice",
+            callback_data,
+            str(order.get("order_id", "")),
+        )
+    except Exception as exc:
+        logger.exception(
+            "TELEGRAM_SEND_FAIL callback_data=%s order_id=%s exception_type=%s exception_message=%s",
+            callback_data,
+            str(order.get("order_id", "")),
+            type(exc).__name__,
+            exc,
+        )
+        raise
+
+
+async def _send_purchase_error(update: Update, context: ContextTypes.DEFAULT_TYPE, *, reason: str, order_id: str = "") -> None:
+    query = update.callback_query
+    message = query.message if query and getattr(query, "message", None) else update.effective_message
+    logger.error(
+        "FALLBACK_MENU_TRIGGERED user_id=%s chat_id=%s message_id=%s order_id=%s reason=%s",
+        getattr(getattr(update, "effective_user", None), "id", None),
+        getattr(getattr(message, "chat", None), "id", None),
+        getattr(message, "message_id", None),
+        order_id,
+        reason,
+    )
+    text = "Đã giữ hàng nhưng lỗi tạo thanh toán. Vui lòng liên hệ admin."
+    if query:
+        await query.edit_message_text(text, reply_markup=_main_menu_keyboard())
     else:
-        await update.effective_message.reply_text(text, reply_markup=keyboard)
+        await message.reply_text(text, reply_markup=_main_menu_keyboard())
 
 
 async def _send_acb_qr(update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: str) -> None:
+    callback_data = str(getattr(getattr(update, "callback_query", None), "data", "") or "")
+    user_id = getattr(getattr(update, "effective_user", None), "id", None)
+    chat_id = getattr(getattr(getattr(update, "callback_query", None), "message", None), "chat_id", None)
+    message_id = getattr(getattr(update, "callback_query", None), "message", None)
+    message_id = getattr(message_id, "message_id", None)
+    logger.debug(
+        "QR_RENDER_START callback_data=%s user_id=%s chat_id=%s message_id=%s order_id=%s",
+        callback_data,
+        user_id,
+        chat_id,
+        message_id,
+        order_id,
+    )
     _release_expired_sqlite_reservations(context.application.bot_data.get("store_db_path"))
     order = _find_order(order_id)
     query = update.callback_query
@@ -1553,21 +1618,57 @@ async def _send_acb_qr(update: Update, context: ContextTypes.DEFAULT_TYPE, order
             await message.reply_text("Mã Order đã hết hạn. Vui lòng tạo lại đơn mới.", reply_markup=_product_menu_keyboard())
         return
 
+    payment_service: PaymentService = context.application.bot_data["payment_service"]
+    if not payment_service.config.bank_name or not payment_service.config.bank_account or not payment_service.config.bank_account_name:
+        logger.error(
+            "QR_RENDER_FAIL callback_data=%s order_id=%s exception_type=%s exception_message=%s bank_name=%s bank_account=%s bank_account_name=%s",
+            callback_data,
+            order_id,
+            "RuntimeError",
+            "Payment configuration missing",
+            payment_service.config.bank_name,
+            payment_service.config.bank_account,
+            payment_service.config.bank_account_name,
+        )
+        raise RuntimeError("Thanh toán chưa được cấu hình.")
+
     logger.debug(
-        "SALES_STAGE stage=qr_render user_id=%s callback_data=%s order_id=%s product_code=%s package_code=%s quantity=%s order_status=%s",
-        getattr(getattr(update, "effective_user", None), "id", None),
-        getattr(getattr(update, "callback_query", None), "data", "") if getattr(update, "callback_query", None) else "",
+        "QR_RENDER_OK callback_data=%s user_id=%s order_id=%s product_code=%s package_code=%s quantity=%s order_status=%s bank_account=%s",
+        callback_data,
+        user_id,
         order_id,
         str(order.get("product_code", order.get("product_id", "")) or ""),
         str(order.get("package_code", "")),
         int(order.get("quantity", 0) or 0),
         str(order.get("order_status", "")),
+        payment_service.config.bank_account,
     )
-    payment_service: PaymentService = context.application.bot_data["payment_service"]
     order = _update_order(order_id, payment_method="ACB") or order
     qr_url = _build_vietqr_url(order, payment_service)
     caption = _qr_caption(order, payment_service)
-    await message.reply_photo(photo=qr_url, caption=caption, reply_markup=_qr_payment_keyboard(order_id))
+    logger.debug(
+        "TELEGRAM_SEND_START callback_data=%s order_id=%s qr_url_length=%s amount_vnd=%s",
+        callback_data,
+        order_id,
+        len(qr_url),
+        int(order.get("total", 0) or 0),
+    )
+    try:
+        await message.reply_photo(photo=qr_url, caption=caption, reply_markup=_qr_payment_keyboard(order_id))
+        logger.debug(
+            "TELEGRAM_SEND_OK callback_data=%s order_id=%s branch=qr",
+            callback_data,
+            order_id,
+        )
+    except Exception as exc:
+        logger.exception(
+            "TELEGRAM_SEND_FAIL callback_data=%s order_id=%s exception_type=%s exception_message=%s",
+            callback_data,
+            order_id,
+            type(exc).__name__,
+            exc,
+        )
+        raise
 
 
 async def _notify_admins_order_pending(context: ContextTypes.DEFAULT_TYPE, order: dict[str, object]) -> None:
@@ -2643,7 +2744,7 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             raw_qty,
         )
         log_sales_state(
-            "qty_before_reserve",
+            "QTY_HANDLER_ENTER",
             product_code,
             callback_data=data,
             package_id=package_code,
@@ -2674,7 +2775,27 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             if update.effective_user:
                 _release_current_user_reservation(context, update.effective_user.id)
             _release_expired_sqlite_reservations(context.application.bot_data.get("store_db_path"))
+            logger.debug(
+                "ORDER_CREATE_START callback_data=%s user_id=%s product_code=%s package_code=%s quantity=%s available_by_menu_query=%s available_by_package_page_query=%s available_by_reserve_query=%s",
+                data,
+                getattr(getattr(update, "effective_user", None), "id", None),
+                product_code,
+                package_code,
+                int(raw_qty),
+                menu_available,
+                package_available,
+                package_available,
+            )
             order = _create_sales_order(update, product_code, package_code, int(raw_qty))
+            logger.debug(
+                "ORDER_CREATED callback_data=%s user_id=%s order_id=%s product_code=%s package_code=%s amount_vnd=%s",
+                data,
+                getattr(getattr(update, "effective_user", None), "id", None),
+                order.get("order_id", ""),
+                order.get("product_code", ""),
+                order.get("package_code", ""),
+                order.get("total", 0),
+            )
         except InventoryReservationError as exc:
             logger.debug(
                 "CALLBACK qty failed callback_data=%s user_id=%s product_code=%s package_code=%s quantity=%s reason=%s",
@@ -2687,8 +2808,21 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             await query.edit_message_text(str(exc), reply_markup=_product_menu_keyboard())
             return
+        except Exception as exc:
+            logger.exception(
+                "EXCEPTION_CAUGHT callback_data=%s user_id=%s product_code=%s package_code=%s quantity=%s exception_type=%s exception_message=%s",
+                data,
+                getattr(getattr(update, "effective_user", None), "id", None),
+                product_code,
+                package_code,
+                raw_qty,
+                type(exc).__name__,
+                exc,
+            )
+            await _send_purchase_error(update, context, reason=str(exc), order_id="")
+            return
         log_sales_state(
-            "qty_after_reserve",
+            "RESERVE_OK",
             str(order.get("product_code") or product_code),
             order_id=str(order.get("order_id", "")),
             callback_data=data,
@@ -2698,10 +2832,51 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         if update.effective_user and getattr(context, "user_data", None) is not None:
             context.user_data["pending_order_id"] = str(order.get("order_id", ""))
-        await _send_payment_choice(update, order, edit=True)
+        try:
+            logger.debug(
+                "PAYMENT_BUILD_START callback_data=%s user_id=%s chat_id=%s message_id=%s order_id=%s product_code=%s package_code=%s quantity=%s amount_vnd=%s bank_account=%s",
+                data,
+                getattr(getattr(update, "effective_user", None), "id", None),
+                getattr(getattr(getattr(update, "effective_message", None), "chat", None), "id", None),
+                getattr(getattr(update, "callback_query", None), "message", None).message_id if getattr(getattr(update, "callback_query", None), "message", None) else None,
+                str(order.get("order_id", "")),
+                str(order.get("product_code", order.get("product_id", "")) or ""),
+                str(order.get("package_code", "")),
+                int(order.get("quantity", 0) or 0),
+                int(order.get("total", 0) or 0),
+                "",
+            )
+            await _send_payment_choice(update, order, edit=True)
+            logger.debug(
+                "TELEGRAM_SEND_OK callback_data=%s order_id=%s branch=payment_choice",
+                data,
+                str(order.get("order_id", "")),
+            )
+        except Exception as exc:
+            logger.exception(
+                "PAYMENT_BUILD_FAIL callback_data=%s user_id=%s order_id=%s exception_type=%s exception_message=%s",
+                data,
+                getattr(getattr(update, "effective_user", None), "id", None),
+                str(order.get("order_id", "")),
+                type(exc).__name__,
+                exc,
+            )
+            await _send_purchase_error(update, context, reason=str(exc), order_id=str(order.get("order_id", "")))
+            return
     elif data.startswith("pay_acb:"):
         order_id = data.split(":", 1)[1].strip()
-        await _send_acb_qr(update, context, order_id)
+        try:
+            await _send_acb_qr(update, context, order_id)
+        except Exception as exc:
+            logger.exception(
+                "EXCEPTION_CAUGHT callback_data=%s user_id=%s order_id=%s exception_type=%s exception_message=%s",
+                data,
+                getattr(getattr(update, "effective_user", None), "id", None),
+                order_id,
+                type(exc).__name__,
+                exc,
+            )
+            await _send_purchase_error(update, context, reason=str(exc), order_id=order_id)
     elif data.startswith("pay_wallet:"):
         order_id = data.split(":", 1)[1].strip()
         await query.edit_message_text(

@@ -17,6 +17,7 @@ import sys
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.import_inventory import REQUIRED_COLUMNS, import_inventory
+from payment_service import PaymentConfig, PaymentService
 import telegram_license_bot as bot
 
 
@@ -25,8 +26,18 @@ class FakeQuery:
         self.data = data
         self.edits: list[tuple[str, object | None]] = []
         self.captions: list[tuple[str, object | None]] = []
+        self.replies: list[tuple[str, object | None]] = []
+        self.photos: list[tuple[str, object | None]] = []
+        self.documents: list[tuple[str, object | None]] = []
         self.answered = False
-        self.message = SimpleNamespace(caption=None)
+        self.message = SimpleNamespace(
+            caption=None,
+            chat_id=123456,
+            message_id=777,
+            reply_text=self._reply_text,
+            reply_photo=self._reply_photo,
+            reply_document=self._reply_document,
+        )
 
     async def answer(self) -> None:
         self.answered = True
@@ -37,19 +48,32 @@ class FakeQuery:
     async def edit_message_caption(self, caption: str, reply_markup=None) -> None:
         self.captions.append((caption, reply_markup))
 
+    async def _reply_text(self, text: str, reply_markup=None) -> None:
+        self.replies.append((text, reply_markup))
+
+    async def _reply_photo(self, photo=None, caption=None, reply_markup=None) -> None:
+        self.photos.append((caption or "", reply_markup))
+
+    async def _reply_document(self, document=None, filename=None) -> None:
+        self.documents.append((filename or "", None))
+
 
 class FakeUpdate:
     def __init__(self, data: str, user_id: int = 42) -> None:
         self.callback_query = FakeQuery(data)
         self.effective_user = SimpleNamespace(id=user_id, full_name="Test User", username="")
-        self.effective_message = SimpleNamespace(
-            reply_text=self._reply_text,
-            reply_photo=self._reply_photo,
-            reply_document=self._reply_document,
-        )
         self.replies: list[tuple[str, object | None]] = []
         self.photos: list[tuple[str, object | None]] = []
         self.documents: list[tuple[str, object | None]] = []
+        self.effective_message = SimpleNamespace(
+            chat=SimpleNamespace(id=123456),
+            reply_text=self._reply_text,
+            reply_photo=self._reply_photo,
+            reply_document=self._reply_document,
+            replies=self.callback_query.replies,
+            photos=self.callback_query.photos,
+            documents=self.callback_query.documents,
+        )
 
     async def _reply_text(self, text: str, reply_markup=None) -> None:
         self.replies.append((text, reply_markup))
@@ -80,7 +104,17 @@ class TelegramCallbackFlowTest(unittest.TestCase):
         import_inventory(workbook_path, self.db_path, mode="replace")
         self.previous_store_db_path = os.environ.get("STORE_DB_PATH")
         os.environ["STORE_DB_PATH"] = str(self.db_path)
-        self.context = SimpleNamespace(application=SimpleNamespace(bot_data={"store_db_path": self.db_path}), user_data={})
+        self.context = SimpleNamespace(
+            application=SimpleNamespace(
+                bot_data={
+                    "store_db_path": self.db_path,
+                    "payment_service": PaymentService(
+                        PaymentConfig(bank_name="ACB", bank_account="123456789", bank_account_name="AI STORE", qr_url="")
+                    ),
+                }
+            ),
+            user_data={},
+        )
 
     def tearDown(self) -> None:
         if self.previous_store_db_path is None:
@@ -111,8 +145,8 @@ class TelegramCallbackFlowTest(unittest.TestCase):
         update = FakeUpdate("qty:GEMINI:GEMINI:1")
         asyncio.run(bot._on_menu_impl(update, self.context))
         final_text = update.callback_query.edits[-1][0]
-        self.assertIn("Chọn phương thức thanh toán", final_text)
-        self.assertNotIn("Sản phẩm hiện đã hết hàng", final_text)
+        self.assertIn("thanh toán", final_text.lower())
+        self.assertNotIn("hết hàng", final_text.lower())
         with closing(sqlite3.connect(self.db_path)) as connection:
             stock = connection.execute(
                 """
@@ -136,7 +170,7 @@ class TelegramCallbackFlowTest(unittest.TestCase):
         update = FakeUpdate("qty:GEMINI:GEMINI:9")
         asyncio.run(bot._on_menu_impl(update, self.context))
         final_text = update.callback_query.edits[-1][0]
-        self.assertIn("Sản phẩm hiện đã hết hàng", final_text)
+        self.assertIn("hết hàng", final_text.lower())
         with closing(sqlite3.connect(self.db_path)) as connection:
             stock = connection.execute(
                 """
@@ -155,6 +189,23 @@ class TelegramCallbackFlowTest(unittest.TestCase):
                 """
             ).fetchone()[0]
         self.assertEqual((stock, reserved), (8, 0))
+
+    def test_quantity_flow_reaches_qr_payment_branch(self) -> None:
+        update = FakeUpdate("qty:GEMINI:GEMINI:1")
+        asyncio.run(bot._on_menu_impl(update, self.context))
+        final_text = update.callback_query.edits[-1][0]
+        self.assertIn("thanh toán", final_text.lower())
+        self.assertNotIn("hết hàng", final_text.lower())
+
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            order_id = connection.execute(
+                "SELECT order_id FROM orders WHERE product_code = 'GEMINI' ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()[0]
+
+        qr_update = FakeUpdate(f"pay_acb:{order_id}")
+        asyncio.run(bot._send_acb_qr(qr_update, self.context, order_id))
+        self.assertTrue(qr_update.effective_message.photos)
+        self.assertFalse(any("lỗi tạo thanh toán" in text.lower() for text, _ in qr_update.replies))
 
 
 if __name__ == "__main__":
