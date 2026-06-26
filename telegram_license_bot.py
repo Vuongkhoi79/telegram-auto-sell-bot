@@ -414,6 +414,7 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("🤖 Tool", callback_data="menu_tools"),
             ],
             [
+                InlineKeyboardButton("🧾 Lịch sử mua hàng", callback_data="menu_history"),
                 InlineKeyboardButton("💰 Nạp tiền", callback_data="menu_payment"),
                 InlineKeyboardButton("📦 Đơn hàng", callback_data="menu_orders"),
             ],
@@ -1442,6 +1443,14 @@ async def _send_products(update: Update, context: ContextTypes.DEFAULT_TYPE, *, 
         await update.effective_message.reply_text(text, reply_markup=_product_menu_keyboard(product_group))
 
 
+async def _render_product_menu(update: Update, *, edit: bool = False, product_group: str = "account") -> None:
+    text = "🎁 Sản phẩm\n\nChọn sản phẩm" if product_group == "account" else "🤖 Tool\n\nChọn sản phẩm"
+    if edit and update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=_product_menu_keyboard(product_group))
+    else:
+        await update.effective_message.reply_text(text, reply_markup=_product_menu_keyboard(product_group))
+
+
 async def _send_product_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, product_name: str, *, edit: bool = False) -> None:
     if update.effective_user:
         _release_current_user_reservation(context, update.effective_user.id)
@@ -1739,6 +1748,57 @@ async def _send_orders(update: Update, context: ContextTypes.DEFAULT_TYPE, *, ed
         await update.callback_query.edit_message_text(text, reply_markup=_main_menu_keyboard())
     else:
         await update.effective_message.reply_text(text, reply_markup=_main_menu_keyboard())
+
+
+def _format_history_order(order: dict[str, object], index: int) -> str:
+    def _field(name: str) -> str:
+        value = str(order.get(name, "") or "").strip()
+        return value if value else "N/A"
+
+    return (
+        f"{index}. {_field('order_id')}\n"
+        f"Sản phẩm: {_field('product_name')}\n"
+        f"Mã sản phẩm: {_field('product_code')}\n"
+        f"Gói: {_field('package_name')}\n"
+        f"Số lượng: {_field('quantity')}\n"
+        f"Tổng tiền: {_format_vnd(int(order.get('total', order.get('amount', 0)) or 0))}đ\n"
+        f"Thanh toán: {_field('payment_status')}\n"
+        f"Trạng thái: {_field('order_status')}\n"
+        f"Ngày tạo: {_field('created_at')}\n"
+        f"Ngày thanh toán: {_field('paid_at')}\n"
+        f"Ngày giao hàng: {_field('delivered_at')}"
+    )
+
+
+async def _send_purchase_history(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
+    user = getattr(update, "effective_user", None)
+    telegram_user_id = int(getattr(user, "id", 0) or 0)
+    orders: list[dict[str, object]] = []
+    store_db_path = _resolve_store_db_path(context.application.bot_data.get("store_db_path"))
+    if store_db_path.is_file():
+        try:
+            orders = StoreRepository(store_db_path).get_orders_by_telegram_user(telegram_user_id, limit=10)
+        except (OSError, RuntimeError, sqlite3.Error):
+            orders = []
+    if not orders:
+        text = "🧾 Lịch sử mua hàng\n\nBạn chưa có đơn hàng nào."
+    else:
+        text = "🧾 Lịch sử mua hàng\n\n" + "\n\n".join(
+            _format_history_order(order, index)
+            for index, order in enumerate(orders, start=1)
+        )
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📦 Sản phẩm", callback_data="menu_products"),
+                InlineKeyboardButton("🏠 Menu chính", callback_data="menu_main"),
+            ]
+        ]
+    )
+    if edit and update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=keyboard)
+    else:
+        await update.effective_message.reply_text(text, reply_markup=keyboard)
 
 
 async def _send_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False, product_name: str = "") -> None:
@@ -2719,16 +2779,16 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await query.answer()
     data = query.data or ""
     if data == "menu_main":
-        if update.effective_user:
-            _release_current_user_reservation(context, update.effective_user.id)
         await query.edit_message_text(_start_help_text(), reply_markup=_main_menu_keyboard())
     elif data == "menu_products":
-        await _send_products(update, context, edit=True)
+        await _render_product_menu(update, edit=True)
     elif data == "menu_tools":
         # Tool is the original license/download branch, separate from account catalog products.
         await query.edit_message_text(_ai_daily_text(), reply_markup=_ai_daily_keyboard())
     elif data == "menu_orders":
         await _send_orders(update, context, edit=True)
+    elif data == "menu_history":
+        await _send_purchase_history(update, context, edit=True)
     elif data == "menu_payment":
         await _send_payment(update, context, edit=True)
     elif data == "menu_ai_daily":

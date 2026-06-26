@@ -278,6 +278,27 @@ class StoreRepository:
             ).fetchall()
         return [self._order_row_to_dict(row) for row in rows]
 
+    def get_orders_by_telegram_user(self, telegram_user_id: int, limit: int = 10) -> list[dict[str, Any]]:
+        if limit <= 0:
+            return []
+        with self._session() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, order_id, telegram_user_id, username, product_id, product_code,
+                       product_name, package_name, quantity, unit_price_vnd, total_vnd,
+                       delivery_type, machine_id, plan, payment_method, payment_status,
+                       order_status, transaction_id, created_at, expire_at, paid_at,
+                       delivered_at, delivery_ref, inventory_source, duration_days,
+                       expire_date, lifetime
+                FROM orders
+                WHERE telegram_user_id = ?
+                ORDER BY created_at DESC, order_id DESC
+                LIMIT ?
+                """,
+                (int(telegram_user_id), int(limit)),
+            ).fetchall()
+        return [self._order_row_to_dict(row) for row in rows]
+
     def find_order(self, order_id: str) -> dict[str, Any] | None:
         with self._session() as connection:
             row = connection.execute(

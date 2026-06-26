@@ -117,6 +117,64 @@ class StoreRepositoryTest(unittest.TestCase):
             ).fetchone()
         self.assertEqual((row[0], row[1]), ("CHATGPT", "CHATGPT"))
 
+    def test_get_orders_by_telegram_user_returns_latest_ten_only_for_that_user(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
+            for index in range(12):
+                created_at = (now + timedelta(minutes=index)).isoformat()
+                connection.execute(
+                    """
+                    INSERT INTO orders
+                        (id, order_id, telegram_user_id, product_code, product_name, package_name, quantity,
+                         unit_price_vnd, total_vnd, delivery_type, payment_status, order_status, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"order-history-{index}",
+                        f"ORD-HISTORY-{index:02d}",
+                        42,
+                        "GEMINI",
+                        "Gemini AI Pro",
+                        "Gemini AI Pro",
+                        1,
+                        70000,
+                        70000,
+                        "account",
+                        "paid" if index % 2 else "pending",
+                        "delivered" if index % 3 == 0 else "pending",
+                        created_at,
+                    ),
+                )
+            connection.execute(
+                """
+                INSERT INTO orders
+                    (id, order_id, telegram_user_id, product_code, product_name, package_name, quantity,
+                     unit_price_vnd, total_vnd, delivery_type, payment_status, order_status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "order-history-other",
+                    "ORD-HISTORY-OTHER",
+                    7,
+                    "CAPCUT",
+                    "CAPCUT PRO",
+                    "CAPCUT PRO",
+                    1,
+                    400000,
+                    400000,
+                    "account",
+                    "paid",
+                    "delivered",
+                    (now + timedelta(minutes=100)).isoformat(),
+                ),
+            )
+        orders = self.store.get_orders_by_telegram_user(42, limit=10)
+        self.assertEqual(len(orders), 10)
+        self.assertEqual(orders[0]["order_id"], "ORD-HISTORY-11")
+        self.assertEqual(orders[-1]["order_id"], "ORD-HISTORY-02")
+        self.assertTrue(all(order["telegram_user_id"] == 42 for order in orders))
+        self.assertTrue(all(order["order_id"] != "ORD-HISTORY-OTHER" for order in orders))
+
     def test_release_expired_reservations_preserves_paid_and_delivered_items(self) -> None:
         for credential in ("expired@example.com|pass", "paid@example.com|pass", "delivered@example.com|pass"):
             self.store.add_inventory_item("TEST_PRODUCT", credential)

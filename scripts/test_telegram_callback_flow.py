@@ -16,8 +16,9 @@ import sys
 
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.import_inventory import REQUIRED_COLUMNS, import_inventory
 from payment_service import PaymentConfig, PaymentService
+from repository.store_repository import StoreRepository
+from scripts.import_inventory import REQUIRED_COLUMNS, import_inventory
 import telegram_license_bot as bot
 
 
@@ -122,6 +123,97 @@ class TelegramCallbackFlowTest(unittest.TestCase):
         else:
             os.environ["STORE_DB_PATH"] = self.previous_store_db_path
         self.temp_dir.cleanup()
+
+    def test_menu_navigation_callbacks_are_stateless(self) -> None:
+        menu_buttons = [button for row in bot._main_menu_keyboard().inline_keyboard for button in row]
+        self.assertTrue(any(button.callback_data == "menu_history" for button in menu_buttons))
+
+        product_update = FakeUpdate("menu_products")
+        asyncio.run(bot._on_menu_impl(product_update, self.context))
+        product_text = product_update.callback_query.edits[-1][0]
+        self.assertIn("Sản phẩm", product_text)
+        self.assertIn("Chọn sản phẩm", product_text)
+
+        main_update = FakeUpdate("menu_main")
+        asyncio.run(bot._on_menu_impl(main_update, self.context))
+        main_text = main_update.callback_query.edits[-1][0]
+        self.assertIn("AI STORE", main_text)
+
+    def test_purchase_history_button_shows_empty_and_user_filtered_orders(self) -> None:
+        empty_update = FakeUpdate("menu_history")
+        asyncio.run(bot._on_menu_impl(empty_update, self.context))
+        empty_text = empty_update.callback_query.edits[-1][0]
+        self.assertIn("Lịch sử mua hàng", empty_text)
+        self.assertIn("Bạn chưa có đơn hàng nào.", empty_text)
+
+        now = "2026-06-26T00:00:00+00:00"
+        repo = StoreRepository(self.db_path)
+        repo.upsert_order(
+            {
+                "order_id": "ORD-HIST-001",
+                "telegram_user_id": 42,
+                "username": "Test User",
+                "product_code": "GEMINI",
+                "product_name": "GEMINI AI",
+                "package_name": "Gemini AI Pro",
+                "quantity": 1,
+                "unit_price_vnd": 70000,
+                "total_vnd": 70000,
+                "delivery_type": "account",
+                "payment_status": "paid",
+                "order_status": "delivered",
+                "created_at": now,
+                "paid_at": now,
+                "delivered_at": now,
+            }
+        )
+        repo.upsert_order(
+            {
+                "order_id": "ORD-HIST-OTHER",
+                "telegram_user_id": 7,
+                "username": "Other User",
+                "product_code": "CAPCUT",
+                "product_name": "CAPCUT PRO",
+                "package_name": "CAPCUT PRO",
+                "quantity": 2,
+                "unit_price_vnd": 400000,
+                "total_vnd": 800000,
+                "delivery_type": "account",
+                "payment_status": "paid",
+                "order_status": "delivered",
+                "created_at": now,
+                "paid_at": now,
+                "delivered_at": now,
+            }
+        )
+        before_stock = self._gemini_stock_counts()
+        history_update = FakeUpdate("menu_history")
+        asyncio.run(bot._on_menu_impl(history_update, self.context))
+        history_text = history_update.callback_query.edits[-1][0]
+        self.assertIn("ORD-HIST-001", history_text)
+        self.assertIn("GEMINI AI", history_text)
+        self.assertNotIn("ORD-HIST-OTHER", history_text)
+        self.assertEqual(before_stock, self._gemini_stock_counts())
+
+    def _gemini_stock_counts(self) -> tuple[int, int]:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            stock = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM inventory_items AS i
+                JOIN products AS p ON p.id = i.product_id
+                WHERE UPPER(p.code) = 'GEMINI' AND i.status = 'available'
+                """
+            ).fetchone()[0]
+            reserved = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM inventory_items AS i
+                JOIN products AS p ON p.id = i.product_id
+                WHERE UPPER(p.code) = 'GEMINI' AND i.status = 'reserved'
+                """
+            ).fetchone()[0]
+        return int(stock), int(reserved)
 
     def test_quantity_flow_uses_canonical_callback_data_and_reserves_one(self) -> None:
         menu_buttons = [button for row in bot._product_menu_keyboard().inline_keyboard for button in row]
