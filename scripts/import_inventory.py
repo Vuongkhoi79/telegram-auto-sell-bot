@@ -23,7 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from repository.store_repository import ACCOUNT_PRODUCT_CODE_ALIASES
+from repository.store_repository import ACCOUNT_PRODUCT_CODE_ALIASES, canonical_catalog_product
 
 
 DEFAULT_DATABASE = PROJECT_ROOT / "database" / "store.db"
@@ -143,6 +143,9 @@ def find_product_by_code(connection: sqlite3.Connection, product_code: str) -> s
 
 
 def product_display_name(product_code: str, row: dict[str, Any]) -> str:
+    canonical = canonical_catalog_product(product_code)
+    if canonical:
+        return text(canonical["name"])
     return (
         text(row.get("package_name"))
         or text(row.get("plan_name"))
@@ -150,6 +153,13 @@ def product_display_name(product_code: str, row: dict[str, Any]) -> str:
         or text(row.get("product_name"))
         or product_code
     )
+
+
+def canonical_price_vnd(product_code: str, row: dict[str, Any]) -> int:
+    canonical = canonical_catalog_product(product_code)
+    if canonical:
+        return int(canonical["price_vnd"])
+    return parse_int(row.get("price_vnd"), 0)
 
 
 def parse_int(value: Any, default: int = 0) -> int:
@@ -179,7 +189,7 @@ def sync_product_metadata(
             now,
             text(row.get("account_type")),
             text(row.get("duration")),
-            parse_int(row.get("price_vnd"), 0),
+            canonical_price_vnd(product_code, row),
             parse_int(row.get("warranty_days"), 0),
             text(row.get("note")),
             product_code,
@@ -216,7 +226,7 @@ def ensure_product(
             now,
             text(row.get("account_type")),
             text(row.get("duration")),
-            parse_int(row.get("price_vnd"), 0),
+            canonical_price_vnd(product_code, row),
             parse_int(row.get("warranty_days"), 0),
             text(row.get("note")),
             product_code,

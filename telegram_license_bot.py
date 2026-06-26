@@ -491,6 +491,16 @@ def _resolve_store_db_path(store_db_path: Path | str | None = None) -> Path:
     return path if path.is_absolute() else PROJECT_ROOT / path
 
 
+def _price_source_label(package: dict[str, object] | None) -> str:
+    if not package:
+        return "unknown"
+    if str(package.get("source", "") or "") == "sqlite":
+        return "sqlite.products.price_vnd"
+    if str(package.get("source", "") or "") == "legacy":
+        return "legacy.PRODUCT_PACKAGES"
+    return str(package.get("source", "") or "unknown")
+
+
 def _sqlite_orders_enabled() -> bool:
     return bool(os.environ.get("STORE_DB_PATH")) or ORDERS_DB_PATH == DEFAULT_ORDERS_DB_PATH
 
@@ -842,10 +852,12 @@ def _update_order(order_id: str, **changes: object) -> dict[str, object] | None:
 def _create_sales_order(update: Update, product_name: str, package_name: str, quantity: int) -> dict[str, object]:
     callback_data = str(getattr(getattr(update, "callback_query", None), "data", "") or "")
     user_id = getattr(getattr(update, "effective_user", None), "id", None)
+    store_db_path = _resolve_store_db_path()
     logger.debug(
-        "ORDER_CREATE_START callback_data=%s user_id=%s product_name=%s package_name=%s quantity=%s",
+        "ORDER_CREATE_START callback_data=%s user_id=%s database_path=%s product_name=%s package_name=%s quantity=%s",
         callback_data,
         user_id,
+        store_db_path,
         product_name,
         package_name,
         quantity,
@@ -853,9 +865,11 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
     user = update.effective_user
     package = _get_package_info(product_name, package_name)
     logger.debug(
-        "PACKAGE_RESOLVED callback_data=%s user_id=%s product_name=%s package_name=%s product_id=%s package_id=%s category_key=%s product_code=%s package_code=%s display_name=%s available_before=%s",
+        "PACKAGE_RESOLVED callback_data=%s user_id=%s database_path=%s price_source=%s product_name=%s package_name=%s product_id=%s package_id=%s category_key=%s product_code=%s package_code=%s display_name=%s available_before=%s price_vnd=%s",
         callback_data,
         user_id,
+        store_db_path,
+        _price_source_label(package),
         product_name,
         package_name,
         package.get("product_id") if package else None,
@@ -865,6 +879,7 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
         package.get("package_code") if package else None,
         package.get("display_name") if package else None,
         package.get("available_count") if package else None,
+        package.get("price_vnd") if package else None,
     )
     if not package or int(package["available_count"]) < int(quantity):
         raise InventoryReservationError("Sản phẩm hiện đã hết hàng, vui lòng quay lại sau.")
@@ -882,9 +897,11 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
         except (OSError, RuntimeError, sqlite3.Error):
             reserve_with_sqlite = False
     logger.debug(
-        "RESERVE_START callback_data=%s user_id=%s reservation_product_code=%s package_id=%s package_code=%s package_source=%s reserve_with_sqlite=%s display_name=%s available_before=%s requested_quantity=%s unit_price=%s",
+        "RESERVE_START callback_data=%s user_id=%s database_path=%s price_source=%s reservation_product_code=%s package_id=%s package_code=%s package_source=%s reserve_with_sqlite=%s display_name=%s available_before=%s requested_quantity=%s unit_price=%s",
         callback_data,
         user_id,
+        store_db_path,
+        _price_source_label(package),
         reservation_product_code,
         package.get("product_id"),
         package.get("package_code") or package.get("product_code"),
@@ -941,12 +958,14 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
             order["product_code"] = reservation_product_code
             order["inventory_source"] = "sqlite"
             logger.debug(
-                "RESERVE_OK callback_data=%s order_id=%s product_code=%s reserved_after=%s available_before=%s",
+                "RESERVE_OK callback_data=%s order_id=%s database_path=%s product_code=%s reserved_after=%s available_before=%s price_vnd=%s",
                 callback_data,
                 order["order_id"],
+                store_db_path,
                 product_code,
                 order["quantity"],
                 package.get("available_count"),
+                unit_price,
             )
         except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
             logger.exception(
@@ -1592,11 +1611,12 @@ async def _send_acb_qr(update: Update, context: ContextTypes.DEFAULT_TYPE, order
     message_id = getattr(getattr(update, "callback_query", None), "message", None)
     message_id = getattr(message_id, "message_id", None)
     logger.debug(
-        "QR_RENDER_START callback_data=%s user_id=%s chat_id=%s message_id=%s order_id=%s",
+        "QR_RENDER_START callback_data=%s user_id=%s chat_id=%s message_id=%s database_path=%s order_id=%s",
         callback_data,
         user_id,
         chat_id,
         message_id,
+        _resolve_store_db_path(context.application.bot_data.get("store_db_path")),
         order_id,
     )
     _release_expired_sqlite_reservations(context.application.bot_data.get("store_db_path"))
@@ -1633,23 +1653,26 @@ async def _send_acb_qr(update: Update, context: ContextTypes.DEFAULT_TYPE, order
         raise RuntimeError("Thanh toán chưa được cấu hình.")
 
     logger.debug(
-        "QR_RENDER_OK callback_data=%s user_id=%s order_id=%s product_code=%s package_code=%s quantity=%s order_status=%s bank_account=%s",
+        "QR_RENDER_OK callback_data=%s user_id=%s database_path=%s order_id=%s product_code=%s package_code=%s quantity=%s order_status=%s bank_account=%s amount_vnd=%s",
         callback_data,
         user_id,
+        _resolve_store_db_path(context.application.bot_data.get("store_db_path")),
         order_id,
         str(order.get("product_code", order.get("product_id", "")) or ""),
         str(order.get("package_code", "")),
         int(order.get("quantity", 0) or 0),
         str(order.get("order_status", "")),
         payment_service.config.bank_account,
+        int(order.get("total", 0) or 0),
     )
     order = _update_order(order_id, payment_method="ACB") or order
     qr_url = _build_vietqr_url(order, payment_service)
     caption = _qr_caption(order, payment_service)
     logger.debug(
-        "TELEGRAM_SEND_START callback_data=%s order_id=%s qr_url_length=%s amount_vnd=%s",
+        "TELEGRAM_SEND_START callback_data=%s order_id=%s database_path=%s qr_url_length=%s amount_vnd=%s",
         callback_data,
         order_id,
+        _resolve_store_db_path(context.application.bot_data.get("store_db_path")),
         len(qr_url),
         int(order.get("total", 0) or 0),
     )
@@ -1883,6 +1906,7 @@ def _get_package_info(product_key: str, package_key: str) -> dict[str, object] |
                     "price_vnd": int(package["price_vnd"]),
                     "available_count": int(package["available_count"] or 0),
                     "source": "sqlite",
+                    "price_source": "sqlite.products.price_vnd",
                     "reservation_sqlite": True,
                 }
         package = repository.get_product_details(package_key)
@@ -1896,6 +1920,7 @@ def _get_package_info(product_key: str, package_key: str) -> dict[str, object] |
                 "price_vnd": int(package["price_vnd"]),
                 "available_count": repository.get_stock_count(str(package["code"])),
                 "source": "sqlite",
+                "price_source": "sqlite.products.price_vnd",
                 "reservation_sqlite": True,
             }
     except (OSError, RuntimeError, sqlite3.Error):
@@ -1911,6 +1936,7 @@ def _get_package_info(product_key: str, package_key: str) -> dict[str, object] |
             "price_vnd": PRODUCT_PACKAGES[package_key],
             "available_count": int(product_info["available_count"]),
             "source": "legacy",
+            "price_source": "legacy.PRODUCT_PACKAGES",
             "reservation_sqlite": product_info["source"] == "store.db",
         }
     return None
@@ -2755,9 +2781,11 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         menu_available = _menu_available_count(product_code)
         package_available = int(package["available_count"]) if package else 0
         logger.debug(
-            "CALLBACK qty resolution callback_data=%s user_id=%s product_code=%s product_id=%s package_id=%s package_code=%s package_name=%s quantity=%s available_by_menu_query=%s available_by_package_page_query=%s available_by_reserve_query=%s",
+            "CALLBACK qty resolution callback_data=%s user_id=%s database_path=%s price_source=%s product_code=%s product_id=%s package_id=%s package_code=%s package_name=%s quantity=%s available_by_menu_query=%s available_by_package_page_query=%s available_by_reserve_query=%s price_vnd=%s",
             data,
             getattr(getattr(update, "effective_user", None), "id", None),
+            _resolve_store_db_path(context.application.bot_data.get("store_db_path")),
+            _price_source_label(package),
             product_code,
             package.get("product_id") if package else None,
             package.get("product_id") if package else None,
@@ -2767,6 +2795,7 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             menu_available,
             package_available,
             package_available,
+            package.get("price_vnd") if package else None,
         )
         if not package:
             await query.edit_message_text("Gói không hợp lệ.", reply_markup=_product_menu_keyboard())
@@ -2776,9 +2805,11 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 _release_current_user_reservation(context, update.effective_user.id)
             _release_expired_sqlite_reservations(context.application.bot_data.get("store_db_path"))
             logger.debug(
-                "ORDER_CREATE_START callback_data=%s user_id=%s product_code=%s package_code=%s quantity=%s available_by_menu_query=%s available_by_package_page_query=%s available_by_reserve_query=%s",
+                "ORDER_CREATE_START callback_data=%s user_id=%s database_path=%s price_source=%s product_code=%s package_code=%s quantity=%s available_by_menu_query=%s available_by_package_page_query=%s available_by_reserve_query=%s",
                 data,
                 getattr(getattr(update, "effective_user", None), "id", None),
+                _resolve_store_db_path(context.application.bot_data.get("store_db_path")),
+                _price_source_label(package),
                 product_code,
                 package_code,
                 int(raw_qty),
@@ -2788,9 +2819,11 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             order = _create_sales_order(update, product_code, package_code, int(raw_qty))
             logger.debug(
-                "ORDER_CREATED callback_data=%s user_id=%s order_id=%s product_code=%s package_code=%s amount_vnd=%s",
+                "ORDER_CREATED callback_data=%s user_id=%s database_path=%s price_source=%s order_id=%s product_code=%s package_code=%s amount_vnd=%s",
                 data,
                 getattr(getattr(update, "effective_user", None), "id", None),
+                _resolve_store_db_path(context.application.bot_data.get("store_db_path")),
+                _price_source_label(package),
                 order.get("order_id", ""),
                 order.get("product_code", ""),
                 order.get("package_code", ""),
@@ -2834,11 +2867,13 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             context.user_data["pending_order_id"] = str(order.get("order_id", ""))
         try:
             logger.debug(
-                "PAYMENT_BUILD_START callback_data=%s user_id=%s chat_id=%s message_id=%s order_id=%s product_code=%s package_code=%s quantity=%s amount_vnd=%s bank_account=%s",
+                "PAYMENT_BUILD_START callback_data=%s user_id=%s chat_id=%s message_id=%s database_path=%s price_source=%s order_id=%s product_code=%s package_code=%s quantity=%s amount_vnd=%s bank_account=%s",
                 data,
                 getattr(getattr(update, "effective_user", None), "id", None),
                 getattr(getattr(getattr(update, "effective_message", None), "chat", None), "id", None),
                 getattr(getattr(update, "callback_query", None), "message", None).message_id if getattr(getattr(update, "callback_query", None), "message", None) else None,
+                _resolve_store_db_path(context.application.bot_data.get("store_db_path")),
+                _price_source_label(package),
                 str(order.get("order_id", "")),
                 str(order.get("product_code", order.get("product_id", "")) or ""),
                 str(order.get("package_code", "")),
@@ -3001,6 +3036,11 @@ def build_application() -> Application:
     app.bot_data["bank_provider"] = cfg["BANK_PROVIDER"]
     app.bot_data["tool_download_url"] = cfg["TOOL_DOWNLOAD_URL"]
     app.bot_data["support_username"] = cfg["SUPPORT_USERNAME"] or "@Aidaily79"
+    logger.info(
+        "Runtime store database loaded DATABASE_PATH=%s bank_provider=%s",
+        store_db_path,
+        cfg["BANK_PROVIDER"],
+    )
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("license", cmd_license))

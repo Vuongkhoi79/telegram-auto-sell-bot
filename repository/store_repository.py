@@ -31,9 +31,13 @@ CATALOG_COLUMNS = {
 }
 
 CANONICAL_CATALOG_PRODUCTS = {
-    "CAPCUT": "CAPCUT PRO",
-    "GEMINI": "Gemini AI Pro",
+    "CAPCUT": {"name": "CAPCUT PRO", "price_vnd": 400000},
+    "GEMINI": {"name": "Gemini AI Pro", "price_vnd": 99000},
 }
+
+
+def canonical_catalog_product(product_code: str) -> dict[str, Any] | None:
+    return CANONICAL_CATALOG_PRODUCTS.get(str(product_code or "").strip().upper())
 
 ORDER_COLUMNS = {
     "inventory_source": "TEXT NOT NULL DEFAULT 'sqlite'",
@@ -133,15 +137,15 @@ class StoreRepository:
                 if name not in order_columns:
                     connection.execute(f"ALTER TABLE orders ADD COLUMN {name} {definition}")
             now = _utc_now_iso()
-            for code, display_name in CANONICAL_CATALOG_PRODUCTS.items():
+            for code, product in CANONICAL_CATALOG_PRODUCTS.items():
                 connection.execute(
                     """
                     UPDATE products
                     SET category_key = ?, category = 'account', product_group = 'account',
-                        delivery_type = 'account', name = ?, updated_at = ?
+                        delivery_type = 'account', name = ?, price_vnd = ?, updated_at = ?
                     WHERE UPPER(code) = ?
                     """,
-                    (code, display_name, now, code),
+                    (code, str(product["name"]), int(product["price_vnd"]), now, code),
                 )
 
     def _product_code_candidates(self, product_code: str) -> list[str]:
