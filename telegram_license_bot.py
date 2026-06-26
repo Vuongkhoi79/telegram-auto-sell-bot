@@ -867,7 +867,7 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
         raise InventoryReservationError("Sản phẩm hiện đã hết hàng, vui lòng quay lại sau.")
     unit_price = int(package["price_vnd"])
     now = _utc_now()
-    selected_package_code = str(package.get("product_code", "") or "").strip().upper()
+    selected_package_code = str(package.get("package_code") or package.get("product_code", "") or "").strip().upper()
     reservation_product_code = selected_package_code or _reservation_product_code(product_name, str(package.get("product_code", "")))
     reserve_with_sqlite = False
     reservation_repo: StoreRepository | None = None
@@ -897,7 +897,7 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
         "product_name": product_name,
         "package_name": str(package["display_name"]),
         "product_code": reservation_product_code,
-        "package_code": str(package["product_code"]),
+        "package_code": str(package.get("package_code") or package["product_code"]),
         "quantity": int(quantity),
         "unit_price": int(unit_price),
         "total": int(unit_price) * int(quantity),
@@ -1141,7 +1141,7 @@ def _product_menu_keyboard(product_group: str = "account") -> InlineKeyboardMark
         product_name = _clean_product_title(str(item["category_key"]))
         available_count = int(item["available_count"] or 0)
         label = f"{_stock_icon(available_count)} {product_name} ({available_count})"
-        buttons.append(InlineKeyboardButton(label, callback_data=f"product:{product_name}"))
+        buttons.append(InlineKeyboardButton(label, callback_data=f"product:{str(item['lookup_key']).upper()}"))
     rows.extend(_chunked(buttons, 3))
     rows.append([InlineKeyboardButton("Quay lại", callback_data="menu_main")])
     return InlineKeyboardMarkup(rows)
@@ -1216,8 +1216,9 @@ def _product_detail_text(product_name: str, available: bool, stock: int) -> str:
     status_text = "Còn hàng" if available else "Hết hàng"
     price_text = f"{_format_vnd(min(prices))}đ" if prices else "Liên hệ"
     warranty_text = f"{warranty_days} ngày" if warranty_days else "Theo từng gói"
+    display_name = _catalog_display_name(product_name)
     return (
-        f"💎 {_clean_product_title(product_name)}"
+        f"💎 {_clean_product_title(display_name)}"
         f"{_shop_separator()}"
         f"{_stock_icon(stock)} {status_text}\n"
         f"📦 Tồn kho: {stock}\n"
@@ -1239,17 +1240,18 @@ def _product_detail_keyboard(product_name: str, available: bool) -> InlineKeyboa
 def _package_keyboard(product_name: str) -> InlineKeyboardMarkup:
     rows = []
     packages = _packages_for_product(product_name)
+    product_code = _catalog_lookup_key(product_name)
     if packages:
         rows.extend(
             [InlineKeyboardButton(
                 f"🎁 {package['display_name']}\n💰 {_format_vnd(int(package['price_vnd']))}đ\n📦 Còn: {int(package['available_count'] or 0)}",
-                callback_data=f"pkg:{product_name}:{package['product_code']}",
+                callback_data=f"pkg:{product_code}:{str(package.get('package_code') or package['product_code']).upper()}",
             )]
             for package in packages
         )
     else:
         rows.extend(
-            [InlineKeyboardButton(f"🎁 {name}\n💰 {_format_vnd(price)}đ", callback_data=f"pkg:{product_name}:{name}")]
+            [InlineKeyboardButton(f"🎁 {name}\n💰 {_format_vnd(price)}đ", callback_data=f"pkg:{product_code}:{name}")]
             for name, price in PRODUCT_PACKAGES.items()
         )
     rows.append([InlineKeyboardButton("Quay lại sản phẩm", callback_data="menu_products")])
@@ -1258,13 +1260,15 @@ def _package_keyboard(product_name: str) -> InlineKeyboardMarkup:
 
 
 def _quantity_keyboard(product_name: str, package_name: str) -> InlineKeyboardMarkup:
+    product_code = _catalog_lookup_key(product_name)
+    package_code = str(package_name or "").strip().upper()
     buttons = [
-        InlineKeyboardButton(str(qty), callback_data=f"qty:{product_name}:{package_name}:{qty}")
+        InlineKeyboardButton(str(qty), callback_data=f"qty:{product_code}:{package_code}:{qty}")
         for qty in QUANTITY_OPTIONS
     ]
     rows = _chunked(buttons, 3)
-    rows.append([InlineKeyboardButton("Nhập số khác", callback_data=f"manualqty:{product_name}:{package_name}")])
-    rows.append([InlineKeyboardButton("Quay lại gói", callback_data=f"product:{product_name}")])
+    rows.append([InlineKeyboardButton("Nhập số khác", callback_data=f"manualqty:{product_code}:{package_code}")])
+    rows.append([InlineKeyboardButton("Quay lại gói", callback_data=f"product:{product_code}")])
     rows.append([InlineKeyboardButton("Menu chính", callback_data="menu_main")])
     return InlineKeyboardMarkup(rows)
 
@@ -1407,6 +1411,12 @@ async def _send_products(update: Update, context: ContextTypes.DEFAULT_TYPE, *, 
     if update.effective_user:
         _release_current_user_reservation(context, update.effective_user.id)
     _release_expired_sqlite_reservations(context.application.bot_data.get("store_db_path"))
+    logger.debug(
+        "SALES_STAGE stage=product_menu user_id=%s callback_data=%s product_group=%s",
+        getattr(getattr(update, "effective_user", None), "id", None),
+        getattr(getattr(update, "callback_query", None), "data", "") if getattr(update, "callback_query", None) else "",
+        product_group,
+    )
     text = "🎁 Sản phẩm\n\nChọn sản phẩm" if product_group == "account" else "🤖 Tool\n\nChọn sản phẩm"
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=_product_menu_keyboard(product_group))
@@ -1454,6 +1464,14 @@ async def _send_product_detail(update: Update, context: ContextTypes.DEFAULT_TYP
                 await update.effective_message.reply_text(text, reply_markup=keyboard)
             return
         text = _product_detail_text(product_name, available, stock)
+    logger.debug(
+        "SALES_STAGE stage=product_detail user_id=%s callback_data=%s product_code=%s available_by_menu_query=%s available_by_package_page_query=%s",
+        getattr(getattr(update, "effective_user", None), "id", None),
+        getattr(getattr(update, "callback_query", None), "data", "") if getattr(update, "callback_query", None) else "",
+        _catalog_lookup_key(product_name),
+        _menu_available_count(product_name),
+        int(stock if "stock" in locals() else 0),
+    )
     keyboard = _product_detail_keyboard(product_name, available)
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=keyboard)
@@ -1464,6 +1482,13 @@ async def _send_product_detail(update: Update, context: ContextTypes.DEFAULT_TYP
 async def _send_package_choice(update: Update, product_name: str, *, edit: bool = False) -> None:
     text = _package_text(product_name)
     keyboard = _package_keyboard(product_name)
+    logger.debug(
+        "SALES_STAGE stage=package_page user_id=%s callback_data=%s product_code=%s available_by_menu_query=%s",
+        getattr(getattr(update, "effective_user", None), "id", None),
+        getattr(getattr(update, "callback_query", None), "data", "") if getattr(update, "callback_query", None) else "",
+        _catalog_lookup_key(product_name),
+        _menu_available_count(product_name),
+    )
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=keyboard)
     else:
@@ -1473,6 +1498,16 @@ async def _send_package_choice(update: Update, product_name: str, *, edit: bool 
 async def _send_quantity_choice(update: Update, product_name: str, package_name: str, *, edit: bool = False) -> None:
     text = _quantity_text(product_name, package_name)
     keyboard = _quantity_keyboard(product_name, package_name)
+    package = _get_package_info(product_name, package_name)
+    logger.debug(
+        "SALES_STAGE stage=quantity_page user_id=%s callback_data=%s product_code=%s package_code=%s package_name=%s available_by_package_page_query=%s",
+        getattr(getattr(update, "effective_user", None), "id", None),
+        getattr(getattr(update, "callback_query", None), "data", "") if getattr(update, "callback_query", None) else "",
+        _catalog_lookup_key(product_name),
+        str(package.get("product_code")) if package else "",
+        str(package.get("display_name")) if package else package_name,
+        int(package.get("available_count") or 0) if package else 0,
+    )
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=keyboard)
     else:
@@ -1482,6 +1517,16 @@ async def _send_quantity_choice(update: Update, product_name: str, package_name:
 async def _send_payment_choice(update: Update, order: dict[str, object], *, edit: bool = False) -> None:
     text = _order_payment_text(order)
     keyboard = _payment_choice_keyboard(str(order.get("order_id", "")))
+    logger.debug(
+        "SALES_STAGE stage=payment_choice user_id=%s callback_data=%s order_id=%s product_code=%s package_code=%s quantity=%s available_by_reserve_query=%s",
+        getattr(getattr(update, "effective_user", None), "id", None),
+        getattr(getattr(update, "callback_query", None), "data", "") if getattr(update, "callback_query", None) else "",
+        str(order.get("order_id", "")),
+        str(order.get("product_code", order.get("product_id", "")) or ""),
+        str(order.get("package_code", "")),
+        int(order.get("quantity", 0) or 0),
+        _menu_available_count(str(order.get("product_code", order.get("product_id", "")) or "")),
+    )
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=keyboard)
     else:
@@ -1508,6 +1553,16 @@ async def _send_acb_qr(update: Update, context: ContextTypes.DEFAULT_TYPE, order
             await message.reply_text("Mã Order đã hết hạn. Vui lòng tạo lại đơn mới.", reply_markup=_product_menu_keyboard())
         return
 
+    logger.debug(
+        "SALES_STAGE stage=qr_render user_id=%s callback_data=%s order_id=%s product_code=%s package_code=%s quantity=%s order_status=%s",
+        getattr(getattr(update, "effective_user", None), "id", None),
+        getattr(getattr(update, "callback_query", None), "data", "") if getattr(update, "callback_query", None) else "",
+        order_id,
+        str(order.get("product_code", order.get("product_id", "")) or ""),
+        str(order.get("package_code", "")),
+        int(order.get("quantity", 0) or 0),
+        str(order.get("order_status", "")),
+    )
     payment_service: PaymentService = context.application.bot_data["payment_service"]
     order = _update_order(order_id, payment_method="ACB") or order
     qr_url = _build_vietqr_url(order, payment_service)
@@ -1708,16 +1763,20 @@ def _get_package_info(product_key: str, package_key: str) -> dict[str, object] |
         repository = StoreRepository(_resolve_store_db_path())
         packages = repository.list_packages_by_category(_catalog_lookup_key(product_key))
         for package in packages:
+            canonical_package_code = _catalog_lookup_key(product_key)
             candidate_codes = {
                 str(package.get("product_code", "") or "").strip().upper(),
                 str(package.get("code", "") or "").strip().upper(),
                 str(package.get("display_name", "") or "").strip().upper(),
                 str(package.get("name", "") or "").strip().upper(),
+                str(package.get("package_code", "") or "").strip().upper(),
+                str(canonical_package_code).strip().upper(),
             }
             if package_key_norm in candidate_codes or _menu_stock_product_code(package_key_norm) in candidate_codes:
                 return {
                     "product_id": str(package["id"]),
-                    "product_code": str(package["product_code"]),
+                    "product_code": canonical_package_code,
+                    "package_code": canonical_package_code,
                     "category_key": str(package.get("category_key") or product_key_norm),
                     "display_name": str(package["display_name"]),
                     "price_vnd": int(package["price_vnd"]),
@@ -1729,7 +1788,8 @@ def _get_package_info(product_key: str, package_key: str) -> dict[str, object] |
         if package and package["active"]:
             return {
                 "product_id": str(package["id"]),
-                "product_code": str(package["code"]),
+                "product_code": _catalog_lookup_key(product_key),
+                "package_code": _catalog_lookup_key(product_key),
                 "category_key": str(package.get("category_key") or product_key_norm),
                 "display_name": str(package["name"]),
                 "price_vnd": int(package["price_vnd"]),
@@ -1742,7 +1802,8 @@ def _get_package_info(product_key: str, package_key: str) -> dict[str, object] |
     if package_key in PRODUCT_PACKAGES:
         product_info = get_product_display_info(product_key)
         return {
-            "product_code": str(product_info.get("product_code") or product_key.upper()),
+            "product_code": _catalog_lookup_key(product_key),
+            "package_code": _catalog_lookup_key(product_key),
             "product_id": str(product_info.get("product_code") or product_key.upper()),
             "category_key": product_key_norm,
             "display_name": package_key,
@@ -1886,6 +1947,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user:
         _release_expired_sqlite_reservations(context.application.bot_data.get("store_db_path"))
         _release_current_user_reservation(context, update.effective_user.id)
+    logger.debug(
+        "SALES_STAGE stage=start user_id=%s callback_data=%s",
+        getattr(getattr(update, "effective_user", None), "id", None),
+        getattr(getattr(update, "callback_query", None), "data", "") if getattr(update, "callback_query", None) else "",
+    )
     args = context.args or []
     machine_id = ""
     if args:
@@ -2543,52 +2609,90 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     elif data == "product_ai_daily":
         await query.edit_message_text(_ai_daily_text(), reply_markup=_ai_daily_keyboard())
     elif data.startswith("pkg:"):
-        _, product_name, package_name = data.split(":", 2)
+        _, product_code, package_code = data.split(":", 2)
         logger.debug(
-            "CALLBACK pkg callback_data=%s product_name=%s package_name=%s",
+            "CALLBACK pkg callback_data=%s parsed_parts=%s user_id=%s product_code=%s package_code=%s",
             data,
-            product_name,
-            package_name,
+            data.split(":"),
+            getattr(getattr(update, "effective_user", None), "id", None),
+            product_code,
+            package_code,
         )
-        package = _get_package_info(product_name, package_name)
+        package = _get_package_info(product_code, package_code)
         if not package or int(package["available_count"]) <= 0:
             await query.edit_message_text("Gói không hợp lệ.", reply_markup=_product_menu_keyboard())
             return
-        await _send_quantity_choice(update, product_name, package_name, edit=True)
+        log_sales_state(
+            "package_callback",
+            product_code,
+            callback_data=data,
+            package_id=package_code,
+            quantity=0,
+            database_path=context.application.bot_data.get("store_db_path"),
+        )
+        await _send_quantity_choice(update, product_code, package_code, edit=True)
     elif data.startswith("qty:"):
-        _, product_name, package_name, raw_qty = data.split(":", 3)
+        _, product_code, package_code, raw_qty = data.split(":", 3)
         logger.debug(
-            "CALLBACK qty callback_data=%s product_name=%s package_name=%s requested_quantity=%s",
+            "CALLBACK qty callback_data=%s parsed_parts=%s user_id=%s product_code=%s package_code=%s requested_quantity=%s",
             data,
-            product_name,
-            package_name,
+            data.split(":"),
+            getattr(getattr(update, "effective_user", None), "id", None),
+            product_code,
+            package_code,
             raw_qty,
         )
         log_sales_state(
             "qty_before_reserve",
-            _catalog_lookup_key(product_name),
+            product_code,
             callback_data=data,
-            package_id=package_name,
+            package_id=package_code,
             quantity=int(raw_qty),
             database_path=context.application.bot_data.get("store_db_path"),
         )
-        if not _get_package_info(product_name, package_name):
+        package = _get_package_info(product_code, package_code)
+        menu_available = _menu_available_count(product_code)
+        package_available = int(package["available_count"]) if package else 0
+        logger.debug(
+            "CALLBACK qty resolution callback_data=%s user_id=%s product_code=%s product_id=%s package_id=%s package_code=%s package_name=%s quantity=%s available_by_menu_query=%s available_by_package_page_query=%s available_by_reserve_query=%s",
+            data,
+            getattr(getattr(update, "effective_user", None), "id", None),
+            product_code,
+            package.get("product_id") if package else None,
+            package.get("product_id") if package else None,
+            package_code,
+            package.get("display_name") if package else None,
+            int(raw_qty),
+            menu_available,
+            package_available,
+            package_available,
+        )
+        if not package:
             await query.edit_message_text("Gói không hợp lệ.", reply_markup=_product_menu_keyboard())
             return
         try:
             if update.effective_user:
                 _release_current_user_reservation(context, update.effective_user.id)
             _release_expired_sqlite_reservations(context.application.bot_data.get("store_db_path"))
-            order = _create_sales_order(update, product_name, package_name, int(raw_qty))
+            order = _create_sales_order(update, product_code, package_code, int(raw_qty))
         except InventoryReservationError as exc:
+            logger.debug(
+                "CALLBACK qty failed callback_data=%s user_id=%s product_code=%s package_code=%s quantity=%s reason=%s",
+                data,
+                getattr(getattr(update, "effective_user", None), "id", None),
+                product_code,
+                package_code,
+                raw_qty,
+                exc,
+            )
             await query.edit_message_text(str(exc), reply_markup=_product_menu_keyboard())
             return
         log_sales_state(
             "qty_after_reserve",
-            str(order.get("product_code") or _catalog_lookup_key(product_name)),
+            str(order.get("product_code") or product_code),
             order_id=str(order.get("order_id", "")),
             callback_data=data,
-            package_id=str(order.get("package_code", package_name)),
+            package_id=str(order.get("package_code", package_code)),
             quantity=int(order.get("quantity", raw_qty)),
             database_path=context.application.bot_data.get("store_db_path"),
         )
@@ -2616,13 +2720,20 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         else:
             await query.edit_message_text("Giao dịch đã hủy.", reply_markup=_main_menu_keyboard())
     elif data.startswith("product:"):
-        product_name = data.split(":", 1)[1].strip()
+        product_code = data.split(":", 1)[1].strip()
+        logger.debug(
+            "CALLBACK product callback_data=%s parsed_parts=%s user_id=%s product_code=%s",
+            data,
+            data.split(":"),
+            getattr(getattr(update, "effective_user", None), "id", None),
+            product_code,
+        )
         if update.effective_user:
             _release_current_user_reservation(context, update.effective_user.id)
-        await _send_product_detail(update, context, product_name, edit=True)
+        await _send_product_detail(update, context, product_code, edit=True)
     elif data.startswith("buy:"):
-        product_name = data.split(":", 1)[1].strip()
-        await _send_payment(update, context, edit=True, product_name=product_name)
+        product_code = data.split(":", 1)[1].strip()
+        await _send_payment(update, context, edit=True, product_name=product_code)
     elif data == "menu_download":
         await _send_download(update, context, edit=True)
     elif data == "menu_free":

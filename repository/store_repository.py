@@ -621,6 +621,24 @@ class StoreRepository:
             )
             if not product:
                 raise ValueError(f"Mapped SQLite product is unavailable: {product_code}")
+            available_before_row = connection.execute(
+                """
+                SELECT COUNT(*) AS stock
+                FROM inventory_items
+                WHERE product_id = ? AND status = 'available'
+                """,
+                (product["id"],),
+            ).fetchone()
+            available_before = int(available_before_row["stock"] if available_before_row else 0)
+            logger.debug(
+                "SQL reserve inventory order_id=%s product_code=%s product_id=%s available_before=%s requested_quantity=%s sql=%s",
+                order_id,
+                product_code,
+                product["id"],
+                available_before,
+                quantity,
+                "SELECT id FROM inventory_items WHERE product_id = ? AND status = 'available' ORDER BY created_at, id LIMIT ?",
+            )
             items = connection.execute(
                 """
                 SELECT id FROM inventory_items
@@ -697,15 +715,18 @@ class StoreRepository:
                 )
         reserved = [str(item["id"]) for item in items]
         logger.debug(
-            "COMMIT completed create_pending_account_order_and_reserve order_id=%s reserved_inventory_ids=%s",
+            "COMMIT completed create_pending_account_order_and_reserve order_id=%s reserved_inventory_ids=%s reserved_after=%s available_before=%s",
             order_id,
             reserved,
+            len(reserved),
+            available_before,
         )
         return reserved
 
     def reserve_inventory_items(
         self, order_id: str, product_code: str, quantity: int, expire_minutes: int = 5
     ) -> list[dict[str, str]]:
+        logger = __import__("logging").getLogger(__name__)
         if quantity <= 0 or expire_minutes <= 0:
             raise ValueError("quantity and expire_minutes must be positive")
         now = _utc_now()
@@ -735,6 +756,13 @@ class StoreRepository:
                 ).fetchall()
                 if len(items) == quantity:
                     break
+            logger.debug(
+                "reserve_inventory_items order_id=%s product_code=%s requested_quantity=%s available_after_lookup=%s",
+                order_id,
+                product_code,
+                quantity,
+                len(items),
+            )
             if len(items) != quantity:
                 raise ValueError(f"Insufficient available inventory for {product_code}")
             connection.execute(
