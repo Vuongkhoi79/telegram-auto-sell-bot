@@ -406,6 +406,26 @@ async def _safe_edit_message_reply_markup(query, *args, **kwargs) -> bool:
         raise
 
 
+async def _show_navigation_screen(update: Update, text: str, reply_markup: InlineKeyboardMarkup, *, edit: bool = False) -> None:
+    query = getattr(update, "callback_query", None)
+    if edit and query:
+        message = getattr(query, "message", None)
+        try:
+            if getattr(message, "caption", None) is not None:
+                await query.edit_message_caption(caption=text, reply_markup=reply_markup)
+            else:
+                await query.edit_message_text(text, reply_markup=reply_markup)
+            return
+        except BadRequest as exc:
+            if _is_message_not_modified(exc):
+                return
+            logger.info("Navigation edit failed; replying with a new navigation screen: %s", exc)
+            if message and hasattr(message, "reply_text"):
+                await message.reply_text(text, reply_markup=reply_markup)
+                return
+    await update.effective_message.reply_text(text, reply_markup=reply_markup)
+
+
 def _main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -1445,10 +1465,7 @@ async def _send_products(update: Update, context: ContextTypes.DEFAULT_TYPE, *, 
 
 async def _render_product_menu(update: Update, *, edit: bool = False, product_group: str = "account") -> None:
     text = "🎁 Sản phẩm\n\nChọn sản phẩm" if product_group == "account" else "🤖 Tool\n\nChọn sản phẩm"
-    if edit and update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=_product_menu_keyboard(product_group))
-    else:
-        await update.effective_message.reply_text(text, reply_markup=_product_menu_keyboard(product_group))
+    await _show_navigation_screen(update, text, _product_menu_keyboard(product_group), edit=edit)
 
 
 async def _send_product_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, product_name: str, *, edit: bool = False) -> None:
@@ -1744,10 +1761,7 @@ async def _send_orders(update: Update, context: ContextTypes.DEFAULT_TYPE, *, ed
         "Theo dõi đơn đã tạo và trạng thái giao hàng.\n"
         "Nếu cần hỗ trợ, gửi mã đơn cho admin."
     )
-    if edit and update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=_main_menu_keyboard())
-    else:
-        await update.effective_message.reply_text(text, reply_markup=_main_menu_keyboard())
+    await _show_navigation_screen(update, text, _main_menu_keyboard(), edit=edit)
 
 
 def _format_history_order(order: dict[str, object], index: int) -> str:
@@ -1795,18 +1809,12 @@ async def _send_purchase_history(update: Update, context: ContextTypes.DEFAULT_T
             ]
         ]
     )
-    if edit and update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=keyboard)
-    else:
-        await update.effective_message.reply_text(text, reply_markup=keyboard)
+    await _show_navigation_screen(update, text, keyboard, edit=edit)
 
 
 async def _send_payment(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False, product_name: str = "") -> None:
     text = _payment_info_text(context, product_name=product_name)
-    if edit and update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=_main_menu_keyboard())
-    else:
-        await update.effective_message.reply_text(text, reply_markup=_main_menu_keyboard())
+    await _show_navigation_screen(update, text, _main_menu_keyboard(), edit=edit)
 
 
 async def _send_download(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
@@ -2048,10 +2056,7 @@ async def _create_upgrade_order(update: Update, context: ContextTypes.DEFAULT_TY
 async def _send_support(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
     support_username = context.application.bot_data.get("support_username", "@Aidaily79")
     text = f"Telegram:\n{support_username}\n\nhoac username ho tro cau hinh trong .env"
-    if edit and update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=_main_menu_keyboard())
-    else:
-        await update.effective_message.reply_text(text, reply_markup=_main_menu_keyboard())
+    await _show_navigation_screen(update, text, _main_menu_keyboard(), edit=edit)
 
 
 async def _handle_machine_id_free_license(update: Update, context: ContextTypes.DEFAULT_TYPE, machine_id: str, *, source: str) -> bool:
@@ -2779,12 +2784,12 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await query.answer()
     data = query.data or ""
     if data == "menu_main":
-        await query.edit_message_text(_start_help_text(), reply_markup=_main_menu_keyboard())
+        await _show_navigation_screen(update, _start_help_text(), _main_menu_keyboard(), edit=True)
     elif data == "menu_products":
         await _render_product_menu(update, edit=True)
     elif data == "menu_tools":
         # Tool is the original license/download branch, separate from account catalog products.
-        await query.edit_message_text(_ai_daily_text(), reply_markup=_ai_daily_keyboard())
+        await _show_navigation_screen(update, _ai_daily_text(), _ai_daily_keyboard(), edit=True)
     elif data == "menu_orders":
         await _send_orders(update, context, edit=True)
     elif data == "menu_history":
@@ -2792,9 +2797,9 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     elif data == "menu_payment":
         await _send_payment(update, context, edit=True)
     elif data == "menu_ai_daily":
-        await query.edit_message_text(_ai_daily_text(), reply_markup=_ai_daily_keyboard())
+        await _show_navigation_screen(update, _ai_daily_text(), _ai_daily_keyboard(), edit=True)
     elif data == "product_ai_daily":
-        await query.edit_message_text(_ai_daily_text(), reply_markup=_ai_daily_keyboard())
+        await _show_navigation_screen(update, _ai_daily_text(), _ai_daily_keyboard(), edit=True)
     elif data.startswith("pkg:"):
         _, product_code, package_code = data.split(":", 2)
         logger.debug(

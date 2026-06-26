@@ -139,6 +139,22 @@ class TelegramCallbackFlowTest(unittest.TestCase):
         main_text = main_update.callback_query.edits[-1][0]
         self.assertIn("AI STORE", main_text)
 
+    def test_global_navigation_buttons_work_from_caption_messages(self) -> None:
+        product_update = FakeUpdate("menu_products")
+        product_update.callback_query.message.caption = "Giao dịch đã hủy."
+        asyncio.run(bot._on_menu_impl(product_update, self.context))
+        product_caption = product_update.callback_query.captions[-1][0]
+        self.assertTrue(product_caption.startswith("🎁"))
+        self.assertIn("Ch", product_caption)
+        self.assertEqual(product_update.callback_query.edits, [])
+
+        main_update = FakeUpdate("menu_main")
+        main_update.callback_query.message.caption = "Giao dịch đã hủy."
+        asyncio.run(bot._on_menu_impl(main_update, self.context))
+        main_caption = main_update.callback_query.captions[-1][0]
+        self.assertIn("AI STORE", main_caption)
+        self.assertEqual(main_update.callback_query.edits, [])
+
     def test_purchase_history_button_shows_empty_and_user_filtered_orders(self) -> None:
         empty_update = FakeUpdate("menu_history")
         asyncio.run(bot._on_menu_impl(empty_update, self.context))
