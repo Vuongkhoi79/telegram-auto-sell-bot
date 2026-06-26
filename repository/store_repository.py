@@ -167,6 +167,65 @@ class StoreRepository:
                 return row
         return None
 
+    def _cleanup_stale_order_inventory_links(self, connection: sqlite3.Connection) -> int:
+        rows = connection.execute(
+            """
+            SELECT oi.order_id, oi.inventory_item_id
+            FROM order_inventory_items AS oi
+            JOIN inventory_items AS i ON i.id = oi.inventory_item_id
+            LEFT JOIN orders AS o ON o.id = oi.order_id
+            WHERE i.status = 'available'
+              AND (
+                    o.id IS NULL
+                 OR COALESCE(o.payment_status, 'pending') NOT IN ('paid')
+                 OR COALESCE(o.order_status, 'pending') NOT IN ('paid', 'delivered', 'manual_delivery')
+              )
+            """
+        ).fetchall()
+        if not rows:
+            return 0
+        connection.execute(
+            """
+            DELETE FROM order_inventory_items
+            WHERE inventory_item_id IN (
+                SELECT oi.inventory_item_id
+                FROM order_inventory_items AS oi
+                JOIN inventory_items AS i ON i.id = oi.inventory_item_id
+                LEFT JOIN orders AS o ON o.id = oi.order_id
+                WHERE i.status = 'available'
+                  AND (
+                        o.id IS NULL
+                     OR COALESCE(o.payment_status, 'pending') NOT IN ('paid')
+                     OR COALESCE(o.order_status, 'pending') NOT IN ('paid', 'delivered', 'manual_delivery')
+                  )
+            )
+            """
+        )
+        __import__("logging").getLogger(__name__).info(
+            "Cleaned stale reservation links: %s", len(rows)
+        )
+        return len(rows)
+
+    def _available_inventory_items_for_reservation(
+        self, connection: sqlite3.Connection, product_id: str, quantity: int
+    ) -> list[sqlite3.Row]:
+        return connection.execute(
+            """
+            SELECT i.id
+            FROM inventory_items AS i
+            WHERE i.product_id = ?
+              AND i.status = 'available'
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM order_inventory_items AS oi
+                    WHERE oi.inventory_item_id = i.id
+              )
+            ORDER BY i.created_at, i.id
+            LIMIT ?
+            """,
+            (product_id, quantity),
+        ).fetchall()
+
     def list_active_products(self) -> list[dict[str, Any]]:
         with self._session() as connection:
             rows = connection.execute(
@@ -593,139 +652,168 @@ class StoreRepository:
         )
         if quantity <= 0:
             raise ValueError("quantity must be positive")
-        with self._session() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            existing = connection.execute(
-                "SELECT id FROM orders WHERE order_id = ?", (order_id,)
-            ).fetchone()
-            if existing:
-                rows = connection.execute(
-                    """
-                    SELECT inventory_item_id FROM order_inventory_items
-                    WHERE order_id = ? AND state IN ('reserved', 'delivered')
-                    ORDER BY created_at, inventory_item_id
-                    """,
-                    (existing["id"],),
-                ).fetchall()
-                reserved = [str(row["inventory_item_id"]) for row in rows]
-                logger.debug(
-                    "EXIT create_pending_account_order_and_reserve existing_order order_id=%s reserved_inventory_ids=%s",
-                    order_id,
-                    reserved,
-                )
-                return reserved
+        for attempt in range(2):
+            try:
+                with self._session() as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    existing = connection.execute(
+                        "SELECT id FROM orders WHERE order_id = ?", (order_id,)
+                    ).fetchone()
+                    if existing:
+                        rows = connection.execute(
+                            """
+                            SELECT inventory_item_id FROM order_inventory_items
+                            WHERE order_id = ? AND state IN ('reserved', 'delivered')
+                            ORDER BY created_at, inventory_item_id
+                            """,
+                            (existing["id"],),
+                        ).fetchall()
+                        reserved = [str(row["inventory_item_id"]) for row in rows]
+                        logger.debug(
+                            "EXIT create_pending_account_order_and_reserve existing_order order_id=%s reserved_inventory_ids=%s",
+                            order_id,
+                            reserved,
+                        )
+                        return reserved
 
-            product = self._resolve_active_product(connection, product_code)
-            logger.debug(
-                "PRODUCT LOOKUP result order_id=%s product_code=%s found=%s product_id=%s",
-                order_id,
-                product_code,
-                bool(product),
-                product["id"] if product else None,
-            )
-            if not product:
-                raise ValueError(f"Mapped SQLite product is unavailable: {product_code}")
-            available_before_row = connection.execute(
-                """
-                SELECT COUNT(*) AS stock
-                FROM inventory_items
-                WHERE product_id = ? AND status = 'available'
-                """,
-                (product["id"],),
-            ).fetchone()
-            available_before = int(available_before_row["stock"] if available_before_row else 0)
-            logger.debug(
-                "SQL reserve inventory order_id=%s product_code=%s product_id=%s available_before=%s requested_quantity=%s sql=%s",
-                order_id,
-                product_code,
-                product["id"],
-                available_before,
-                quantity,
-                "SELECT id FROM inventory_items WHERE product_id = ? AND status = 'available' ORDER BY created_at, id LIMIT ?",
-            )
-            items = connection.execute(
-                """
-                SELECT id FROM inventory_items
-                WHERE product_id = ? AND status = 'available'
-                ORDER BY created_at, id
-                LIMIT ?
-                """,
-                (product["id"], quantity),
-            ).fetchall()
-            logger.debug(
-                "AVAILABLE INVENTORY COUNT order_id=%s product_code=%s count=%s requested=%s",
-                order_id,
-                product_code,
-                len(items),
-                quantity,
-            )
-            if len(items) != quantity:
-                raise ValueError(f"Insufficient available inventory for {product_code}")
+                    product = self._resolve_active_product(connection, product_code)
+                    logger.debug(
+                        "PRODUCT LOOKUP result order_id=%s product_code=%s found=%s product_id=%s",
+                        order_id,
+                        product_code,
+                        bool(product),
+                        product["id"] if product else None,
+                    )
+                    if not product:
+                        raise ValueError(f"Mapped SQLite product is unavailable: {product_code}")
+                    available_before_row = connection.execute(
+                        """
+                        SELECT COUNT(*) AS stock
+                        FROM inventory_items
+                        WHERE product_id = ? AND status = 'available'
+                        """,
+                        (product["id"],),
+                    ).fetchone()
+                    available_before = int(available_before_row["stock"] if available_before_row else 0)
+                    cleaned_links = self._cleanup_stale_order_inventory_links(connection)
+                    logger.debug(
+                        "SQL reserve inventory order_id=%s product_code=%s product_id=%s available_before=%s requested_quantity=%s cleaned_links=%s sql=%s",
+                        order_id,
+                        product_code,
+                        product["id"],
+                        available_before,
+                        quantity,
+                        cleaned_links,
+                        "SELECT id FROM inventory_items WHERE product_id = ? AND status = 'available' AND NOT EXISTS (SELECT 1 FROM order_inventory_items oi WHERE oi.inventory_item_id = inventory_items.id) ORDER BY created_at, id LIMIT ?",
+                    )
+                    items = self._available_inventory_items_for_reservation(connection, product["id"], quantity)
+                    logger.debug(
+                        "AVAILABLE INVENTORY COUNT order_id=%s product_code=%s count=%s requested=%s",
+                        order_id,
+                        product_code,
+                        len(items),
+                        quantity,
+                    )
+                    if len(items) != quantity:
+                        raise ValueError(f"Insufficient available inventory for {product_code}")
 
-            internal_order_id = str(uuid.uuid4())
-            connection.execute(
-                """
-                INSERT INTO orders
-                    (id, order_id, telegram_user_id, username, product_id, product_code,
-                     product_name, package_name, quantity, unit_price_vnd, total_vnd,
-                     delivery_type, payment_status, order_status, created_at, expire_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'account', 'pending', 'reserved', ?, ?)
-                """,
-                (
-                    internal_order_id,
+                    internal_order_id = str(uuid.uuid4())
+                    connection.execute(
+                        """
+                        INSERT INTO orders
+                            (id, order_id, telegram_user_id, username, product_id, product_code,
+                             product_name, package_name, quantity, unit_price_vnd, total_vnd,
+                             delivery_type, payment_status, order_status, created_at, expire_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'account', 'pending', 'reserved', ?, ?)
+                        """,
+                        (
+                            internal_order_id,
+                            order_id,
+                            telegram_user_id,
+                            username,
+                            product["id"],
+                            product_code.upper(),
+                            product_name,
+                            package_name,
+                            quantity,
+                            unit_price_vnd,
+                            total_vnd,
+                            created_at,
+                            expire_at,
+                        ),
+                    )
+                    last_item_id = ""
+                    try:
+                        for item in items:
+                            last_item_id = str(item["id"])
+                            connection.execute(
+                                """
+                                UPDATE inventory_items
+                                SET status = 'reserved', reserved_order_id = ?, reserved_at = ?
+                                WHERE id = ? AND status = 'available'
+                                """,
+                                (order_id, created_at, item["id"]),
+                            )
+                            connection.execute(
+                                """
+                                INSERT INTO order_inventory_items
+                                    (order_id, inventory_item_id, state, created_at)
+                                VALUES (?, ?, 'reserved', ?)
+                                """,
+                                (internal_order_id, item["id"], created_at),
+                            )
+                            logger.debug(
+                                "INSERT order_inventory_items order_id=%s inventory_item_id=%s state=reserved",
+                                order_id,
+                                item["id"],
+                            )
+                            connection.execute(
+                                """
+                                INSERT INTO inventory_movements
+                                    (id, inventory_item_id, action, order_id, source, created_at)
+                                VALUES (?, ?, 'reserve', ?, 'account_order_create', ?)
+                                """,
+                                (str(uuid.uuid4()), item["id"], internal_order_id, created_at),
+                            )
+                    except sqlite3.IntegrityError as exc:
+                        connection.rollback()
+                        logger.warning(
+                            "IntegrityError during create_pending_account_order_and_reserve order_id=%s product_code=%s inventory_item_id=%s attempt=%s: %s",
+                            order_id,
+                            product_code,
+                            last_item_id,
+                            attempt + 1,
+                            exc,
+                        )
+                        raise
+                    reserved = [str(item["id"]) for item in items]
+                    logger.debug(
+                        "COMMIT completed create_pending_account_order_and_reserve order_id=%s reserved_inventory_ids=%s reserved_after=%s available_before=%s",
+                        order_id,
+                        reserved,
+                        len(reserved),
+                        available_before,
+                    )
+                    return reserved
+            except sqlite3.IntegrityError as exc:
+                if attempt == 0:
+                    logger.warning(
+                        "Retrying create_pending_account_order_and_reserve after IntegrityError order_id=%s product_code=%s: %s",
+                        order_id,
+                        product_code,
+                        exc,
+                    )
+                    continue
+                logger.exception(
+                    "Reservation failed after cleanup retry order_id=%s product_code=%s quantity=%s",
                     order_id,
-                    telegram_user_id,
-                    username,
-                    product["id"],
-                    product_code.upper(),
-                    product_name,
-                    package_name,
+                    product_code,
                     quantity,
-                    unit_price_vnd,
-                    total_vnd,
-                    created_at,
-                    expire_at,
-                ),
-            )
-            for item in items:
-                connection.execute(
-                    """
-                    UPDATE inventory_items
-                    SET status = 'reserved', reserved_order_id = ?, reserved_at = ?
-                    WHERE id = ? AND status = 'available'
-                    """,
-                    (order_id, created_at, item["id"]),
                 )
-                connection.execute(
-                    """
-                    INSERT INTO order_inventory_items
-                        (order_id, inventory_item_id, state, created_at)
-                    VALUES (?, ?, 'reserved', ?)
-                    """,
-                    (internal_order_id, item["id"], created_at),
-                )
-                logger.debug(
-                    "INSERT order_inventory_items order_id=%s inventory_item_id=%s state=reserved",
-                    order_id,
-                    item["id"],
-                )
-                connection.execute(
-                    """
-                    INSERT INTO inventory_movements
-                        (id, inventory_item_id, action, order_id, source, created_at)
-                    VALUES (?, ?, 'reserve', ?, 'account_order_create', ?)
-                    """,
-                    (str(uuid.uuid4()), item["id"], internal_order_id, created_at),
-                )
-        reserved = [str(item["id"]) for item in items]
-        logger.debug(
-            "COMMIT completed create_pending_account_order_and_reserve order_id=%s reserved_inventory_ids=%s reserved_after=%s available_before=%s",
-            order_id,
-            reserved,
-            len(reserved),
-            available_before,
-        )
-        return reserved
+                raise RuntimeError(
+                    f"Inventory reservation conflict for order_id={order_id}, product_code={product_code}"
+                ) from exc
+        raise RuntimeError(f"Inventory reservation failed for order_id={order_id}, product_code={product_code}")
 
     def reserve_inventory_items(
         self, order_id: str, product_code: str, quantity: int, expire_minutes: int = 5
@@ -753,6 +841,11 @@ class StoreRepository:
                     FROM inventory_items AS item
                     JOIN products AS product ON product.id = item.product_id
                     WHERE product.code = ? AND item.status = 'available'
+                      AND NOT EXISTS (
+                            SELECT 1
+                            FROM order_inventory_items AS oi
+                            WHERE oi.inventory_item_id = item.id
+                      )
                     ORDER BY item.created_at, item.id
                     LIMIT ?
                     """,
@@ -833,11 +926,10 @@ class StoreRepository:
                 if row["order_row_id"]:
                     connection.execute(
                         """
-                        UPDATE order_inventory_items
-                        SET state = 'released', released_at = ?
-                        WHERE order_id = ? AND inventory_item_id = ? AND state = 'reserved'
+                        DELETE FROM order_inventory_items
+                        WHERE inventory_item_id = ?
                         """,
-                        (now, row["order_row_id"], row["inventory_item_id"]),
+                        (row["inventory_item_id"],),
                     )
                 connection.execute(
                     """
@@ -892,11 +984,10 @@ class StoreRepository:
                 )
                 connection.execute(
                     """
-                    UPDATE order_inventory_items
-                    SET state = 'released', released_at = ?
-                    WHERE order_id = ? AND inventory_item_id = ? AND state = 'reserved'
+                    DELETE FROM order_inventory_items
+                    WHERE inventory_item_id = ?
                     """,
-                    (now, order["id"], row["id"]),
+                    (row["id"],),
                 )
                 connection.execute(
                     """

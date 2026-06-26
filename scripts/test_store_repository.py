@@ -160,7 +160,7 @@ class StoreRepositoryTest(unittest.TestCase):
                     """
                 )
             }
-        self.assertEqual(order_items["ORD-EXPIRED"], ("available", "", "released"))
+        self.assertNotIn("ORD-EXPIRED", order_items)
         self.assertEqual(order_items["ORD-PAID"][0], "reserved")
         self.assertEqual(order_items["ORD-DELIVERED"][0], "delivered")
         self.assertEqual(self.store.release_expired_reservations(5), 0)
@@ -190,7 +190,17 @@ class StoreRepositoryTest(unittest.TestCase):
             rows = dict(connection.execute(
                 "SELECT secret_value, status FROM inventory_items WHERE secret_value LIKE 'release%@example.com|pass'"
             ).fetchall())
+            link_count = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM order_inventory_items
+                JOIN orders ON orders.id = order_inventory_items.order_id
+                JOIN inventory_items ON inventory_items.id = order_inventory_items.inventory_item_id
+                WHERE orders.order_id = 'ORD-RELEASE-001'
+                """
+            ).fetchone()[0]
         self.assertEqual(set(rows.values()), {"available"})
+        self.assertEqual(link_count, 0)
 
     def test_paid_order_is_not_released_by_timeout_and_still_delivers(self) -> None:
         for credential in ("paid-timeout1@example.com|pass", "paid-timeout2@example.com|pass"):
@@ -221,6 +231,63 @@ class StoreRepositoryTest(unittest.TestCase):
         delivered = self.store.deliver_reserved_items(order_id)
         self.assertEqual(len(delivered), 2)
         self.assertEqual(self.store.get_stock_count("TEST_PRODUCT"), 0)
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            link_count = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM order_inventory_items
+                JOIN orders ON orders.id = order_inventory_items.order_id
+                WHERE orders.order_id = ?
+                """,
+                (order_id,),
+            ).fetchone()[0]
+        self.assertEqual(link_count, 2)
+
+    def test_stale_link_is_cleaned_before_reservation(self) -> None:
+        self.store.add_inventory_item("TEST_PRODUCT", "stale@example.com|pass")
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            with connection:
+                stale_order_id = "ORD-STALE-001"
+                connection.execute(
+                    """
+                    INSERT INTO orders
+                        (id, order_id, telegram_user_id, product_code, product_name, package_name, quantity,
+                         unit_price_vnd, total_vnd, delivery_type, created_at, payment_status, order_status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'reserved')
+                    """,
+                    ("order-stale", stale_order_id, 1, "TEST_PRODUCT", "Test Product", "TEST", 1, 1, 1, "account", now),
+                )
+                stale_item_id = connection.execute(
+                    "SELECT id FROM inventory_items WHERE secret_value = 'stale@example.com|pass'"
+                ).fetchone()[0]
+                connection.execute(
+                    """
+                    INSERT INTO order_inventory_items (order_id, inventory_item_id, state, created_at)
+                    VALUES (?, ?, 'reserved', ?)
+                    """,
+                    ("order-stale", stale_item_id, now),
+                )
+        reserved = self.store.create_pending_account_order_and_reserve(
+            order_id="ORD-STALE-CLEANUP",
+            telegram_user_id=1,
+            username="Stale Test",
+            product_code="TEST_PRODUCT",
+            product_name="Test Product",
+            package_name="TEST",
+            quantity=1,
+            unit_price_vnd=1,
+            total_vnd=1,
+            created_at=now,
+            expire_at=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+        )
+        self.assertEqual(len(reserved), 1)
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            link_rows = connection.execute(
+                "SELECT COUNT(*) FROM order_inventory_items WHERE inventory_item_id = ?",
+                (stale_item_id,),
+            ).fetchone()[0]
+        self.assertEqual(link_rows, 1)
 
     def test_admin_stock_operations_and_repeat_import(self) -> None:
         item_ids = [
