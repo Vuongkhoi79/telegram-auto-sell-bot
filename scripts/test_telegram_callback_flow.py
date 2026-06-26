@@ -201,6 +201,11 @@ class TelegramCallbackFlowTest(unittest.TestCase):
             order_id = connection.execute(
                 "SELECT order_id FROM orders WHERE product_code = 'GEMINI' ORDER BY created_at DESC LIMIT 1"
             ).fetchone()[0]
+            total_vnd = connection.execute(
+                "SELECT total_vnd FROM orders WHERE order_id = ?",
+                (order_id,),
+            ).fetchone()[0]
+        self.assertEqual(total_vnd, 70000)
 
         qr_update = FakeUpdate(f"pay_acb:{order_id}")
         asyncio.run(bot._send_acb_qr(qr_update, self.context, order_id))

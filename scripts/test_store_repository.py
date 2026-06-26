@@ -328,7 +328,7 @@ class StoreRepositoryTest(unittest.TestCase):
         self.assertEqual(report["stock"], {"CAPCUT": 2, "GEMINI": 2})
         with closing(sqlite3.connect(self.db_path)) as connection:
             capcut = connection.execute("SELECT code, name, category, delivery_type, price_vnd FROM products WHERE code = 'CAPCUT'").fetchone()
-        self.assertEqual(capcut, ("CAPCUT", "CAPCUT PRO", "account", "account", 100))
+        self.assertEqual(capcut, ("CAPCUT", "CAPCUT PRO", "account", "account", 400000))
 
     def test_replace_preserves_reserved_and_delivered_inventory(self) -> None:
         workbook_path = Path(self.temp_dir.name) / "replace.xlsx"

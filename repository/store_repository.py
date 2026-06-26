@@ -32,7 +32,7 @@ CATALOG_COLUMNS = {
 
 CANONICAL_CATALOG_PRODUCTS = {
     "CAPCUT": {"name": "CAPCUT PRO", "price_vnd": 400000},
-    "GEMINI": {"name": "Gemini AI Pro", "price_vnd": 99000},
+    "GEMINI": {"name": "Gemini AI Pro", "price_vnd": 70000},
 }
 
 

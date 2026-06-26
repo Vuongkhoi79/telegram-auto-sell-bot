@@ -482,7 +482,7 @@ def self_test() -> None:
         source = root / "inventory.csv"
         rows = [
             REQUIRED_COLUMNS,
-            ["GEMINI", "AI", "Gemini", "personal", "30D", "99000", "7", "gemini@example.com|pass", "test", "true"],
+            ["GEMINI", "AI", "Gemini", "personal", "30D", "70000", "7", "gemini@example.com|pass", "test", "true"],
             ["CHATGPT", "AI", "ChatGPT", "personal", "30D", "199000", "7", "chatgpt@example.com|pass|2fa", "test", "true"],
             ["GROK", "AI", "Grok", "personal", "30D", "299000", "7", "grok@example.com|pass|2fa|recovery@example.com", "test", "true"],
         ]
