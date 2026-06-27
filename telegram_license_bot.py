@@ -1207,11 +1207,22 @@ def _catalog_category_items(product_group: str = "account") -> list[dict[str, ob
 def _product_menu_keyboard(product_group: str = "account") -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     buttons: list[InlineKeyboardButton] = []
+    menu_counts: dict[str, int] = {}
     for item in _catalog_category_items(product_group):
         product_name = _clean_product_title(str(item["category_key"]))
         available_count = int(item["available_count"] or 0)
+        lookup_key = str(item["lookup_key"]).upper()
+        menu_counts[lookup_key] = available_count
         label = f"{_stock_icon(available_count)} {product_name} ({available_count})"
-        buttons.append(InlineKeyboardButton(label, callback_data=f"product:{str(item['lookup_key']).upper()}"))
+        buttons.append(InlineKeyboardButton(label, callback_data=f"product:{lookup_key}"))
+    logger.warning(
+        "MENU BUILD file=%s function=_product_menu_keyboard product_group=%s CHATGPT=%s GEMINI=%s CAPCUT=%s",
+        __file__,
+        product_group,
+        menu_counts.get("CHATGPT"),
+        menu_counts.get("GEMINI"),
+        menu_counts.get("CAPCUT"),
+    )
     rows.extend(_chunked(buttons, 3))
     rows.append([InlineKeyboardButton("Quay lại", callback_data="menu_main")])
     return InlineKeyboardMarkup(rows)
@@ -1475,23 +1486,6 @@ async def _send_license_file(update: Update, license_path: str | None) -> None:
     except Exception:
         logger.exception("send_license_file failed path=%s", path)
         raise
-
-
-async def _send_products(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False, product_group: str = "account") -> None:
-    if update.effective_user:
-        _release_current_user_reservation(context, update.effective_user.id)
-    _release_expired_sqlite_reservations(context.application.bot_data.get("store_db_path"))
-    logger.debug(
-        "SALES_STAGE stage=product_menu user_id=%s callback_data=%s product_group=%s",
-        getattr(getattr(update, "effective_user", None), "id", None),
-        getattr(getattr(update, "callback_query", None), "data", "") if getattr(update, "callback_query", None) else "",
-        product_group,
-    )
-    text = "🎁 Sản phẩm\n\nChọn sản phẩm" if product_group == "account" else "🤖 Tool\n\nChọn sản phẩm"
-    if edit and update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=_product_menu_keyboard(product_group))
-    else:
-        await update.effective_message.reply_text(text, reply_markup=_product_menu_keyboard(product_group))
 
 
 async def _render_product_menu(update: Update, *, edit: bool = False, product_group: str = "account") -> None:
@@ -2167,6 +2161,11 @@ async def _maybe_issue_deeplink_license(update: Update, context: ContextTypes.DE
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.warning(
+        "START HANDLER file=%s function=cmd_start user_id=%s",
+        __file__,
+        getattr(getattr(update, "effective_user", None), "id", None),
+    )
     if update.effective_user:
         _release_expired_sqlite_reservations(context.application.bot_data.get("store_db_path"))
         _release_current_user_reservation(context, update.effective_user.id)
@@ -2822,6 +2821,12 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if data == "menu_main":
         await _show_navigation_screen(update, _start_help_text(), _main_menu_keyboard(), edit=True)
     elif data == "menu_products":
+        logger.warning(
+            "PRODUCT MENU CALLBACK file=%s function=_on_menu_impl callback_data=%s user_id=%s",
+            __file__,
+            data,
+            getattr(getattr(update, "effective_user", None), "id", None),
+        )
         await _render_product_menu(update, edit=True)
     elif data == "menu_tools":
         # Tool is the original license/download branch, separate from account catalog products.
