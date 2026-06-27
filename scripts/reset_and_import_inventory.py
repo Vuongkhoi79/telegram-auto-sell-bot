@@ -53,6 +53,21 @@ class PreparedInventory:
     warnings: list[str]
 
 
+@dataclass(frozen=True)
+class ImportRowResult:
+    item: InventoryRow
+    identity: str
+    status: str
+    reason: str = ""
+    inventory_item_id: str = ""
+
+
+@dataclass(frozen=True)
+class ExcelReadResult:
+    rows: list[InventoryRow]
+    invalid_rows: list[ImportRowResult]
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -83,13 +98,26 @@ def product_code_candidates(product_code: str) -> list[str]:
     return candidates
 
 
-def read_excel_rows(path: Path) -> list[InventoryRow]:
+def raw_identity_from_row(row: dict[str, Any]) -> str:
+    credential_text = text(row.get("credential_text"))
+    if credential_text:
+        return credential_text
+    parts = [text(row.get("email")), text(row.get("password"))]
+    if text(row.get("2fa")) or text(row.get("recovery_email")):
+        parts.append(text(row.get("2fa")))
+    if text(row.get("recovery_email")):
+        parts.append(text(row.get("recovery_email")))
+    return "|".join(parts)
+
+
+def read_excel_rows(path: Path) -> ExcelReadResult:
     if not path.is_file():
         raise FileNotFoundError(f"Excel file not found: {path}")
     if path.suffix.lower() != ".xlsx":
         raise ValueError(f"Input must be an .xlsx file: {path}")
 
     rows: list[InventoryRow] = []
+    invalid_rows: list[ImportRowResult] = []
     workbook = load_workbook(path, read_only=True, data_only=True)
     try:
         for sheet in workbook.worksheets:
@@ -122,7 +150,25 @@ def read_excel_rows(path: Path) -> list[InventoryRow]:
                 row["category_key"] = product_code
                 row["product_group"] = "account"
                 row["category"] = "account"
-                credential = credential_from_row(row)
+                base_item = InventoryRow(
+                    product_code=product_code,
+                    credential=raw_identity_from_row(row),
+                    row=row,
+                    source=path.name,
+                    row_number=row_number,
+                )
+                try:
+                    credential = credential_from_row(row)
+                except ValueError as exc:
+                    invalid_rows.append(
+                        ImportRowResult(
+                            item=base_item,
+                            identity=base_item.credential,
+                            status="invalid skipped",
+                            reason=str(exc),
+                        )
+                    )
+                    continue
                 rows.append(
                     InventoryRow(
                         product_code=product_code,
@@ -134,7 +180,7 @@ def read_excel_rows(path: Path) -> list[InventoryRow]:
                 )
     finally:
         workbook.close()
-    return rows
+    return ExcelReadResult(rows=rows, invalid_rows=invalid_rows)
 
 
 def gemini_slot_credential(credential: str, slot: int) -> str:
@@ -186,6 +232,33 @@ def prepare_inventory(rows: list[InventoryRow]) -> PreparedInventory:
             summary[item.product_code]["sellable"] += 1
             rows_by_product[item.product_code].append(item)
     return PreparedInventory(rows_by_product=rows_by_product, summary=summary, warnings=warnings)
+
+
+def debug_chatgpt_excel_rows(rows: list[InventoryRow], invalid_rows: list[ImportRowResult]) -> None:
+    print()
+    print("DEBUG CHATGPT EXCEL ROWS:")
+    chatgpt_items: list[tuple[int, InventoryRow, ImportRowResult | None]] = [
+        (item.row_number, item, None)
+        for item in rows
+        if item.product_code == "CHATGPT"
+    ]
+    chatgpt_items.extend(
+        (result.item.row_number, result.item, result)
+        for result in invalid_rows
+        if result.item.product_code == "CHATGPT"
+    )
+    for _, item, invalid in sorted(chatgpt_items, key=lambda value: value[0]):
+        credential_parts = item.credential.split("|")
+        password_present = len(credential_parts) >= 2 and bool(text(credential_parts[1]))
+        secret_present = len(credential_parts) >= 3 and bool(text(credential_parts[2]))
+        status = "invalid" if invalid else "valid"
+        reason = f" reason={invalid.reason}" if invalid else ""
+        print(
+            f"row={item.row_number} product_code={item.product_code} "
+            f"identity={item.credential} password_present={password_present} "
+            f"secret_2fa_present={secret_present} normalized_identity={item.credential} "
+            f"status={status}{reason}"
+        )
 
 
 def find_product_by_code(connection: sqlite3.Connection, product_code: str) -> sqlite3.Row | None:
@@ -252,8 +325,13 @@ def inventory_secret_value(item: InventoryRow) -> str:
     return item.credential
 
 
-def import_prepared_rows(connection: sqlite3.Connection, rows_by_product: dict[str, list[InventoryRow]]) -> dict[str, int]:
+def import_prepared_rows(
+    connection: sqlite3.Connection,
+    rows_by_product: dict[str, list[InventoryRow]],
+    invalid_rows: list[ImportRowResult],
+) -> tuple[dict[str, int], list[ImportRowResult]]:
     imported = {code: 0 for code in TARGET_PRODUCTS}
+    row_results: list[ImportRowResult] = list(invalid_rows)
     now = utc_now_iso()
     for product_code in TARGET_PRODUCTS:
         product_rows = rows_by_product[product_code]
@@ -266,6 +344,15 @@ def import_prepared_rows(connection: sqlite3.Connection, rows_by_product: dict[s
                 (product["id"], inventory_secret_value(item)),
             ).fetchone()
             if duplicate:
+                row_results.append(
+                    ImportRowResult(
+                        item=item,
+                        identity=inventory_secret_value(item),
+                        status="duplicate skipped",
+                        reason=f"duplicate inventory_item_id={duplicate['id']}",
+                        inventory_item_id=str(duplicate["id"]),
+                    )
+                )
                 continue
             item_id = str(uuid.uuid4())
             connection.execute(
@@ -281,7 +368,15 @@ def import_prepared_rows(connection: sqlite3.Connection, rows_by_product: dict[s
                 (str(uuid.uuid4()), item_id, utc_now_iso()),
             )
             imported[product_code] += 1
-    return imported
+            row_results.append(
+                ImportRowResult(
+                    item=item,
+                    identity=inventory_secret_value(item),
+                    status="inserted",
+                    inventory_item_id=item_id,
+                )
+            )
+    return imported, row_results
 
 
 def actual_available(connection: sqlite3.Connection) -> dict[str, int]:
@@ -298,6 +393,66 @@ def actual_available(connection: sqlite3.Connection) -> dict[str, int]:
         ).fetchone()
         actual[product_code] = int(row["count"] or 0)
     return actual
+
+
+def print_chatgpt_import_results(row_results: list[ImportRowResult]) -> None:
+    print()
+    print("DEBUG CHATGPT IMPORT RESULTS:")
+    for result in sorted(
+        [item for item in row_results if item.item.product_code == "CHATGPT"],
+        key=lambda value: value.item.row_number,
+    ):
+        detail = f" reason={result.reason}" if result.reason else ""
+        item_id = f" inventory_item_id={result.inventory_item_id}" if result.inventory_item_id else ""
+        print(
+            f"row={result.item.row_number} identity={result.identity} "
+            f"result={result.status}{item_id}{detail}"
+        )
+
+
+def missing_available_rows(connection: sqlite3.Connection, row_results: list[ImportRowResult]) -> list[ImportRowResult]:
+    missing: list[ImportRowResult] = []
+    for result in row_results:
+        if result.item.product_code != "CHATGPT":
+            continue
+        if result.status != "inserted":
+            missing.append(result)
+            continue
+        row = connection.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM inventory_items AS i
+            JOIN products AS p ON p.id = i.product_id
+            WHERE UPPER(p.code) = 'CHATGPT'
+              AND i.status = 'available'
+              AND i.secret_value = ?
+            """,
+            (result.identity,),
+        ).fetchone()
+        if int(row["count"] or 0) <= 0:
+            missing.append(
+                ImportRowResult(
+                    item=result.item,
+                    identity=result.identity,
+                    status="not available after insert",
+                    reason="no matching CHATGPT available inventory_item found",
+                    inventory_item_id=result.inventory_item_id,
+                )
+            )
+    return missing
+
+
+def print_missing_available_rows(missing: list[ImportRowResult]) -> None:
+    if not missing:
+        return
+    print()
+    print("DEBUG CHATGPT MISSING AVAILABLE ROWS:")
+    for result in sorted(missing, key=lambda value: value.item.row_number):
+        detail = f" reason={result.reason}" if result.reason else ""
+        print(
+            f"row={result.item.row_number} source={result.item.source} "
+            f"identity={result.identity} status={result.status}{detail}"
+        )
 
 
 def print_expected(summary: dict[str, dict[str, int]]) -> None:
@@ -346,7 +501,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    rows = read_excel_rows(args.chatgpt_file) + read_excel_rows(args.multi_file)
+    chatgpt_read = read_excel_rows(args.chatgpt_file)
+    multi_read = read_excel_rows(args.multi_file)
+    rows = chatgpt_read.rows + multi_read.rows
+    invalid_rows = chatgpt_read.invalid_rows + multi_read.invalid_rows
+    debug_chatgpt_excel_rows(rows, invalid_rows)
     prepared = prepare_inventory(rows)
     print_expected(prepared.summary)
     for warning in prepared.warnings:
@@ -361,13 +520,21 @@ def main() -> int:
         try:
             connection.execute("BEGIN IMMEDIATE")
             deleted_links, deleted_items = reset_target_inventory(connection)
-            imported = import_prepared_rows(connection, prepared.rows_by_product)
+            imported, row_results = import_prepared_rows(connection, prepared.rows_by_product, invalid_rows)
+            print_chatgpt_import_results(row_results)
             actual = actual_available(connection)
+            missing_chatgpt = missing_available_rows(connection, row_results)
+            print_missing_available_rows(missing_chatgpt)
             failures = [
                 f"{code} available={actual[code]} expected={prepared.summary[code]['sellable']}"
                 for code in TARGET_PRODUCTS
                 if actual[code] != prepared.summary[code]["sellable"]
             ]
+            if missing_chatgpt:
+                failures.append(
+                    "CHATGPT rows not available: "
+                    + ", ".join(f"row {item.item.row_number} ({item.status})" for item in missing_chatgpt)
+                )
             if failures:
                 raise RuntimeError("Validation failed: " + "; ".join(failures))
             connection.commit()
