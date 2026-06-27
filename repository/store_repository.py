@@ -7,10 +7,14 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
+import logging
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+
+logger = logging.getLogger(__name__)
 
 
 REQUIRED_TABLES = {
@@ -458,8 +462,7 @@ class StoreRepository:
 
     def list_menu_product_stock(self, product_group: str = "account") -> list[dict[str, Any]]:
         with self._session() as connection:
-            rows = connection.execute(
-                """
+            sql = """
                 SELECT UPPER(p.code) AS product_code,
                        p.name AS display_name,
                        p.menu_order,
@@ -473,9 +476,39 @@ class StoreRepository:
                   AND p.product_group = ?
                 GROUP BY p.id, p.code, p.name, p.menu_order
                 ORDER BY p.menu_order, p.name COLLATE NOCASE, p.code
-                """,
-                (product_group,),
-            ).fetchall()
+                """
+            params = (product_group,)
+            logger.warning(
+                "MENU STOCK QUERY DB PATH:\n%s\nSQL:\n%s\nPARAMS:\n%s",
+                self.database_path.resolve(),
+                sql,
+                params,
+            )
+            rows = connection.execute(sql, params).fetchall()
+            logger.warning(
+                "MENU STOCK QUERY ROWS:\n%s",
+                [tuple(row) for row in rows],
+            )
+            total_inventory_sql = "SELECT COUNT(*) AS count FROM inventory_items"
+            total_inventory_rows = connection.execute(total_inventory_sql).fetchall()
+            logger.warning(
+                "MENU STOCK DIAGNOSTIC SQL:\n%s\nROWS:\n%s",
+                total_inventory_sql,
+                [tuple(row) for row in total_inventory_rows],
+            )
+            status_breakdown_sql = """
+                SELECT p.code, i.status, COUNT(*)
+                FROM inventory_items i
+                JOIN products p ON p.id = i.product_id
+                GROUP BY p.code, i.status
+                ORDER BY p.code, i.status
+                """
+            status_breakdown_rows = connection.execute(status_breakdown_sql).fetchall()
+            logger.warning(
+                "MENU STOCK DIAGNOSTIC SQL:\n%s\nROWS:\n%s",
+                status_breakdown_sql,
+                [tuple(row) for row in status_breakdown_rows],
+            )
         return [{**dict(row), "available_count": int(row["available_count"] or 0)} for row in rows]
 
     def list_packages_by_category(self, category_key: str, product_group: str = "account") -> list[dict[str, Any]]:
