@@ -1163,17 +1163,37 @@ def _catalog_category_items(product_group: str = "account") -> list[dict[str, ob
     path = _resolve_store_db_path()
     if path.is_file():
         try:
-            rows = StoreRepository(path).list_visible_categories(product_group)
+            rows = StoreRepository(path).list_menu_product_stock(product_group)
             if rows:
-                catalog_items = [
-                    {
-                        "category_key": _catalog_display_name(str(row["category_key"])),
-                        "lookup_key": str(row["category_key"]).upper(),
-                        "available_count": int(row["available_count"] or 0),
-                    }
+                stock_by_code = {
+                    str(row["product_code"]).upper(): int(row["available_count"] or 0)
                     for row in rows
-                    if _menu_stock_product_code(str(row["category_key"]))
-                ]
+                    if _menu_stock_product_code(str(row["product_code"]))
+                }
+                catalog_items = []
+                seen_codes: set[str] = set()
+                for key in PRODUCT_ORDER:
+                    lookup_key = _menu_stock_product_code(key) or key
+                    catalog_items.append(
+                        {
+                            "category_key": key,
+                            "lookup_key": lookup_key,
+                            "available_count": stock_by_code.get(lookup_key, 0),
+                        }
+                    )
+                    seen_codes.add(lookup_key)
+                for row in rows:
+                    product_code = str(row["product_code"]).upper()
+                    lookup_key = _menu_stock_product_code(product_code)
+                    if lookup_key and lookup_key not in seen_codes:
+                        catalog_items.append(
+                            {
+                                "category_key": _catalog_display_name(product_code),
+                                "lookup_key": lookup_key,
+                                "available_count": int(row["available_count"] or 0),
+                            }
+                        )
+                        seen_codes.add(lookup_key)
                 if catalog_items:
                     return catalog_items
         except (OSError, RuntimeError, sqlite3.Error):

@@ -456,6 +456,28 @@ class StoreRepository:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_menu_product_stock(self, product_group: str = "account") -> list[dict[str, Any]]:
+        with self._session() as connection:
+            rows = connection.execute(
+                """
+                SELECT UPPER(p.code) AS product_code,
+                       p.name AS display_name,
+                       p.menu_order,
+                       COUNT(i.id) AS available_count
+                FROM products AS p
+                LEFT JOIN inventory_items AS i
+                  ON i.product_id = p.id
+                 AND i.status = 'available'
+                WHERE p.active = 1
+                  AND p.show_in_menu = 1
+                  AND p.product_group = ?
+                GROUP BY p.id, p.code, p.name, p.menu_order
+                ORDER BY p.menu_order, p.name COLLATE NOCASE, p.code
+                """,
+                (product_group,),
+            ).fetchall()
+        return [{**dict(row), "available_count": int(row["available_count"] or 0)} for row in rows]
+
     def list_packages_by_category(self, category_key: str, product_group: str = "account") -> list[dict[str, Any]]:
         with self._session() as connection:
             rows = connection.execute(
