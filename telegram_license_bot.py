@@ -427,6 +427,7 @@ async def _show_navigation_screen(update: Update, text: str, reply_markup: Inlin
 
 
 def _main_menu_keyboard() -> InlineKeyboardMarkup:
+    logger.warning("MAIN MENU BUTTON: text=🎁 Sản phẩm callback_data=menu_products")
     return InlineKeyboardMarkup(
         [
             [
@@ -3074,6 +3075,11 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.warning(
+        "CALLBACK RECEIVED: handler=on_menu callback_data=%s user_id=%s",
+        getattr(getattr(update, "callback_query", None), "data", None),
+        getattr(getattr(update, "effective_user", None), "id", None),
+    )
     try:
         await _on_menu_impl(update, context)
     except BadRequest as exc:
@@ -3169,6 +3175,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("list_licenses", cmd_list_licenses))
     app.add_handler(CommandHandler("find", cmd_find))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text_machine_id))
+    logger.warning("CALLBACK HANDLER ORDER: 1 handler=on_menu pattern=None")
     app.add_handler(CallbackQueryHandler(on_menu))
     if app.job_queue:
         app.job_queue.run_repeating(bank_checker_job, interval=15, first=5, name="bank_checker")
