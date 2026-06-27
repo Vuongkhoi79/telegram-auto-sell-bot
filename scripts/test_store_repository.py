@@ -719,6 +719,64 @@ class StoreRepositoryTest(unittest.TestCase):
             1,
         )
 
+    def test_menu_stock_prefers_real_products_when_catalog_rows_exist(self) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            with connection:
+                connection.execute(
+                    """
+                    DELETE FROM order_inventory_items
+                    WHERE inventory_item_id IN (
+                        SELECT id FROM inventory_items
+                        WHERE product_id IN (SELECT id FROM products WHERE code IN ('CHATGPT','GEMINI','CAPCUT','CATALOG-CHATGPT','CATALOG-GEMINI','CATALOG-CAPCUT'))
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    DELETE FROM inventory_movements
+                    WHERE inventory_item_id IN (
+                        SELECT id FROM inventory_items
+                        WHERE product_id IN (SELECT id FROM products WHERE code IN ('CHATGPT','GEMINI','CAPCUT','CATALOG-CHATGPT','CATALOG-GEMINI','CATALOG-CAPCUT'))
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    DELETE FROM inventory_items
+                    WHERE product_id IN (SELECT id FROM products WHERE code IN ('CHATGPT','GEMINI','CAPCUT','CATALOG-CHATGPT','CATALOG-GEMINI','CATALOG-CAPCUT'))
+                    """
+                )
+                connection.execute(
+                    "DELETE FROM products WHERE code IN ('CHATGPT','GEMINI','CAPCUT','CATALOG-CHATGPT','CATALOG-GEMINI','CATALOG-CAPCUT')"
+                )
+                for code, name in (
+                    ("CATALOG-CHATGPT", "CHATGPT"),
+                    ("CATALOG-GEMINI", "GEMINI AI"),
+                    ("CATALOG-CAPCUT", "CAPCUT PRO"),
+                    ("CHATGPT", "CHATGPT"),
+                    ("GEMINI", "Gemini AI Pro"),
+                    ("CAPCUT", "CAPCUT PRO"),
+                ):
+                    connection.execute(
+                        """
+                        INSERT INTO products
+                            (id, code, name, active, delivery_type, created_at, updated_at, product_group, show_in_menu, menu_order)
+                        VALUES (?, ?, ?, 1, 'account', ?, ?, 'account', 1, 10)
+                        """,
+                        (f"menu-{code}", code, name, now, now),
+                    )
+                for code, count in (("CHATGPT", 5), ("GEMINI", 8), ("CAPCUT", 3)):
+                    for index in range(count):
+                        connection.execute(
+                            "INSERT INTO inventory_items (id, product_id, secret_value, status, created_at) VALUES (?, ?, ?, 'available', ?)",
+                            (f"{code}-{index}", f"menu-{code}", f"{code.lower()}{index}@example.com|pass", now),
+                        )
+        stock = {row["product_code"]: row["available_count"] for row in StoreRepository(self.db_path).list_menu_product_stock()}
+        self.assertEqual(stock["CHATGPT"], 5)
+        self.assertEqual(stock["GEMINI"], 8)
+        self.assertEqual(stock["CAPCUT"], 3)
+
     def test_cleanup_demo_inventory_preserves_real_reserved_and_delivered(self) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with closing(sqlite3.connect(self.db_path)) as connection:

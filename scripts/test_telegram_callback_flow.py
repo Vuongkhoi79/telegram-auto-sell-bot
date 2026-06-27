@@ -143,16 +143,16 @@ class TelegramCallbackFlowTest(unittest.TestCase):
         product_update = FakeUpdate("menu_products")
         product_update.callback_query.message.caption = "Giao dịch đã hủy."
         asyncio.run(bot._on_menu_impl(product_update, self.context))
-        product_caption = product_update.callback_query.captions[-1][0]
-        self.assertTrue(product_caption.startswith("🎁"))
-        self.assertIn("Ch", product_caption)
+        product_reply = product_update.callback_query.replies[-1][0]
+        self.assertTrue(product_reply.startswith("🎁"))
+        self.assertIn("Ch", product_reply)
         self.assertEqual(product_update.callback_query.edits, [])
 
         main_update = FakeUpdate("menu_main")
         main_update.callback_query.message.caption = "Giao dịch đã hủy."
         asyncio.run(bot._on_menu_impl(main_update, self.context))
-        main_caption = main_update.callback_query.captions[-1][0]
-        self.assertIn("AI STORE", main_caption)
+        main_reply = main_update.callback_query.replies[-1][0]
+        self.assertIn("AI STORE", main_reply)
         self.assertEqual(main_update.callback_query.edits, [])
 
     def test_purchase_history_button_shows_empty_and_user_filtered_orders(self) -> None:

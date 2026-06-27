@@ -463,21 +463,56 @@ class StoreRepository:
     def list_menu_product_stock(self, product_group: str = "account") -> list[dict[str, Any]]:
         with self._session() as connection:
             sql = """
-                SELECT UPPER(p.code) AS product_code,
-                       p.name AS display_name,
-                       p.menu_order,
+                WITH menu_products AS (
+                    SELECT
+                        CASE
+                            WHEN UPPER(p.code) LIKE 'CATALOG-%'
+                                THEN SUBSTR(UPPER(p.code), LENGTH('CATALOG-') + 1)
+                            WHEN UPPER(p.code) = 'GPT-PLUS-1M-PRIVATE'
+                                THEN 'CHATGPT'
+                            WHEN UPPER(p.code) = 'GEM-AIPRO-1M-PRIVATE'
+                                THEN 'GEMINI'
+                            WHEN UPPER(p.code) = 'CAPCUT-PRO-1M-PRIVATE'
+                                THEN 'CAPCUT'
+                            WHEN UPPER(p.code) = 'GROK-SUPER-1M-PRIVATE'
+                                THEN 'GROK'
+                            ELSE UPPER(p.code)
+                        END AS menu_code,
+                        p.code,
+                        p.name,
+                        p.menu_order,
+                        p.show_in_menu,
+                        p.active,
+                        p.product_group,
+                        CASE WHEN UPPER(p.code) LIKE 'CATALOG-%' THEN 1 ELSE 0 END AS is_catalog,
+                        p.id
+                    FROM products AS p
+                    WHERE p.active = 1
+                      AND p.show_in_menu = 1
+                      AND p.product_group = ?
+                )
+                SELECT mp.menu_code AS product_code,
+                       COALESCE(
+                           MAX(CASE WHEN mp.is_catalog = 1 THEN mp.name END),
+                           MAX(CASE WHEN mp.is_catalog = 0 THEN mp.name END),
+                           mp.menu_code
+                       ) AS display_name,
+                       MIN(mp.menu_order) AS menu_order,
                        COUNT(i.id) AS available_count
-                FROM products AS p
+                FROM menu_products AS mp
+                LEFT JOIN products AS real_product
+                  ON UPPER(real_product.code) = mp.menu_code
+                 AND real_product.active = 1
+                 AND real_product.product_group = ?
                 LEFT JOIN inventory_items AS i
-                  ON i.product_id = p.id
+                  ON i.product_id = mp.id
                  AND i.status = 'available'
-                WHERE p.active = 1
-                  AND p.show_in_menu = 1
-                  AND p.product_group = ?
-                GROUP BY p.id, p.code, p.name, p.menu_order
-                ORDER BY p.menu_order, p.name COLLATE NOCASE, p.code
+                 AND mp.is_catalog = 0
+                 AND (UPPER(mp.code) = mp.menu_code OR real_product.id IS NULL)
+                GROUP BY mp.menu_code
+                ORDER BY menu_order, display_name COLLATE NOCASE, product_code
                 """
-            params = (product_group,)
+            params = (product_group, product_group)
             logger.warning(
                 "MENU STOCK QUERY DB PATH:\n%s\nSQL:\n%s\nPARAMS:\n%s",
                 self.database_path.resolve(),
@@ -1172,7 +1207,17 @@ class StoreRepository:
                     """,
                     (order["id"],),
                 ).fetchall()
+                logger.warning(
+                    "DELIVERY REPLAY order_id=%s delivered_items=%s",
+                    order_id,
+                    [tuple(item) for item in delivered_items],
+                )
                 return [str(item["secret_value"]) for item in delivered_items]
+            logger.warning(
+                "DELIVERY SELECT INVENTORY order_id=%s inventory_item_ids=%s",
+                order_id,
+                [str(item["id"]) for item in items],
+            )
             for item in items:
                 connection.execute(
                     "UPDATE inventory_items SET status = 'delivered', delivered_order_id = ?, delivered_at = ? WHERE id = ?",

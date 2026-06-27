@@ -160,12 +160,8 @@ class SePayOrderFulfillmentTest(unittest.TestCase):
 
     def test_sepay_fulfills_capcut_account_preserving_email_password_format(self) -> None:
         credential = "capcut@example.com|pass123"
-        botmod.INVENTORY_PATH.write_text(
-            json.dumps({"CAPCUT PRO": {"stock": 1, "active": True, "deliverables": [credential]}}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        order = pending_order(order_id="ORD-CAPCUT-001", total=99000, amount=99000, inventory_source="json")
-        botmod.StoreRepository(self.store_db_path).upsert_order(order)
+        order = pending_order(order_id="ORD-CAPCUT-001", product_id="CAPCUT", product_name="CAPCUT PRO", total=99000, amount=99000)
+        self._reserve_sqlite_order(order, "CAPCUT", credential)
 
         payload = {"transaction_id": "SEPAY-CAPCUT-001", "transferAmount": 99000, "addInfo": f"PAY {order['order_id']}"}
         result = asyncio.run(sepay_webhook.process_sepay_payload(payload, self._fulfill))
@@ -185,6 +181,20 @@ class SePayOrderFulfillmentTest(unittest.TestCase):
         )
         updated_order = botmod._find_order(order["order_id"])
         self.assertEqual(updated_order["delivery"], credential)
+
+    def test_account_delivery_does_not_fallback_to_inventory_json(self) -> None:
+        credential = "json-only@example.com|pass123"
+        botmod.INVENTORY_PATH.write_text(
+            json.dumps({"CAPCUT PRO": {"stock": 1, "active": True, "deliverables": [credential]}}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        order = pending_order(order_id="ORD-JSON-ONLY-001", inventory_source="json")
+
+        ok, delivery, message = botmod._deliver_sales_order(order)
+
+        self.assertFalse(ok)
+        self.assertEqual(delivery, "")
+        self.assertIn("SQLite", message)
 
     def test_sepay_fulfills_account_preserving_email_2fa_password_format(self) -> None:
         credential = "ai@example.com|JBSWY3DPEHPK3PXP|pass123"

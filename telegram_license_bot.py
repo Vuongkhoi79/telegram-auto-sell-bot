@@ -376,54 +376,32 @@ def _is_message_not_modified(exc: BadRequest) -> bool:
     return "message is not modified" in str(exc).lower()
 
 
-async def _safe_edit_message_text(query, *args, **kwargs) -> bool:
-    try:
-        await query.edit_message_text(*args, **kwargs)
-        return True
-    except BadRequest as exc:
-        if _is_message_not_modified(exc):
-            return False
-        raise
-
-
-async def _safe_edit_message_caption(query, *args, **kwargs) -> bool:
-    try:
-        await query.edit_message_caption(*args, **kwargs)
-        return True
-    except BadRequest as exc:
-        if _is_message_not_modified(exc):
-            return False
-        raise
-
-
-async def _safe_edit_message_reply_markup(query, *args, **kwargs) -> bool:
-    try:
-        await query.edit_message_reply_markup(*args, **kwargs)
-        return True
-    except BadRequest as exc:
-        if _is_message_not_modified(exc):
-            return False
-        raise
-
-
-async def _show_navigation_screen(update: Update, text: str, reply_markup: InlineKeyboardMarkup, *, edit: bool = False) -> None:
+async def _safe_edit_or_send(update: Update, text: str, reply_markup: InlineKeyboardMarkup | None = None, *, edit: bool = False) -> None:
     query = getattr(update, "callback_query", None)
     if edit and query:
         message = getattr(query, "message", None)
-        try:
-            if getattr(message, "caption", None) is not None:
-                await query.edit_message_caption(caption=text, reply_markup=reply_markup)
-            else:
+        has_caption_or_media = bool(getattr(message, "caption", None)) or bool(getattr(message, "photo", None))
+        if not has_caption_or_media:
+            try:
                 await query.edit_message_text(text, reply_markup=reply_markup)
+                return
+            except BadRequest as exc:
+                lowered = str(exc).lower()
+                if _is_message_not_modified(exc):
+                    return
+                if "there is no text in the message to edit" not in lowered:
+                    raise
+                logger.warning("Callback edit_message_text failed on non-text message; sending a new message.")
+        elif message is not None:
+            logger.warning("Callback message has no text; sending a new message instead of editing.")
+        if message and hasattr(message, "reply_text"):
+            await message.reply_text(text, reply_markup=reply_markup)
             return
-        except BadRequest as exc:
-            if _is_message_not_modified(exc):
-                return
-            logger.info("Navigation edit failed; replying with a new navigation screen: %s", exc)
-            if message and hasattr(message, "reply_text"):
-                await message.reply_text(text, reply_markup=reply_markup)
-                return
     await update.effective_message.reply_text(text, reply_markup=reply_markup)
+
+
+async def _show_navigation_screen(update: Update, text: str, reply_markup: InlineKeyboardMarkup, *, edit: bool = False) -> None:
+    await _safe_edit_or_send(update, text, reply_markup, edit=edit)
 
 
 def _main_menu_keyboard() -> InlineKeyboardMarkup:
@@ -496,26 +474,6 @@ def _paid_license_plan_keyboard(machine_id: str = "") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def _load_inventory() -> dict[str, dict[str, object]]:
-    if not INVENTORY_PATH.exists():
-        return {}
-    try:
-        data = json.loads(INVENTORY_PATH.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    normalized: dict[str, dict[str, object]] = {}
-    for name, value in data.items():
-        if isinstance(value, dict):
-            normalized[str(name).upper()] = value
-    return normalized
-
-
-def _save_inventory(inventory: dict[str, dict[str, object]]) -> None:
-    INVENTORY_PATH.write_text(json.dumps(inventory, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
 def _resolve_store_db_path(store_db_path: Path | str | None = None) -> Path:
     if store_db_path is not None:
         path = Path(store_db_path).expanduser()
@@ -538,20 +496,18 @@ def _sqlite_orders_enabled() -> bool:
     return bool(os.environ.get("STORE_DB_PATH")) or ORDERS_DB_PATH == DEFAULT_ORDERS_DB_PATH
 
 
-def _json_product_display_info(product_key: str) -> dict[str, object]:
+def _empty_sqlite_product_display_info(product_key: str, product_code: str = "") -> dict[str, object]:
     normalized_key = product_key.upper()
-    item = _load_inventory().get(normalized_key)
-    _, available, stock = _inventory_status(normalized_key, item)
     return {
         "product_key": normalized_key,
-        "product_code": None,
-        "product_name": normalized_key,
+        "product_code": product_code or _menu_stock_product_code(normalized_key) or normalized_key,
+        "product_name": _catalog_display_name(normalized_key),
         "price_vnd": 0,
         "warranty_days": 0,
-        "active": bool(item.get("active", True)) if item else True,
-        "available_count": stock,
-        "available": available,
-        "source": "inventory.json",
+        "active": False,
+        "available_count": 0,
+        "available": False,
+        "source": "store.db",
     }
 
 
@@ -565,7 +521,7 @@ def _log_sqlite_fallback_once(log_key: str, message: str, *args: object) -> None
 def get_product_display_info(
     product_key: str, *, store_db_path: Path | str | None = None
 ) -> dict[str, object]:
-    """Read mapped product metadata from SQLite; otherwise retain JSON fallback."""
+    """Read mapped product metadata from SQLite only."""
     normalized_key = product_key.upper()
     candidate_codes: list[str] = [normalized_key]
     canonical_code = _menu_stock_product_code(normalized_key)
@@ -579,11 +535,11 @@ def get_product_display_info(
     if not path.is_file():
         _log_sqlite_fallback_once(
             f"store-missing:{path}",
-            "SQLite store missing at %s for %s; using inventory.json",
+            "SQLite store missing at %s for %s; treating product as unavailable",
             path,
             normalized_key,
         )
-        return _json_product_display_info(normalized_key)
+        return _empty_sqlite_product_display_info(normalized_key)
     try:
         repository = StoreRepository(path)
         product = None
@@ -596,22 +552,22 @@ def get_product_display_info(
         if not product:
             _log_sqlite_fallback_once(
                 f"product-missing:{normalized_key}",
-                "SQLite product %s mapped from %s was not found; using inventory.json",
+                "SQLite product %s mapped from %s was not found; treating product as unavailable",
                 mapped_code or normalized_key,
                 normalized_key,
             )
-            return _json_product_display_info(normalized_key)
+            return _empty_sqlite_product_display_info(normalized_key, candidate_codes[0] if candidate_codes else "")
         available_count = 0
         for candidate_code in candidate_codes:
             available_count = max(available_count, repository.get_stock_count(candidate_code))
     except (OSError, RuntimeError, sqlite3.Error) as exc:
         _log_sqlite_fallback_once(
             f"lookup-error:{normalized_key}",
-            "SQLite lookup failed for %s; using inventory.json: %s",
+            "SQLite lookup failed for %s; treating product as unavailable: %s",
             normalized_key,
             exc,
         )
-        return _json_product_display_info(normalized_key)
+        return _empty_sqlite_product_display_info(normalized_key)
 
     active = bool(product["active"])
     return {
@@ -1010,8 +966,7 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
             )
             raise InventoryReservationError("Sản phẩm hiện đã hết hàng, vui lòng quay lại sau.") from exc
     else:
-        # Missing SQLite products intentionally retain the legacy JSON path.
-        order["inventory_source"] = "json"
+        raise InventoryReservationError("Sản phẩm chưa có cấu hình kho SQLite.")
     orders = _load_orders()
     orders.append(order)
     _save_orders(orders)
@@ -1331,11 +1286,6 @@ def _package_keyboard(product_name: str) -> InlineKeyboardMarkup:
             )]
             for package in packages
         )
-    else:
-        rows.extend(
-            [InlineKeyboardButton(f"🎁 {name}\n💰 {_format_vnd(price)}đ", callback_data=f"pkg:{product_code}:{name}")]
-            for name, price in PRODUCT_PACKAGES.items()
-        )
     rows.append([InlineKeyboardButton("Quay lại sản phẩm", callback_data="menu_products")])
     rows.append([InlineKeyboardButton("Menu chính", callback_data="menu_main")])
     return InlineKeyboardMarkup(rows)
@@ -1517,10 +1467,7 @@ async def _send_product_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         if has_packages:
             text = _package_text(product_name)
             keyboard = _package_keyboard(product_name)
-            if edit and update.callback_query:
-                await update.callback_query.edit_message_text(text, reply_markup=keyboard)
-            else:
-                await update.effective_message.reply_text(text, reply_markup=keyboard)
+            await _safe_edit_or_send(update, text, keyboard, edit=edit)
             return
         product_info = get_product_display_info(product_name)
         available = bool(product_info["available"])
@@ -1528,10 +1475,7 @@ async def _send_product_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         if not available:
             text = "Sản phẩm hiện đã hết hàng, vui lòng quay lại sau."
             keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Quay lại sản phẩm", callback_data="menu_products")]])
-            if edit and update.callback_query:
-                await update.callback_query.edit_message_text(text, reply_markup=keyboard)
-            else:
-                await update.effective_message.reply_text(text, reply_markup=keyboard)
+            await _safe_edit_or_send(update, text, keyboard, edit=edit)
             return
         text = _product_detail_text(product_name, available, stock)
     logger.debug(
@@ -1543,10 +1487,7 @@ async def _send_product_detail(update: Update, context: ContextTypes.DEFAULT_TYP
         int(stock if "stock" in locals() else 0),
     )
     keyboard = _product_detail_keyboard(product_name, available)
-    if edit and update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=keyboard)
-    else:
-        await update.effective_message.reply_text(text, reply_markup=keyboard)
+    await _safe_edit_or_send(update, text, keyboard, edit=edit)
 
 
 async def _send_package_choice(update: Update, product_name: str, *, edit: bool = False) -> None:
@@ -1559,10 +1500,7 @@ async def _send_package_choice(update: Update, product_name: str, *, edit: bool 
         _catalog_lookup_key(product_name),
         _menu_available_count(product_name),
     )
-    if edit and update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=keyboard)
-    else:
-        await update.effective_message.reply_text(text, reply_markup=keyboard)
+    await _safe_edit_or_send(update, text, keyboard, edit=edit)
 
 
 async def _send_quantity_choice(update: Update, product_name: str, package_name: str, *, edit: bool = False) -> None:
@@ -1578,10 +1516,7 @@ async def _send_quantity_choice(update: Update, product_name: str, package_name:
         str(package.get("display_name")) if package else package_name,
         int(package.get("available_count") or 0) if package else 0,
     )
-    if edit and update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=keyboard)
-    else:
-        await update.effective_message.reply_text(text, reply_markup=keyboard)
+    await _safe_edit_or_send(update, text, keyboard, edit=edit)
 
 
 async def _send_payment_choice(update: Update, order: dict[str, object], *, edit: bool = False) -> None:
@@ -1619,7 +1554,7 @@ async def _send_payment_choice(update: Update, order: dict[str, object], *, edit
     )
     try:
         if edit and update.callback_query:
-            await update.callback_query.edit_message_text(text, reply_markup=keyboard)
+            await _safe_edit_or_send(update, text, keyboard, edit=True)
         else:
             await update.effective_message.reply_text(text, reply_markup=keyboard)
         logger.debug(
@@ -1651,7 +1586,7 @@ async def _send_purchase_error(update: Update, context: ContextTypes.DEFAULT_TYP
     )
     text = "Đã giữ hàng nhưng lỗi tạo thanh toán. Vui lòng liên hệ admin."
     if query:
-        await query.edit_message_text(text, reply_markup=_main_menu_keyboard())
+        await _safe_edit_or_send(update, text, _main_menu_keyboard(), edit=True)
     else:
         await message.reply_text(text, reply_markup=_main_menu_keyboard())
 
@@ -1677,7 +1612,7 @@ async def _send_acb_qr(update: Update, context: ContextTypes.DEFAULT_TYPE, order
     message = query.message if query and getattr(query, "message", None) else update.effective_message
     if not order:
         if query:
-            await query.edit_message_text("Không tìm thấy đơn hàng.", reply_markup=_main_menu_keyboard())
+            await _safe_edit_or_send(update, "Không tìm thấy đơn hàng.", _main_menu_keyboard(), edit=True)
         else:
             await message.reply_text("Không tìm thấy đơn hàng.", reply_markup=_main_menu_keyboard())
         return
@@ -1685,7 +1620,7 @@ async def _send_acb_qr(update: Update, context: ContextTypes.DEFAULT_TYPE, order
         _update_order(order_id, payment_status="expired", order_status="expired")
         _release_expired_sqlite_reservations()
         if query:
-            await query.edit_message_text("Mã Order đã hết hạn. Vui lòng tạo lại đơn mới.", reply_markup=_product_menu_keyboard())
+            await _safe_edit_or_send(update, "Mã Order đã hết hạn. Vui lòng tạo lại đơn mới.", _product_menu_keyboard(), edit=True)
         else:
             await message.reply_text("Mã Order đã hết hạn. Vui lòng tạo lại đơn mới.", reply_markup=_product_menu_keyboard())
         return
@@ -1768,16 +1703,18 @@ async def _send_paid_notify(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     _release_expired_sqlite_reservations(context.application.bot_data.get("store_db_path"))
     order = _find_order(order_id)
     if not order:
-        await update.callback_query.edit_message_text("Không tìm thấy đơn hàng.", reply_markup=_main_menu_keyboard())
+        await _safe_edit_or_send(update, "Không tìm thấy đơn hàng.", _main_menu_keyboard(), edit=True)
         return
     await _notify_admins_order_pending(context, order)
-    await update.callback_query.edit_message_caption(
-        caption=(
+    await _safe_edit_or_send(
+        update,
+        (
             "🏦 Đã ghi nhận chuyển khoản\n\n"
             "Hệ thống đang kiểm tra thanh toán.\n"
             "Tài khoản sẽ được chuẩn bị ngay sau khi xác nhận."
         ),
-        reply_markup=_main_menu_keyboard(),
+        _main_menu_keyboard(),
+        edit=True,
     )
 
 
@@ -1850,10 +1787,7 @@ async def _send_download(update: Update, context: ContextTypes.DEFAULT_TYPE, *, 
         if download_url
         else "🤖 AI Daily Video Creator\n\nAdmin chưa cấu hình link tải. Vui lòng liên hệ hỗ trợ."
     )
-    if edit and update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=_ai_daily_keyboard())
-    else:
-        await update.effective_message.reply_text(text, reply_markup=_ai_daily_keyboard())
+    await _safe_edit_or_send(update, text, _ai_daily_keyboard(), edit=edit)
 
 
 async def _send_free_help(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
@@ -1876,10 +1810,7 @@ async def _send_free_help(update: Update, context: ContextTypes.DEFAULT_TYPE, *,
             f"\n\nMachine ID hiện tại:\n{machine_id}\n"
             f"Link nhận license:\nhttps://t.me/Aidaily79_bot?start={quote(machine_id, safe='')}"
         )
-    if edit and update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=_ai_daily_keyboard())
-    else:
-        await update.effective_message.reply_text(text, reply_markup=_ai_daily_keyboard())
+    await _safe_edit_or_send(update, text, _ai_daily_keyboard(), edit=edit)
 
 
 async def _handle_free_license_click(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1938,10 +1869,7 @@ async def _send_help(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit
         "Bước 5:\n"
         "Kích hoạt và sử dụng."
     )
-    if edit and update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=_ai_daily_keyboard())
-    else:
-        await update.effective_message.reply_text(text, reply_markup=_ai_daily_keyboard())
+    await _safe_edit_or_send(update, text, _ai_daily_keyboard(), edit=edit)
 
 
 async def _send_upgrade(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
@@ -1953,10 +1881,7 @@ async def _send_upgrade(update: Update, context: ContextTypes.DEFAULT_TYPE, *, e
         text += f"\n\nMachine ID hiện tại:\n{machine_id}"
     else:
         text += "\n\nNếu chưa có Machine ID, bấm gói rồi gửi Machine ID của bạn."
-    if edit and update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=_paid_license_plan_keyboard(machine_id))
-    else:
-        await update.effective_message.reply_text(text, reply_markup=_paid_license_plan_keyboard(machine_id))
+    await _safe_edit_or_send(update, text, _paid_license_plan_keyboard(machine_id), edit=edit)
 
 
 def _paid_license_prompt_text(product_id: str) -> str:
@@ -2019,20 +1944,6 @@ def _get_package_info(product_key: str, package_key: str) -> dict[str, object] |
             }
     except (OSError, RuntimeError, sqlite3.Error):
         pass
-    if package_key in PRODUCT_PACKAGES:
-        product_info = get_product_display_info(product_key)
-        return {
-            "product_code": _catalog_lookup_key(product_key),
-            "package_code": _catalog_lookup_key(product_key),
-            "product_id": str(product_info.get("product_code") or product_key.upper()),
-            "category_key": product_key_norm,
-            "display_name": package_key,
-            "price_vnd": PRODUCT_PACKAGES[package_key],
-            "available_count": int(product_info["available_count"]),
-            "source": "legacy",
-            "price_source": "legacy.PRODUCT_PACKAGES",
-            "reservation_sqlite": product_info["source"] == "store.db",
-        }
     return None
 
 
@@ -2049,10 +1960,7 @@ async def _create_paid_license_order(update: Update, context: ContextTypes.DEFAU
     if not machine_id:
         pending_license_product_by_user[int(user.id)] = product_id
         text = _paid_license_prompt_text(product_id)
-        if edit and update.callback_query:
-            await update.callback_query.edit_message_text(text, reply_markup=_ai_daily_keyboard())
-        else:
-            await update.effective_message.reply_text(text, reply_markup=_ai_daily_keyboard())
+        await _safe_edit_or_send(update, text, _ai_daily_keyboard(), edit=edit)
         return
 
     pending_license_product_by_user.pop(int(user.id), None)
@@ -2298,12 +2206,20 @@ def _deliver_sales_order(order: dict[str, object]) -> tuple[bool, str, str]:
     product_name = str(order.get("product_id") or order.get("product_name", "")).upper()
     quantity = int(order.get("quantity", 1))
     sqlite_product_code = TELEGRAM_PRODUCT_CODE_MAP.get(product_name, product_name)
+    order_id = str(order.get("order_id", ""))
+    logger.warning(
+        "DELIVERY START order_id=%s product_name=%s sqlite_product_code=%s quantity=%s inventory_source=%s",
+        order_id,
+        product_name,
+        sqlite_product_code,
+        quantity,
+        order.get("inventory_source"),
+    )
     use_sqlite_delivery = bool(sqlite_product_code) and (
         order.get("inventory_source") == "sqlite"
         or (order.get("inventory_source") is None and product_name in TELEGRAM_PRODUCT_CODE_MAP)
     )
     if use_sqlite_delivery:
-        order_id = str(order.get("order_id", ""))
         try:
             repository = StoreRepository(_resolve_store_db_path())
             if not repository.mark_account_order_paid_for_fulfillment(order_id):
@@ -2316,29 +2232,16 @@ def _deliver_sales_order(order: dict[str, object]) -> tuple[bool, str, str]:
         if not delivered_items:
             logger.error("SQLite reservation has no deliverable item for mapped account order %s", order_id)
             return False, "", "Không có account SQLite đã reserve cho đơn này."
+        logger.warning(
+            "DELIVERY SELECTED order_id=%s delivered_count=%s delivery_preview=%s",
+            order_id,
+            len(delivered_items),
+            [item.split("|", 1)[0] for item in delivered_items],
+        )
         return True, "\n".join(delivered_items), "Đã giao hàng từ SQLite reservation."
 
-    inventory = _load_inventory()
-    item = inventory.get(product_name)
-    if not item:
-        return False, "", "Không tìm thấy sản phẩm trong inventory."
-
-    stock = int(item.get("stock", 0))
-    if stock < quantity:
-        return False, "", f"Tồn kho không đủ. Hiện còn {stock}, đơn cần {quantity}."
-
-    delivery_text = ""
-    deliverables = item.get("deliverables")
-    if isinstance(deliverables, list) and len(deliverables) >= quantity:
-        delivered_items = [str(deliverables.pop(0)) for _ in range(quantity)]
-        delivery_text = "\n".join(delivered_items)
-
-    item["stock"] = stock - quantity
-    inventory[product_name] = item
-    _save_inventory(inventory)
-    if delivery_text:
-        return True, delivery_text, "Đã trừ tồn kho và giao hàng tự động."
-    return True, "", "Đã trừ tồn kho. Chưa có hàng deliverable, admin cần xử lý giao hàng."
+    logger.error("SQLite delivery required but order is not linked to SQLite inventory: order_id=%s product=%s", order.get("order_id", ""), product_name)
+    return False, "", "Đơn hàng không có kho SQLite để giao tự động."
 
 
 def _issue_license_for_sales_order(license_service: LicenseService, order: dict[str, object]):
@@ -2355,6 +2258,7 @@ def _issue_license_for_sales_order(license_service: LicenseService, order: dict[
 
 
 async def fulfill_order(context: ContextTypes.DEFAULT_TYPE, order_id: str) -> dict[str, object]:
+    logger.warning("FULFILLMENT START order_id=%s", order_id)
     _release_expired_sqlite_reservations(context.application.bot_data.get("store_db_path"))
     sales_order = _find_order(order_id)
     if sales_order:
@@ -2442,6 +2346,18 @@ async def fulfill_order(context: ContextTypes.DEFAULT_TYPE, order_id: str) -> di
                 context.user_data.pop("pending_order_id", None)
         if not delivery_text:
             await _notify_admins_paid_without_delivery(context, updated_order or sales_order, delivery_message)
+            logger.error(
+                "DELIVERY SENT FAIL order_id=%s reason=%s final_status=%s",
+                order_id,
+                delivery_message,
+                (updated_order or sales_order).get("order_status", ""),
+            )
+        else:
+            logger.warning(
+                "DELIVERY SENT SUCCESS order_id=%s final_status=%s",
+                order_id,
+                (updated_order or sales_order).get("order_status", ""),
+            )
         return {
             "ok": delivered,
             "type": "sales_order",
@@ -2854,7 +2770,7 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         package = _get_package_info(product_code, package_code)
         if not package or int(package["available_count"]) <= 0:
-            await query.edit_message_text("Gói không hợp lệ.", reply_markup=_product_menu_keyboard())
+            await _safe_edit_or_send(update, "Gói không hợp lệ.", _product_menu_keyboard(), edit=True)
             return
         log_sales_state(
             "package_callback",
@@ -2905,7 +2821,7 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             package.get("price_vnd") if package else None,
         )
         if not package:
-            await query.edit_message_text("Gói không hợp lệ.", reply_markup=_product_menu_keyboard())
+            await _safe_edit_or_send(update, "Gói không hợp lệ.", _product_menu_keyboard(), edit=True)
             return
         try:
             if update.effective_user:
@@ -2946,7 +2862,7 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 raw_qty,
                 exc,
             )
-            await query.edit_message_text(str(exc), reply_markup=_product_menu_keyboard())
+            await _safe_edit_or_send(update, str(exc), _product_menu_keyboard(), edit=True)
             return
         except Exception as exc:
             logger.exception(
@@ -3021,9 +2937,11 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await _send_purchase_error(update, context, reason=str(exc), order_id=order_id)
     elif data.startswith("pay_wallet:"):
         order_id = data.split(":", 1)[1].strip()
-        await query.edit_message_text(
+        await _safe_edit_or_send(
+            update,
             "Số dư ví hiện tại không đủ hoặc chưa được cấu hình. Vui lòng chọn ACB để thanh toán.",
-            reply_markup=_payment_choice_keyboard(order_id),
+            _payment_choice_keyboard(order_id),
+            edit=True,
         )
     elif data.startswith("paid_notify:"):
         order_id = data.split(":", 1)[1].strip()
@@ -3032,10 +2950,7 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         order_id = data.split(":", 1)[1].strip()
         _release_order_reservation(order_id, store_db_path=context.application.bot_data.get("store_db_path"))
         _update_order(order_id, payment_status="cancelled", order_status="cancelled")
-        if query.message and query.message.caption:
-            await query.edit_message_caption(caption="Giao dịch đã hủy.", reply_markup=_main_menu_keyboard())
-        else:
-            await query.edit_message_text("Giao dịch đã hủy.", reply_markup=_main_menu_keyboard())
+        await _safe_edit_or_send(update, "Giao dịch đã hủy.", _main_menu_keyboard(), edit=True)
     elif data.startswith("product:"):
         product_code = data.split(":", 1)[1].strip()
         logger.debug(
@@ -3071,7 +2986,7 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     elif data == "menu_support":
         await _send_support(update, context, edit=True)
     else:
-        await query.edit_message_text("Menu khong hop le.", reply_markup=_main_menu_keyboard())
+        await _safe_edit_or_send(update, "Menu khong hop le.", _main_menu_keyboard(), edit=True)
 
 
 async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

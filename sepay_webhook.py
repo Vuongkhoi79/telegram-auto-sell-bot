@@ -111,6 +111,7 @@ async def process_sepay_payload(payload: dict[str, Any], fulfill_order: FulfillO
     amount = extract_amount(payload)
     description = extract_description(payload)
     transaction_id = extract_transaction_id(payload)
+    print(f"[SEPAY] parsed order code description={description!r} amount={amount} transaction_id={transaction_id}", flush=True)
 
     processed = load_json_list(PROCESSED_TRANSACTIONS_PATH)
     if transaction_id in {str(item.get("transaction_id", "")) for item in processed}:
@@ -124,7 +125,7 @@ async def process_sepay_payload(payload: dict[str, Any], fulfill_order: FulfillO
         append_unmatched(payload, "No pending order matched amount and description")
         return {"ok": False, "status": "unmatched", "transaction_id": transaction_id}
 
-    print("[SEPAY] matched order", flush=True)
+    print(f"[SEPAY] matched order_id={order.get('order_id', '')}", flush=True)
     order_id = str(order.get("order_id", ""))
     paid_at = utc_now_iso()
     bank_checker.update_order(
@@ -135,7 +136,14 @@ async def process_sepay_payload(payload: dict[str, Any], fulfill_order: FulfillO
         payment_method="SEPAY",
         transaction_id=transaction_id,
     )
+    print(f"[SEPAY] marked paid order_id={order_id}", flush=True)
+    print(f"[SEPAY] delivery start order_id={order_id}", flush=True)
     fulfillment = await fulfill_order(order_id)
+    print(
+        f"[SEPAY] delivery result order_id={order_id} ok={fulfillment.get('ok')} "
+        f"message={ascii(str(fulfillment.get('message', '')))} final_status={(fulfillment.get('order') or {}).get('order_status', '')}",
+        flush=True,
+    )
     processed.append(
         {
             "transaction_id": transaction_id,
