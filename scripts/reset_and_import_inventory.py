@@ -332,6 +332,7 @@ def import_prepared_rows(
 ) -> tuple[dict[str, int], list[ImportRowResult]]:
     imported = {code: 0 for code in TARGET_PRODUCTS}
     row_results: list[ImportRowResult] = list(invalid_rows)
+    inserted_identities: dict[str, set[str]] = {code: set() for code in TARGET_PRODUCTS}
     now = utc_now_iso()
     for product_code in TARGET_PRODUCTS:
         product_rows = rows_by_product[product_code]
@@ -339,25 +340,21 @@ def import_prepared_rows(
             continue
         product = ensure_target_product(connection, product_code, product_rows[0].row, now)
         for item in product_rows:
-            duplicate = connection.execute(
-                "SELECT id FROM inventory_items WHERE product_id = ? AND secret_value = ?",
-                (product["id"], inventory_secret_value(item)),
-            ).fetchone()
-            if duplicate:
+            identity = inventory_secret_value(item)
+            if identity in inserted_identities[product_code]:
                 row_results.append(
                     ImportRowResult(
                         item=item,
-                        identity=inventory_secret_value(item),
+                        identity=identity,
                         status="duplicate skipped",
-                        reason=f"duplicate inventory_item_id={duplicate['id']}",
-                        inventory_item_id=str(duplicate["id"]),
+                        reason="duplicate identity in this import batch",
                     )
                 )
                 continue
             item_id = str(uuid.uuid4())
             connection.execute(
                 "INSERT INTO inventory_items (id, product_id, secret_value, status, created_at) VALUES (?, ?, ?, 'available', ?)",
-                (item_id, product["id"], inventory_secret_value(item), utc_now_iso()),
+                (item_id, product["id"], identity, utc_now_iso()),
             )
             connection.execute(
                 """
@@ -368,10 +365,11 @@ def import_prepared_rows(
                 (str(uuid.uuid4()), item_id, utc_now_iso()),
             )
             imported[product_code] += 1
+            inserted_identities[product_code].add(identity)
             row_results.append(
                 ImportRowResult(
                     item=item,
-                    identity=inventory_secret_value(item),
+                    identity=identity,
                     status="inserted",
                     inventory_item_id=item_id,
                 )
