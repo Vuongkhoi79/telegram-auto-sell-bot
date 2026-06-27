@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 from datetime import datetime, timezone
@@ -10,6 +11,7 @@ from typing import Any, Awaitable, Callable
 from repository.store_repository import StoreRepository
 
 
+logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parent
 ORDERS_DB_PATH = PROJECT_ROOT / "orders_db.json"
 BANK_TRANSACTIONS_PATH = PROJECT_ROOT / "bank_transactions.json"
@@ -54,16 +56,21 @@ def _orders_repository() -> StoreRepository | None:
 
 
 def load_orders() -> list[dict[str, Any]]:
+    path = _resolve_store_db_path()
     repository = _orders_repository()
     if repository:
         try:
             return repository.list_orders()
-        except (OSError, RuntimeError, sqlite3.Error):
-            pass
+        except (OSError, RuntimeError, sqlite3.Error) as exc:
+            logger.error("SQLite order lookup failed; account sales fail closed: %s", exc)
+            return []
+    if path.is_file():
+        return []
     return load_json_list(ORDERS_DB_PATH)
 
 
 def load_pending_orders() -> list[dict[str, Any]]:
+    path = _resolve_store_db_path()
     repository = _orders_repository()
     if repository:
         try:
@@ -72,8 +79,11 @@ def load_pending_orders() -> list[dict[str, Any]]:
                 for order in repository.list_pending_orders()
                 if not is_expired(order)
             ]
-        except (OSError, RuntimeError, sqlite3.Error):
-            pass
+        except (OSError, RuntimeError, sqlite3.Error) as exc:
+            logger.error("SQLite pending order lookup failed; account sales fail closed: %s", exc)
+            return []
+    if path.is_file():
+        return []
     return [
         order
         for order in load_json_list(ORDERS_DB_PATH)
@@ -94,14 +104,18 @@ def is_expired(order: dict[str, Any]) -> bool:
 def update_order(order_id: str, **changes: Any) -> dict[str, Any] | None:
     if "payment_status" in changes and "status" not in changes:
         changes["status"] = changes["payment_status"]
+    path = _resolve_store_db_path()
     repository = _orders_repository()
     if repository:
         try:
             updated = repository.update_order(order_id, **changes)
             if updated:
                 return updated
-        except (OSError, RuntimeError, sqlite3.Error):
-            pass
+        except (OSError, RuntimeError, sqlite3.Error) as exc:
+            logger.error("SQLite order update failed for %s; account sales fail closed: %s", order_id, exc)
+            return None
+    if path.is_file():
+        return None
     orders = load_json_list(ORDERS_DB_PATH)
     for order in reversed(orders):
         if str(order.get("order_id", "")).upper() == order_id.upper():

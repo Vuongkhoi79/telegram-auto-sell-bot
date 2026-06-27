@@ -6,6 +6,8 @@ import os
 import sqlite3
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -311,6 +313,43 @@ class SePayOrderFulfillmentTest(unittest.TestCase):
         self.assertTrue(payload_data["lifetime"])
         self.assertEqual(payload_data["expire_date"], "2099-12-31")
         self.assertEqual(len(self.bot.documents), 1)
+
+    def test_webhook_handler_returns_generic_error_body(self) -> None:
+        order = pending_order(order_id="ORD-ERR", total=1, amount=1)
+        botmod.StoreRepository(self.store_db_path).upsert_order(order)
+
+        async def failing_fulfill(order_id: str) -> dict[str, object]:
+            raise RuntimeError("sensitive internal failure detail")
+
+        async def exercise() -> tuple[int, bytes]:
+            app = SimpleNamespace(bot_data={})
+            server = sepay_webhook.start_sepay_webhook_server(app, failing_fulfill, host="127.0.0.1", port=0)
+            url = f"http://127.0.0.1:{server.server_port}{sepay_webhook.WEBHOOK_PATH}"
+
+            def post() -> tuple[int, bytes]:
+                request = urllib.request.Request(
+                    url,
+                    data=json.dumps({"transaction_id": "ERR-1", "transferAmount": 1, "addInfo": "ORD-ERR"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        return response.status, response.read()
+                except urllib.error.HTTPError as exc:
+                    return exc.code, exc.read()
+
+            try:
+                return await asyncio.to_thread(post)
+            finally:
+                server.shutdown()
+                server.server_close()
+
+        status, body = asyncio.run(exercise())
+        payload = json.loads(body.decode("utf-8"))
+        self.assertEqual(status, 500)
+        self.assertEqual(payload, {"ok": False, "error": "internal_server_error"})
+        self.assertNotIn("sensitive internal failure detail", body.decode("utf-8"))
 
 
 if __name__ == "__main__":

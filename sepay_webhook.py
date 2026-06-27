@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import threading
 from datetime import datetime, timezone
@@ -14,6 +15,7 @@ from typing import Any, Awaitable, Callable
 import bank_checker
 
 
+logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parent
 ORDERS_DB_PATH = PROJECT_ROOT / "orders_db.json"
 PROCESSED_TRANSACTIONS_PATH = PROJECT_ROOT / "processed_transactions.json"
@@ -193,7 +195,8 @@ def start_sepay_webhook_server(application, fulfill_order: FulfillOrder, *, host
             try:
                 result = future.result(timeout=30)
             except Exception as exc:
-                self._send_json(500, {"ok": False, "error": str(exc)})
+                logger.exception("SePay webhook processing failed: %s", exc)
+                self._send_json(500, {"ok": False, "error": "internal_server_error"})
                 return
             self._send_json(200, result)
 

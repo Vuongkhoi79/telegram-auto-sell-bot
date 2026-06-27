@@ -155,6 +155,25 @@ class TelegramCallbackFlowTest(unittest.TestCase):
         self.assertIn("AI STORE", main_reply)
         self.assertEqual(main_update.callback_query.edits, [])
 
+    def test_malformed_callbacks_return_safe_menu_message(self) -> None:
+        invalid_callbacks = [
+            "pkg:GEMINI",
+            "qty:GEMINI:GEMINI:not-a-number",
+            "pay_acb:",
+            "product:",
+            "license_product_machine:TOOL_YEAR_365",
+            "unknown_callback",
+        ]
+        for callback_data in invalid_callbacks:
+            with self.subTest(callback_data=callback_data):
+                update = FakeUpdate(callback_data)
+                asyncio.run(bot._on_menu_impl(update, self.context))
+                self.assertTrue(update.callback_query.answered)
+                self.assertEqual(
+                    update.callback_query.edits[-1][0],
+                    "Menu không hợp lệ. Vui lòng quay lại menu chính.",
+                )
+
     def test_purchase_history_button_shows_empty_and_user_filtered_orders(self) -> None:
         empty_update = FakeUpdate("menu_history")
         asyncio.run(bot._on_menu_impl(empty_update, self.context))

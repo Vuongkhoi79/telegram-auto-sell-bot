@@ -1199,7 +1199,7 @@ class StoreRepository:
             if not items:
                 delivered_items = connection.execute(
                     """
-                    SELECT item.secret_value
+                    SELECT item.id, item.secret_value, oi.state
                     FROM order_inventory_items AS oi
                     JOIN inventory_items AS item ON item.id = oi.inventory_item_id
                     WHERE oi.order_id = ? AND oi.state = 'delivered'
@@ -1208,9 +1208,11 @@ class StoreRepository:
                     (order["id"],),
                 ).fetchall()
                 logger.warning(
-                    "DELIVERY REPLAY order_id=%s delivered_items=%s",
+                    "DELIVERY REPLAY order_id=%s delivered_count=%s inventory_item_ids=%s states=%s",
                     order_id,
-                    [tuple(item) for item in delivered_items],
+                    len(delivered_items),
+                    [str(item["id"]) for item in delivered_items],
+                    [str(item["state"]) for item in delivered_items],
                 )
                 return [str(item["secret_value"]) for item in delivered_items]
             logger.warning(

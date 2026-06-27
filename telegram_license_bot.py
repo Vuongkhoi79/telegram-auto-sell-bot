@@ -168,6 +168,16 @@ def _parse_admin_ids(raw: str | None) -> set[int]:
     return values
 
 
+def _mask_credential_for_log(credential: object) -> str:
+    first_field = str(credential or "").split("|", 1)[0].strip()
+    if "@" not in first_field:
+        return "***"
+    local, domain = first_field.split("@", 1)
+    if not local or not domain:
+        return "***"
+    return f"{local[:3]}***@{domain}"
+
+
 def _machine_arg(args: list[str]) -> str | None:
     if not args:
         return None
@@ -696,7 +706,8 @@ def _load_orders() -> list[dict[str, object]]:
         try:
             return StoreRepository(path).list_orders()
         except (OSError, RuntimeError, sqlite3.Error) as exc:
-            logger.warning("SQLite order lookup failed; using legacy orders_db.json: %s", exc)
+            logger.error("SQLite order lookup failed; account sales fail closed: %s", exc)
+            return []
     if not ORDERS_DB_PATH.exists():
         return []
     try:
@@ -719,7 +730,8 @@ def _save_orders(orders: list[dict[str, object]]) -> None:
                 repository.upsert_order(order)
             return
         except (OSError, RuntimeError, sqlite3.Error) as exc:
-            logger.warning("SQLite order save failed; falling back to legacy JSON orders_db.json: %s", exc)
+            logger.error("SQLite order save failed; account sales fail closed: %s", exc)
+            raise
     ORDERS_DB_PATH.write_text(json.dumps(orders, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -810,7 +822,8 @@ def _find_order(order_id: str) -> dict[str, object] | None:
             if order:
                 return order
         except (OSError, RuntimeError, sqlite3.Error) as exc:
-            logger.warning("SQLite order lookup failed for %s; falling back to JSON: %s", order_id, exc)
+            logger.error("SQLite order lookup failed for %s; account sales fail closed: %s", order_id, exc)
+            return None
     for order in reversed(_load_orders() if not (_sqlite_orders_enabled() and path.is_file()) else []):
         if str(order.get("order_id", "")).upper() == order_id.upper():
             return order
@@ -828,7 +841,8 @@ def _update_order(order_id: str, **changes: object) -> dict[str, object] | None:
             if updated:
                 return updated
         except (OSError, RuntimeError, sqlite3.Error) as exc:
-            logger.warning("SQLite order update failed for %s; falling back to JSON: %s", order_id, exc)
+            logger.error("SQLite order update failed for %s; account sales fail closed: %s", order_id, exc)
+            return None
     orders = _load_orders()
     for order in reversed(orders):
         if str(order.get("order_id", "")).upper() == order_id.upper():
@@ -1591,6 +1605,15 @@ async def _send_purchase_error(update: Update, context: ContextTypes.DEFAULT_TYP
         await message.reply_text(text, reply_markup=_main_menu_keyboard())
 
 
+async def _send_invalid_callback(update: Update) -> None:
+    await _safe_edit_or_send(
+        update,
+        "Menu không hợp lệ. Vui lòng quay lại menu chính.",
+        _main_menu_keyboard(),
+        edit=True,
+    )
+
+
 async def _send_acb_qr(update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: str) -> None:
     callback_data = str(getattr(getattr(update, "callback_query", None), "data", "") or "")
     user_id = getattr(getattr(update, "effective_user", None), "id", None)
@@ -2236,7 +2259,7 @@ def _deliver_sales_order(order: dict[str, object]) -> tuple[bool, str, str]:
             "DELIVERY SELECTED order_id=%s delivered_count=%s delivery_preview=%s",
             order_id,
             len(delivered_items),
-            [item.split("|", 1)[0] for item in delivered_items],
+            [_mask_credential_for_log(item) for item in delivered_items],
         )
         return True, "\n".join(delivered_items), "Đã giao hàng từ SQLite reservation."
 
@@ -2759,11 +2782,15 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     elif data == "product_ai_daily":
         await _show_navigation_screen(update, _ai_daily_text(), _ai_daily_keyboard(), edit=True)
     elif data.startswith("pkg:"):
-        _, product_code, package_code = data.split(":", 2)
+        parts = data.split(":")
+        if len(parts) != 3 or not parts[1].strip() or not parts[2].strip():
+            await _send_invalid_callback(update)
+            return
+        _, product_code, package_code = parts
         logger.debug(
             "CALLBACK pkg callback_data=%s parsed_parts=%s user_id=%s product_code=%s package_code=%s",
             data,
-            data.split(":"),
+            parts,
             getattr(getattr(update, "effective_user", None), "id", None),
             product_code,
             package_code,
@@ -2782,11 +2809,20 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         await _send_quantity_choice(update, product_code, package_code, edit=True)
     elif data.startswith("qty:"):
-        _, product_code, package_code, raw_qty = data.split(":", 3)
+        parts = data.split(":")
+        if len(parts) != 4 or not parts[1].strip() or not parts[2].strip() or not parts[3].strip():
+            await _send_invalid_callback(update)
+            return
+        _, product_code, package_code, raw_qty = parts
+        try:
+            requested_quantity = int(raw_qty)
+        except (TypeError, ValueError):
+            await _send_invalid_callback(update)
+            return
         logger.debug(
             "CALLBACK qty callback_data=%s parsed_parts=%s user_id=%s product_code=%s package_code=%s requested_quantity=%s",
             data,
-            data.split(":"),
+            parts,
             getattr(getattr(update, "effective_user", None), "id", None),
             product_code,
             package_code,
@@ -2797,7 +2833,7 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             product_code,
             callback_data=data,
             package_id=package_code,
-            quantity=int(raw_qty),
+            quantity=requested_quantity,
             database_path=context.application.bot_data.get("store_db_path"),
         )
         package = _get_package_info(product_code, package_code)
@@ -2814,7 +2850,7 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             package.get("product_id") if package else None,
             package_code,
             package.get("display_name") if package else None,
-            int(raw_qty),
+            requested_quantity,
             menu_available,
             package_available,
             package_available,
@@ -2835,12 +2871,12 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 _price_source_label(package),
                 product_code,
                 package_code,
-                int(raw_qty),
+                requested_quantity,
                 menu_available,
                 package_available,
                 package_available,
             )
-            order = _create_sales_order(update, product_code, package_code, int(raw_qty))
+            order = _create_sales_order(update, product_code, package_code, requested_quantity)
             logger.debug(
                 "ORDER_CREATED callback_data=%s user_id=%s database_path=%s price_source=%s order_id=%s product_code=%s package_code=%s amount_vnd=%s",
                 data,
@@ -2883,7 +2919,7 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             order_id=str(order.get("order_id", "")),
             callback_data=data,
             package_id=str(order.get("package_code", package_code)),
-            quantity=int(order.get("quantity", raw_qty)),
+            quantity=int(order.get("quantity", requested_quantity)),
             database_path=context.application.bot_data.get("store_db_path"),
         )
         if update.effective_user and getattr(context, "user_data", None) is not None:
@@ -2922,7 +2958,11 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await _send_purchase_error(update, context, reason=str(exc), order_id=str(order.get("order_id", "")))
             return
     elif data.startswith("pay_acb:"):
-        order_id = data.split(":", 1)[1].strip()
+        parts = data.split(":", 1)
+        if len(parts) != 2 or not parts[1].strip():
+            await _send_invalid_callback(update)
+            return
+        order_id = parts[1].strip()
         try:
             await _send_acb_qr(update, context, order_id)
         except Exception as exc:
@@ -2936,7 +2976,11 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             await _send_purchase_error(update, context, reason=str(exc), order_id=order_id)
     elif data.startswith("pay_wallet:"):
-        order_id = data.split(":", 1)[1].strip()
+        parts = data.split(":", 1)
+        if len(parts) != 2 or not parts[1].strip():
+            await _send_invalid_callback(update)
+            return
+        order_id = parts[1].strip()
         await _safe_edit_or_send(
             update,
             "Số dư ví hiện tại không đủ hoặc chưa được cấu hình. Vui lòng chọn ACB để thanh toán.",
@@ -2944,19 +2988,31 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             edit=True,
         )
     elif data.startswith("paid_notify:"):
-        order_id = data.split(":", 1)[1].strip()
+        parts = data.split(":", 1)
+        if len(parts) != 2 or not parts[1].strip():
+            await _send_invalid_callback(update)
+            return
+        order_id = parts[1].strip()
         await _send_paid_notify(update, context, order_id)
     elif data.startswith("cancel_order:"):
-        order_id = data.split(":", 1)[1].strip()
+        parts = data.split(":", 1)
+        if len(parts) != 2 or not parts[1].strip():
+            await _send_invalid_callback(update)
+            return
+        order_id = parts[1].strip()
         _release_order_reservation(order_id, store_db_path=context.application.bot_data.get("store_db_path"))
         _update_order(order_id, payment_status="cancelled", order_status="cancelled")
         await _safe_edit_or_send(update, "Giao dịch đã hủy.", _main_menu_keyboard(), edit=True)
     elif data.startswith("product:"):
-        product_code = data.split(":", 1)[1].strip()
+        parts = data.split(":", 1)
+        if len(parts) != 2 or not parts[1].strip():
+            await _send_invalid_callback(update)
+            return
+        product_code = parts[1].strip()
         logger.debug(
             "CALLBACK product callback_data=%s parsed_parts=%s user_id=%s product_code=%s",
             data,
-            data.split(":"),
+            parts,
             getattr(getattr(update, "effective_user", None), "id", None),
             product_code,
         )
@@ -2964,7 +3020,11 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             _release_current_user_reservation(context, update.effective_user.id)
         await _send_product_detail(update, context, product_code, edit=True)
     elif data.startswith("buy:"):
-        product_code = data.split(":", 1)[1].strip()
+        parts = data.split(":", 1)
+        if len(parts) != 2 or not parts[1].strip():
+            await _send_invalid_callback(update)
+            return
+        product_code = parts[1].strip()
         await _send_payment(update, context, edit=True, product_name=product_code)
     elif data == "menu_download":
         await _send_download(update, context, edit=True)
@@ -2973,20 +3033,32 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     elif data == "menu_help":
         await _send_help(update, context, edit=True)
     elif data.startswith("license_product_machine:"):
-        _, product_id, machine_id = data.split(":", 2)
+        parts = data.split(":")
+        if len(parts) != 3 or not parts[1].strip() or not parts[2].strip():
+            await _send_invalid_callback(update)
+            return
+        _, product_id, machine_id = parts
         await _create_paid_license_order(update, context, "", product_id, edit=True)
     elif data.startswith("license_product:"):
-        product_id = data.split(":", 1)[1].strip().upper()
+        parts = data.split(":", 1)
+        if len(parts) != 2 or not parts[1].strip():
+            await _send_invalid_callback(update)
+            return
+        product_id = parts[1].strip().upper()
         await _create_paid_license_order(update, context, "", product_id, edit=True)
     elif data.startswith("upgrade_machine:"):
-        machine_id = data.split(":", 1)[1].strip().upper()
+        parts = data.split(":", 1)
+        if len(parts) != 2 or not parts[1].strip():
+            await _send_invalid_callback(update)
+            return
+        machine_id = parts[1].strip().upper()
         await _create_upgrade_order(update, context, machine_id, edit=True)
     elif data == "menu_upgrade":
         await _send_upgrade(update, context, edit=True)
     elif data == "menu_support":
         await _send_support(update, context, edit=True)
     else:
-        await _safe_edit_or_send(update, "Menu khong hop le.", _main_menu_keyboard(), edit=True)
+        await _send_invalid_callback(update)
 
 
 async def on_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
