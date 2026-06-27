@@ -443,6 +443,17 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def _post_delivery_navigation_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🎁 Sản phẩm", callback_data="menu_products")],
+            [InlineKeyboardButton("🧾 Lịch sử mua hàng", callback_data="menu_history")],
+            [InlineKeyboardButton("🏠 Menu chính", callback_data="menu_main")],
+            [InlineKeyboardButton("💬 Hỗ trợ", callback_data="menu_support")],
+        ]
+    )
+
+
 def _ai_daily_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -2362,6 +2373,7 @@ async def fulfill_order(context: ContextTypes.DEFAULT_TYPE, order_id: str) -> di
                         f"Order ID: {order_id}\n"
                         f"Machine ID: {sales_order.get('machine_id', '')}"
                     ),
+                    reply_markup=_post_delivery_navigation_keyboard(),
                 )
                 if license_path and Path(license_path).exists():
                     with Path(license_path).open("rb") as handle:
@@ -2401,7 +2413,11 @@ async def fulfill_order(context: ContextTypes.DEFAULT_TYPE, order_id: str) -> di
                 customer_text += f"\n\n🎁 Giao hàng thành công\n\n{delivery_text}"
             else:
                 customer_text += "\n\nAdmin sẽ xử lý giao hàng cho bạn."
-            await context.bot.send_message(chat_id=int(customer_id), text=customer_text)
+            await context.bot.send_message(
+                chat_id=int(customer_id),
+                text=customer_text,
+                reply_markup=_post_delivery_navigation_keyboard() if delivery_text else None,
+            )
             if getattr(context, "user_data", None) is not None:
                 context.user_data.pop("pending_order_id", None)
         if not delivery_text:

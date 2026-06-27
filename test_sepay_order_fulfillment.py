@@ -27,8 +27,8 @@ class FakeTelegramBot:
         self.messages: list[dict[str, object]] = []
         self.documents: list[dict[str, object]] = []
 
-    async def send_message(self, chat_id: int, text: str) -> None:
-        self.messages.append({"chat_id": chat_id, "text": text})
+    async def send_message(self, chat_id: int, text: str, reply_markup=None) -> None:
+        self.messages.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
 
     async def send_document(self, chat_id: int, document) -> None:
         self.documents.append({"chat_id": chat_id, "filename": document.filename})
@@ -173,6 +173,16 @@ class SePayOrderFulfillmentTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["fulfillment"]["type"], "sales_order")
         self.assertIn(credential, self.bot.messages[0]["text"])
+        buttons = [button for row in self.bot.messages[0]["reply_markup"].inline_keyboard for button in row]
+        self.assertEqual(
+            [(button.text, button.callback_data) for button in buttons],
+            [
+                ("🎁 Sản phẩm", "menu_products"),
+                ("🧾 Lịch sử mua hàng", "menu_history"),
+                ("🏠 Menu chính", "menu_main"),
+                ("💬 Hỗ trợ", "menu_support"),
+            ],
+        )
         updated_order = botmod._find_order(order["order_id"])
         self.assertEqual(updated_order["delivery"], credential)
 
