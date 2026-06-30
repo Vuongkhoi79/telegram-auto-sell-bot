@@ -35,9 +35,10 @@ CATALOG_COLUMNS = {
 }
 
 CANONICAL_CATALOG_PRODUCTS = {
-    "CAPCUT": {"name": "CAPCUT PRO 12M", "price_vnd": 400000},
-    "CAPCUT_12M": {"name": "CAPCUT PRO 12M", "price_vnd": 400000},
-    "CAPCUT_30D": {"name": "CAPCUT PRO 30D", "price_vnd": 45000},
+    "CAPCUT": {"name": "CAPCUT PRO 365 ngay", "price_vnd": 400000},
+    "CAPCUT_365D": {"name": "CAPCUT PRO 365 ngay", "price_vnd": 400000},
+    "CAPCUT_12M": {"name": "CAPCUT PRO 365 ngay", "price_vnd": 400000},
+    "CAPCUT_30D": {"name": "CAPCUT PRO 30 ngay", "price_vnd": 45000},
     "GEMINI": {"name": "Gemini AI Pro", "price_vnd": 70000},
 }
 
@@ -57,12 +58,16 @@ ACCOUNT_PRODUCT_CODE_ALIASES: dict[str, tuple[str, ...]] = {
     "ARTLIST": ("ARTLIST-1M-PRIVATE",),
     "CANVA": ("CANVA-PRO-1M-PRIVATE",),
     "CANVA PRO": ("CANVA-PRO-1M-PRIVATE",),
-    "CAPCUT": ("CAPCUT-PRO-1M-PRIVATE", "CAPCUT_12M"),
-    "CAPCUT PRO": ("CAPCUT-PRO-1M-PRIVATE", "CAPCUT_12M"),
-    "CAPCUT_12M": ("CAPCUT", "CAPCUT-PRO-1M-PRIVATE", "CAPCUT-PRO-12M-PRIVATE", "CAPCUT PRO 12M"),
-    "CAPCUT PRO 12M": ("CAPCUT_12M", "CAPCUT", "CAPCUT-PRO-1M-PRIVATE", "CAPCUT-PRO-12M-PRIVATE"),
-    "CAPCUT_30D": ("CAPCUT-PRO-30D-PRIVATE", "CAPCUT PRO 30D"),
-    "CAPCUT PRO 30D": ("CAPCUT_30D", "CAPCUT-PRO-30D-PRIVATE"),
+    "CAPCUT": ("CAPCUT_365D", "CAPCUT_12M", "CAPCUT_60D", "CAPCUT_30D", "CAPCUT-PRO-1M-PRIVATE", "CAPCUT-PRO-12M-PRIVATE", "CAPCUT-PRO-60D-PRIVATE", "CAPCUT-PRO-30D-PRIVATE"),
+    "CAPCUT PRO": ("CAPCUT_365D", "CAPCUT_12M", "CAPCUT_60D", "CAPCUT_30D", "CAPCUT-PRO-1M-PRIVATE", "CAPCUT-PRO-12M-PRIVATE", "CAPCUT-PRO-60D-PRIVATE", "CAPCUT-PRO-30D-PRIVATE"),
+    "CAPCUT_365D": ("CAPCUT", "CAPCUT_12M", "CAPCUT-PRO-1M-PRIVATE", "CAPCUT-PRO-12M-PRIVATE", "CAPCUT PRO 365 ngay", "CAPCUT PRO 365D"),
+    "CAPCUT PRO 365 ngay": ("CAPCUT_365D", "CAPCUT", "CAPCUT_12M", "CAPCUT-PRO-1M-PRIVATE", "CAPCUT-PRO-12M-PRIVATE"),
+    "CAPCUT_12M": ("CAPCUT_365D", "CAPCUT", "CAPCUT-PRO-1M-PRIVATE", "CAPCUT-PRO-12M-PRIVATE", "CAPCUT PRO 12M"),
+    "CAPCUT PRO 12M": ("CAPCUT_365D", "CAPCUT_12M", "CAPCUT", "CAPCUT-PRO-1M-PRIVATE", "CAPCUT-PRO-12M-PRIVATE"),
+    "CAPCUT_60D": ("CAPCUT-PRO-60D-PRIVATE", "CAPCUT PRO 60 ngay", "CAPCUT PRO 60D"),
+    "CAPCUT PRO 60 ngay": ("CAPCUT_60D", "CAPCUT-PRO-60D-PRIVATE"),
+    "CAPCUT_30D": ("CAPCUT-PRO-30D-PRIVATE", "CAPCUT PRO 30 ngay", "CAPCUT PRO 30D"),
+    "CAPCUT PRO 30 ngay": ("CAPCUT_30D", "CAPCUT-PRO-30D-PRIVATE"),
     "CHATGPT": ("GPT-PLUS-1M-PRIVATE",),
     "CLAUDE": ("CLAUDE-PRO-1M-PRIVATE",),
     "CLAUDE AI": ("CLAUDE-PRO-1M-PRIVATE",),
@@ -478,10 +483,8 @@ class StoreRepository:
                                 THEN 'CHATGPT'
                             WHEN UPPER(p.code) = 'GEM-AIPRO-1M-PRIVATE'
                                 THEN 'GEMINI'
-                            WHEN UPPER(p.code) IN ('CAPCUT', 'CAPCUT_12M', 'CAPCUT-PRO-1M-PRIVATE', 'CAPCUT-PRO-12M-PRIVATE')
-                                THEN 'CAPCUT_12M'
-                            WHEN UPPER(p.code) IN ('CAPCUT_30D', 'CAPCUT-PRO-30D-PRIVATE')
-                                THEN 'CAPCUT_30D'
+                            WHEN UPPER(p.code) IN ('CAPCUT', 'CAPCUT_12M', 'CAPCUT_365D', 'CAPCUT_60D', 'CAPCUT_30D', 'CAPCUT-PRO-1M-PRIVATE', 'CAPCUT-PRO-12M-PRIVATE', 'CAPCUT-PRO-60D-PRIVATE', 'CAPCUT-PRO-30D-PRIVATE')
+                                THEN 'CAPCUT'
                             WHEN UPPER(p.code) = 'GROK-SUPER-1M-PRIVATE'
                                 THEN 'GROK'
                             ELSE UPPER(p.code)
@@ -519,7 +522,7 @@ class StoreRepository:
                  AND (
                        UPPER(mp.code) = mp.menu_code
                     OR real_product.id IS NULL
-                    OR mp.menu_code IN ('CAPCUT_12M', 'CAPCUT_30D')
+                    OR mp.menu_code = 'CAPCUT'
                  )
                 GROUP BY mp.menu_code
                 ORDER BY menu_order, display_name COLLATE NOCASE, product_code
@@ -572,29 +575,46 @@ class StoreRepository:
                                 THEN 'CHATGPT'
                             WHEN UPPER(p.code) = 'GEM-AIPRO-1M-PRIVATE'
                                 THEN 'GEMINI'
-                            WHEN UPPER(p.code) IN ('CAPCUT', 'CAPCUT_12M', 'CAPCUT-PRO-1M-PRIVATE', 'CAPCUT-PRO-12M-PRIVATE')
-                                THEN 'CAPCUT_12M'
+                            WHEN ? = 'CAPCUT' AND UPPER(p.code) IN ('CAPCUT', 'CAPCUT_365D', 'CAPCUT_12M', 'CAPCUT-PRO-1M-PRIVATE', 'CAPCUT-PRO-12M-PRIVATE')
+                                THEN 'CAPCUT'
+                            WHEN ? = 'CAPCUT' AND UPPER(p.code) IN ('CAPCUT_60D', 'CAPCUT-PRO-60D-PRIVATE')
+                                THEN 'CAPCUT'
+                            WHEN ? = 'CAPCUT' AND UPPER(p.code) IN ('CAPCUT_30D', 'CAPCUT-PRO-30D-PRIVATE')
+                                THEN 'CAPCUT'
+                            WHEN UPPER(p.code) IN ('CAPCUT', 'CAPCUT_365D', 'CAPCUT_12M', 'CAPCUT-PRO-1M-PRIVATE', 'CAPCUT-PRO-12M-PRIVATE')
+                                THEN 'CAPCUT_365D'
+                            WHEN UPPER(p.code) IN ('CAPCUT_60D', 'CAPCUT-PRO-60D-PRIVATE')
+                                THEN 'CAPCUT_60D'
                             WHEN UPPER(p.code) IN ('CAPCUT_30D', 'CAPCUT-PRO-30D-PRIVATE')
                                 THEN 'CAPCUT_30D'
                             WHEN UPPER(p.code) = 'GROK-SUPER-1M-PRIVATE'
                                 THEN 'GROK'
                             ELSE UPPER(COALESCE(NULLIF(p.category_key, ''), NULLIF(p.category, ''), p.code))
-                        END AS menu_code
+                        END AS menu_code,
+                        CASE
+                            WHEN UPPER(p.code) IN ('CAPCUT', 'CAPCUT_365D', 'CAPCUT_12M', 'CAPCUT-PRO-1M-PRIVATE', 'CAPCUT-PRO-12M-PRIVATE')
+                                THEN 'CAPCUT_365D'
+                            WHEN UPPER(p.code) IN ('CAPCUT_60D', 'CAPCUT-PRO-60D-PRIVATE')
+                                THEN 'CAPCUT_60D'
+                            WHEN UPPER(p.code) IN ('CAPCUT_30D', 'CAPCUT-PRO-30D-PRIVATE')
+                                THEN 'CAPCUT_30D'
+                            ELSE UPPER(p.code)
+                        END AS package_code
                     FROM products AS p
                     WHERE p.active = 1 AND p.product_group = ?
                 )
                 SELECT p.id, p.code AS product_code, p.name AS display_name, p.category_key,
-                       p.description, p.price_vnd, p.active, p.menu_order, p.product_group,
+                       p.package_code, p.description, p.price_vnd, p.active, p.menu_order, p.product_group,
                        SUM(CASE WHEN i.status = 'available' THEN 1 ELSE 0 END) AS available_count
                 FROM package_products AS p
                 LEFT JOIN inventory_items AS i ON i.product_id = p.id
                 WHERE p.menu_code = ?
-                GROUP BY p.id, p.code, p.name, p.category_key, p.description,
+                GROUP BY p.id, p.code, p.name, p.category_key, p.package_code, p.description,
                          p.price_vnd, p.active, p.menu_order, p.product_group
                 HAVING available_count > 0 OR p.price_vnd > 0
                 ORDER BY p.menu_order, p.name COLLATE NOCASE, p.code
                 """,
-                (product_group, category_key.upper()),
+                (category_key.upper(), category_key.upper(), category_key.upper(), product_group, category_key.upper()),
             ).fetchall()
         return [{**dict(row), "available_count": int(row["available_count"] or 0)} for row in rows]
 

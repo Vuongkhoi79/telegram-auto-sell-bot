@@ -81,12 +81,16 @@ TOOL_LICENSE_PRODUCTS = {
 }
 pending_license_product_by_user: dict[int, str] = {}
 QUANTITY_OPTIONS = [1, 2, 3, 5, 10]
+CAPCUT_PACKAGE_ORDER = (
+    ("CAPCUT_30D", "CAPCUT PRO 30 ngày"),
+    ("CAPCUT_60D", "CAPCUT PRO 60 ngày"),
+    ("CAPCUT_365D", "CAPCUT PRO 365 ngày"),
+)
 PRODUCT_ORDER = [
     "ADOBE",
     "ARTLIST",
     "CANVA",
-    "CAPCUT PRO 30D",
-    "CAPCUT PRO 12M",
+    "CAPCUT PRO",
     "CHATGPT",
     "CLAUDE AI",
     "CURSOR AI",
@@ -104,9 +108,11 @@ PRODUCT_ORDER = [
     "VIEWMAX",
 ]
 CATALOG_DISPLAY_NAMES = {
-    "CAPCUT": "CAPCUT PRO 12M",
-    "CAPCUT_12M": "CAPCUT PRO 12M",
-    "CAPCUT_30D": "CAPCUT PRO 30D",
+    "CAPCUT": "CAPCUT PRO",
+    "CAPCUT_365D": "CAPCUT PRO 365 ngay",
+    "CAPCUT_12M": "CAPCUT PRO 365 ngay",
+    "CAPCUT_60D": "CAPCUT PRO 60 ngay",
+    "CAPCUT_30D": "CAPCUT PRO 30 ngay",
     "GEMINI": "GEMINI AI",
 }
 
@@ -116,12 +122,22 @@ TELEGRAM_PRODUCT_CODE_MAP = {
     "ARTLIST": "ARTLIST-1M-PRIVATE",
     "CANVA": "CANVA-PRO-1M-PRIVATE",
     "CANVA PRO": "CANVA-PRO-1M-PRIVATE",
-    "CAPCUT": "CAPCUT_12M",
-    "CAPCUT PRO": "CAPCUT_12M",
+    "CAPCUT": "CAPCUT",
+    "CAPCUT PRO": "CAPCUT",
+    "CAPCUT_365D": "CAPCUT_365D",
+    "CAPCUT PRO 365D": "CAPCUT_365D",
+    "CAPCUT PRO 365 NGAY": "CAPCUT_365D",
+    "CAPCUT PRO 365 NGÀY": "CAPCUT_365D",
     "CAPCUT_12M": "CAPCUT_12M",
     "CAPCUT PRO 12M": "CAPCUT_12M",
+    "CAPCUT_60D": "CAPCUT_60D",
+    "CAPCUT PRO 60D": "CAPCUT_60D",
+    "CAPCUT PRO 60 NGAY": "CAPCUT_60D",
+    "CAPCUT PRO 60 NGÀY": "CAPCUT_60D",
     "CAPCUT_30D": "CAPCUT_30D",
     "CAPCUT PRO 30D": "CAPCUT_30D",
+    "CAPCUT PRO 30 NGAY": "CAPCUT_30D",
+    "CAPCUT PRO 30 NGÀY": "CAPCUT_30D",
     "CHATGPT": "GPT-PLUS-1M-PRIVATE",
     "CLAUDE": "CLAUDE-PRO-1M-PRIVATE",
     "CLAUDE AI": "CLAUDE-PRO-1M-PRIVATE",
@@ -642,12 +658,21 @@ def _menu_stock_product_code(product_key: str) -> str | None:
         return "GEMINI"
     if normalized_key.startswith("GROK"):
         return "GROK"
-    if normalized_key.startswith("CAPCUT_30D") or "CAPCUT PRO 30D" in normalized_key:
+    if normalized_key.startswith("CAPCUT_30D") or "CAPCUT PRO 30D" in normalized_key or "CAPCUT PRO 30 NGAY" in normalized_key or "CAPCUT PRO 30 NGÀY" in normalized_key:
         return "CAPCUT_30D"
-    if normalized_key.startswith("CAPCUT_12M") or "CAPCUT PRO 12M" in normalized_key:
-        return "CAPCUT_12M"
+    if normalized_key.startswith("CAPCUT_60D") or "CAPCUT PRO 60D" in normalized_key or "CAPCUT PRO 60 NGAY" in normalized_key or "CAPCUT PRO 60 NGÀY" in normalized_key:
+        return "CAPCUT_60D"
+    if (
+        normalized_key.startswith("CAPCUT_365D")
+        or normalized_key.startswith("CAPCUT_12M")
+        or "CAPCUT PRO 365D" in normalized_key
+        or "CAPCUT PRO 365 NGAY" in normalized_key
+        or "CAPCUT PRO 365 NGÀY" in normalized_key
+        or "CAPCUT PRO 12M" in normalized_key
+    ):
+        return "CAPCUT_365D"
     if normalized_key.startswith("CAPCUT"):
-        return "CAPCUT_12M"
+        return "CAPCUT"
     if normalized_key.startswith("VEO3"):
         return "VEO3"
     if normalized_key.startswith("CLAUDE"):
@@ -1257,9 +1282,45 @@ def _ai_daily_text() -> str:
 
 def _packages_for_product(product_name: str) -> list[dict[str, object]]:
     try:
-        return StoreRepository(_resolve_store_db_path()).list_packages_by_category(_catalog_lookup_key(product_name))
+        packages = StoreRepository(_resolve_store_db_path()).list_packages_by_category(_catalog_lookup_key(product_name))
     except (OSError, RuntimeError, sqlite3.Error):
         return []
+    if _catalog_lookup_key(product_name) == "CAPCUT":
+        return _capcut_package_rows(packages)
+    return packages
+
+
+def _capcut_package_rows(packages: list[dict[str, object]]) -> list[dict[str, object]]:
+    existing: dict[str, dict[str, object]] = {}
+    for package in packages:
+        package_code = str(package.get("package_code") or package.get("product_code") or "").strip().upper()
+        if package_code == "CAPCUT" or package_code == "CAPCUT_12M":
+            package_code = "CAPCUT_365D"
+        if package_code:
+            existing[package_code] = {**package, "package_code": package_code}
+    rows: list[dict[str, object]] = []
+    for package_code, display_name in CAPCUT_PACKAGE_ORDER:
+        package = existing.get(package_code)
+        if package:
+            package["display_name"] = display_name
+            rows.append(package)
+        else:
+            rows.append(
+                {
+                    "id": "",
+                    "product_code": package_code,
+                    "package_code": package_code,
+                    "category_key": "CAPCUT",
+                    "display_name": display_name,
+                    "description": "",
+                    "price_vnd": 0,
+                    "active": 0,
+                    "menu_order": 100,
+                    "product_group": "account",
+                    "available_count": 0,
+                }
+            )
+    return rows
 
 
 def _product_detail_text(product_name: str, available: bool, stock: int) -> str:
@@ -1304,13 +1365,22 @@ def _package_keyboard(product_name: str) -> InlineKeyboardMarkup:
     packages = _packages_for_product(product_name)
     product_code = _catalog_lookup_key(product_name)
     if packages:
-        rows.extend(
-            [InlineKeyboardButton(
-                f"🎁 {package['display_name']}\n💰 {_format_vnd(int(package['price_vnd']))}đ\n📦 Còn: {int(package['available_count'] or 0)}",
-                callback_data=f"pkg:{product_code}:{str(package.get('package_code') or package['product_code']).upper()}",
-            )]
-            for package in packages
-        )
+        if product_code == "CAPCUT":
+            rows.extend(
+                [InlineKeyboardButton(
+                    str(package["display_name"]),
+                    callback_data=f"pkg:{product_code}:{str(package.get('package_code') or package['product_code']).upper()}",
+                )]
+                for package in packages
+            )
+        else:
+            rows.extend(
+                [InlineKeyboardButton(
+                    f"🎁 {package['display_name']}\n💰 {_format_vnd(int(package['price_vnd']))}đ\n📦 Còn: {int(package['available_count'] or 0)}",
+                    callback_data=f"pkg:{product_code}:{str(package.get('package_code') or package['product_code']).upper()}",
+                )]
+                for package in packages
+            )
     rows.append([InlineKeyboardButton("Quay lại sản phẩm", callback_data="menu_products")])
     rows.append([InlineKeyboardButton("Menu chính", callback_data="menu_main")])
     return InlineKeyboardMarkup(rows)
@@ -1371,6 +1441,8 @@ def _payment_info_text(context: ContextTypes.DEFAULT_TYPE, product_name: str = "
 
 
 def _package_text(product_name: str) -> str:
+    if _catalog_lookup_key(product_name) == "CAPCUT":
+        return "CAPCUT PRO\n\n👇 Chọn gói"
     stock = _menu_available_count(product_name)
     return _product_detail_text(product_name, stock > 0, stock)
 
@@ -1940,21 +2012,27 @@ def _get_package_info(product_key: str, package_key: str) -> dict[str, object] |
         repository = StoreRepository(_resolve_store_db_path())
         packages = repository.list_packages_by_category(_catalog_lookup_key(product_key))
         for package in packages:
-            canonical_package_code = _catalog_lookup_key(product_key)
+            category_code = _catalog_lookup_key(product_key)
+            selected_package_code = str(
+                package.get("package_code") or package.get("product_code") or category_code
+            ).strip().upper()
             candidate_codes = {
                 str(package.get("product_code", "") or "").strip().upper(),
                 str(package.get("code", "") or "").strip().upper(),
                 str(package.get("display_name", "") or "").strip().upper(),
                 str(package.get("name", "") or "").strip().upper(),
                 str(package.get("package_code", "") or "").strip().upper(),
-                str(canonical_package_code).strip().upper(),
+                selected_package_code,
             }
-            if package_key_norm in candidate_codes or _menu_stock_product_code(package_key_norm) in candidate_codes:
+            if category_code == "CAPCUT" and selected_package_code == "CAPCUT_365D":
+                candidate_codes.update({"CAPCUT", "CAPCUT_12M", "CAPCUT PRO 12M", "CAPCUT PRO 365D", "CAPCUT PRO 365 NGAY", "CAPCUT PRO 365 NGÀY"})
+            normalized_package_key = _menu_stock_product_code(package_key_norm)
+            if package_key_norm in candidate_codes or (normalized_package_key and normalized_package_key in candidate_codes):
                 return {
                     "product_id": str(package["id"]),
-                    "product_code": canonical_package_code,
-                    "package_code": canonical_package_code,
-                    "category_key": str(package.get("category_key") or product_key_norm),
+                    "product_code": selected_package_code,
+                    "package_code": selected_package_code,
+                    "category_key": str(package.get("category_key") or category_code),
                     "display_name": str(package["display_name"]),
                     "price_vnd": int(package["price_vnd"]),
                     "available_count": int(package["available_count"] or 0),
@@ -1964,14 +2042,15 @@ def _get_package_info(product_key: str, package_key: str) -> dict[str, object] |
                 }
         package = repository.get_product_details(package_key)
         if package and package["active"]:
+            selected_package_code = str(package["code"]).strip().upper()
             return {
                 "product_id": str(package["id"]),
-                "product_code": _catalog_lookup_key(product_key),
-                "package_code": _catalog_lookup_key(product_key),
+                "product_code": selected_package_code,
+                "package_code": selected_package_code,
                 "category_key": str(package.get("category_key") or product_key_norm),
                 "display_name": str(package["name"]),
                 "price_vnd": int(package["price_vnd"]),
-                "available_count": repository.get_stock_count(str(package["code"])),
+                "available_count": repository.get_stock_count(selected_package_code),
                 "source": "sqlite",
                 "price_source": "sqlite.products.price_vnd",
                 "reservation_sqlite": True,
