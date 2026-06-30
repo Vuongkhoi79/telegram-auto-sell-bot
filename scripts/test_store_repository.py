@@ -594,9 +594,9 @@ class StoreRepositoryTest(unittest.TestCase):
             self.assertIn("🎁 Gemini AI Pro\n💰 70.000đ\n📦 Còn: 8", package_buttons)
             self.assertFalse(any("90.000" in label or "199.000" in label or "499.000" in label for label in package_buttons))
             capcut_package_buttons = [button.text for row in bot._package_keyboard("CAPCUT PRO").inline_keyboard for button in row]
-            self.assertIn("CAPCUT PRO 30 ngày", capcut_package_buttons)
-            self.assertIn("CAPCUT PRO 60 ngày", capcut_package_buttons)
-            self.assertIn("CAPCUT PRO 365 ngày", capcut_package_buttons)
+            self.assertIn("🔴 CAPCUT PRO 30 ngày - 50.000đ [ Hết]", capcut_package_buttons)
+            self.assertIn("🔴 CAPCUT PRO 60 ngày - 90.000đ [ Hết]", capcut_package_buttons)
+            self.assertIn("🟢 CAPCUT PRO 365 ngày - 400.000đ [3]", capcut_package_buttons)
             capcut_package_callbacks = [button.callback_data for row in bot._package_keyboard("CAPCUT PRO").inline_keyboard for button in row]
             self.assertIn("pkg:CAPCUT:CAPCUT_30D", capcut_package_callbacks)
             self.assertIn("pkg:CAPCUT:CAPCUT_60D", capcut_package_callbacks)

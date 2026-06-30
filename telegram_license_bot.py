@@ -86,6 +86,11 @@ CAPCUT_PACKAGE_ORDER = (
     ("CAPCUT_60D", "CAPCUT PRO 60 ngày"),
     ("CAPCUT_365D", "CAPCUT PRO 365 ngày"),
 )
+CAPCUT_PACKAGE_FALLBACK_PRICES = {
+    "CAPCUT_30D": 50000,
+    "CAPCUT_60D": 90000,
+    "CAPCUT_365D": 420000,
+}
 PRODUCT_ORDER = [
     "ADOBE",
     "ARTLIST",
@@ -1313,7 +1318,7 @@ def _capcut_package_rows(packages: list[dict[str, object]]) -> list[dict[str, ob
                     "category_key": "CAPCUT",
                     "display_name": display_name,
                     "description": "",
-                    "price_vnd": 0,
+                    "price_vnd": CAPCUT_PACKAGE_FALLBACK_PRICES.get(package_code, 0),
                     "active": 0,
                     "menu_order": 100,
                     "product_group": "account",
@@ -1321,6 +1326,21 @@ def _capcut_package_rows(packages: list[dict[str, object]]) -> list[dict[str, ob
                 }
             )
     return rows
+
+
+def _capcut_package_button_text(package: dict[str, object]) -> str:
+    package_code = str(package.get("package_code") or package.get("product_code") or "").strip().upper()
+    available_count = int(package.get("available_count") or 0)
+    price_vnd = int(package.get("price_vnd") or CAPCUT_PACKAGE_FALLBACK_PRICES.get(package_code, 0) or 0)
+    icon = "🟢" if available_count > 0 else "🔴"
+    stock_text = str(available_count) if available_count > 0 else " Hết"
+    return f"{icon} {package['display_name']} - {_format_vnd(price_vnd)}đ [{stock_text}]"
+
+
+def _is_capcut_package_key(product_code: str, package_code: str) -> bool:
+    return _catalog_lookup_key(product_code) == "CAPCUT" and str(package_code or "").strip().upper() in {
+        code for code, _display_name in CAPCUT_PACKAGE_ORDER
+    }
 
 
 def _product_detail_text(product_name: str, available: bool, stock: int) -> str:
@@ -1368,7 +1388,7 @@ def _package_keyboard(product_name: str) -> InlineKeyboardMarkup:
         if product_code == "CAPCUT":
             rows.extend(
                 [InlineKeyboardButton(
-                    str(package["display_name"]),
+                    _capcut_package_button_text(package),
                     callback_data=f"pkg:{product_code}:{str(package.get('package_code') or package['product_code']).upper()}",
                 )]
                 for package in packages
@@ -2887,6 +2907,14 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         package = _get_package_info(product_code, package_code)
         if not package or int(package["available_count"]) <= 0:
+            if _is_capcut_package_key(product_code, package_code):
+                await _safe_edit_or_send(
+                    update,
+                    "Gói này hiện đã hết hàng. Vui lòng chọn gói khác.",
+                    _package_keyboard(product_code),
+                    edit=True,
+                )
+                return
             await _safe_edit_or_send(update, "Gói không hợp lệ.", _product_menu_keyboard(), edit=True)
             return
         log_sales_state(
