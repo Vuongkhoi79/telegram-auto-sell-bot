@@ -443,7 +443,10 @@ class StoreRepositoryTest(unittest.TestCase):
             sheet = workbook.create_sheet(sheet_name)
             sheet.append(REQUIRED_COLUMNS)
             for credential in credentials:
-                sheet.append([sheet_name, "AI", sheet_name, "personal", "30D", 100, 7, credential, "", 1])
+                if sheet_name == "CAPCUT":
+                    sheet.append([sheet_name, "AI", sheet_name, "personal", "365D", 400000, 365, credential, "", 1])
+                else:
+                    sheet.append([sheet_name, "AI", sheet_name, "personal", "30D", 100, 7, credential, "", 1])
         workbook.save(workbook_path)
         workbook.close()
 
@@ -453,7 +456,7 @@ class StoreRepositoryTest(unittest.TestCase):
         self.assertEqual(report["stock"], {"CAPCUT": 2, "GEMINI": 2})
         with closing(sqlite3.connect(self.db_path)) as connection:
             capcut = connection.execute("SELECT code, name, category, delivery_type, price_vnd FROM products WHERE code = 'CAPCUT'").fetchone()
-        self.assertEqual(capcut, ("CAPCUT", "CAPCUT PRO", "account", "account", 400000))
+        self.assertEqual(capcut, ("CAPCUT", "CAPCUT PRO 12M", "account", "account", 400000))
 
     def test_replace_preserves_reserved_and_delivered_inventory(self) -> None:
         workbook_path = Path(self.temp_dir.name) / "replace.xlsx"
@@ -573,7 +576,7 @@ class StoreRepositoryTest(unittest.TestCase):
             prices = dict(connection.execute("SELECT code, price_vnd FROM products WHERE code IN ('GEMINI', 'CAPCUT')").fetchall())
             names = dict(connection.execute("SELECT code, name FROM products WHERE code IN ('GEMINI', 'CAPCUT')").fetchall())
         self.assertEqual(prices["GEMINI"], 70000)
-        self.assertEqual(names["CAPCUT"], "CAPCUT PRO")
+        self.assertEqual(names["CAPCUT"], "CAPCUT PRO 12M")
 
         previous_store_db_path = os.environ.get("STORE_DB_PATH")
         previous_make_order_id = bot._make_order_id
@@ -581,7 +584,7 @@ class StoreRepositoryTest(unittest.TestCase):
             os.environ["STORE_DB_PATH"] = str(self.db_path)
             menu_buttons = [button.text for row in bot._product_menu_keyboard().inline_keyboard for button in row]
             self.assertIn("🟢 GEMINI AI (8)", menu_buttons)
-            self.assertIn("🟢 CAPCUT PRO (3)", menu_buttons)
+            self.assertIn("🟢 CAPCUT PRO 12M (3)", menu_buttons)
             self.assertNotIn("🟢 AI (8)", menu_buttons)
             self.assertFalse(any(label in {"🟢 AI (0)", "🔴 AI (0)", "🟢 AI (8)", "🔴 AI (8)"} for label in menu_buttons))
             self.assertFalse(any("90.000" in label or "199.000" in label or "499.000" in label for label in menu_buttons))
@@ -589,15 +592,15 @@ class StoreRepositoryTest(unittest.TestCase):
             package_buttons = [button.text for row in bot._package_keyboard("GEMINI AI").inline_keyboard for button in row]
             self.assertIn("🎁 Gemini AI Pro\n💰 70.000đ\n📦 Còn: 8", package_buttons)
             self.assertFalse(any("90.000" in label or "199.000" in label or "499.000" in label for label in package_buttons))
-            capcut_package_buttons = [button.text for row in bot._package_keyboard("CAPCUT PRO").inline_keyboard for button in row]
-            self.assertIn("🎁 CAPCUT PRO\n💰 400.000đ\n📦 Còn: 3", capcut_package_buttons)
-            self.assertNotIn("🎁 CAPCUT PRO\n💰 0đ\n📦 Còn: 0", capcut_package_buttons)
+            capcut_package_buttons = [button.text for row in bot._package_keyboard("CAPCUT PRO 12M").inline_keyboard for button in row]
+            self.assertIn("🎁 CAPCUT PRO 12M\n💰 400.000đ\n📦 Còn: 3", capcut_package_buttons)
+            self.assertNotIn("🎁 CAPCUT PRO 12M\n💰 0đ\n📦 Còn: 0", capcut_package_buttons)
 
             package = bot._get_package_info("GEMINI AI", "GEMINI")
             self.assertIsNotNone(package)
             self.assertEqual((package["price_vnd"], package["available_count"]), (70000, 8))
             self.assertEqual(bot._menu_available_count("GEMINI AI"), 8)
-            self.assertEqual(bot._menu_available_count("CAPCUT PRO"), 3)
+            self.assertEqual(bot._menu_available_count("CAPCUT PRO 12M"), 3)
 
             bot._make_order_id = lambda _product_name: "ORD-GEMINI-1"
             fake_update = type(
@@ -753,10 +756,10 @@ class StoreRepositoryTest(unittest.TestCase):
                 for code, name in (
                     ("CATALOG-CHATGPT", "CHATGPT"),
                     ("CATALOG-GEMINI", "GEMINI AI"),
-                    ("CATALOG-CAPCUT", "CAPCUT PRO"),
+                    ("CATALOG-CAPCUT", "CAPCUT PRO 12M"),
                     ("CHATGPT", "CHATGPT"),
                     ("GEMINI", "Gemini AI Pro"),
-                    ("CAPCUT", "CAPCUT PRO"),
+                    ("CAPCUT", "CAPCUT PRO 12M"),
                 ):
                     connection.execute(
                         """
@@ -775,7 +778,7 @@ class StoreRepositoryTest(unittest.TestCase):
         stock = {row["product_code"]: row["available_count"] for row in StoreRepository(self.db_path).list_menu_product_stock()}
         self.assertEqual(stock["CHATGPT"], 5)
         self.assertEqual(stock["GEMINI"], 8)
-        self.assertEqual(stock["CAPCUT"], 3)
+        self.assertEqual(stock["CAPCUT_12M"], 3)
 
     def test_cleanup_demo_inventory_preserves_real_reserved_and_delivered(self) -> None:
         now = datetime.now(timezone.utc).isoformat()

@@ -38,14 +38,23 @@ OPTIONAL_COLUMNS = (
 IMPORT_COLUMNS = tuple(dict.fromkeys((*REQUIRED_COLUMNS, *OPTIONAL_COLUMNS)))
 SKIPPED_SHEET_NAMES = {"README", "HƯỚNG DẪN", "HUONG DAN", "TEMPLATE"}
 DEFAULT_PRODUCT_DISPLAY_NAMES = {
-    "CAPCUT": "CAPCUT PRO",
+    "CAPCUT": "CAPCUT PRO 12M",
+    "CAPCUT_12M": "CAPCUT PRO 12M",
+    "CAPCUT_30D": "CAPCUT PRO 30D",
     "GEMINI": "Gemini AI Pro",
+}
+EXPECTED_PRODUCT_TERMS = {
+    "CAPCUT": {"price_vnd": 400000, "warranty_days": 365},
+    "CAPCUT_12M": {"price_vnd": 400000, "warranty_days": 365},
+    "CAPCUT_30D": {"price_vnd": 45000, "warranty_days": 30},
 }
 ALLOWED_PRODUCT_CODES = {
     "CHATGPT",
     "GEMINI",
     "GROK",
     "CAPCUT",
+    "CAPCUT_12M",
+    "CAPCUT_30D",
     "CLAUDE",
     "CURSOR",
     "CANVA",
@@ -105,6 +114,20 @@ def validate_product_code(product_code: str) -> None:
         raise ValueError(f"Unsupported product_code: {product_code}. Allowed product_code values: {allowed}")
 
 
+def validate_product_terms(product_code: str, row: dict[str, Any]) -> None:
+    expected = EXPECTED_PRODUCT_TERMS.get(product_code)
+    if not expected:
+        return
+    price_vnd = parse_int(row.get("price_vnd"), 0)
+    warranty_days = parse_int(row.get("warranty_days"), 0)
+    if price_vnd != expected["price_vnd"] or warranty_days != expected["warranty_days"]:
+        raise ValueError(
+            f"{product_code} requires price_vnd={expected['price_vnd']} "
+            f"and warranty_days={expected['warranty_days']}; got price_vnd={price_vnd}, "
+            f"warranty_days={warranty_days}"
+        )
+
+
 def canonical_product_code(product_code: str) -> str:
     normalized = text(product_code).upper()
     if normalized in ALLOWED_PRODUCT_CODES:
@@ -116,6 +139,8 @@ def canonical_product_code(product_code: str) -> str:
 
 
 def product_code_candidates(product_code: str) -> list[str]:
+    if product_code in {"CAPCUT_12M", "CAPCUT_30D"}:
+        return [product_code]
     candidates = [product_code]
     for alias in ACCOUNT_PRODUCT_CODE_ALIASES.get(product_code, ()):
         alias = alias.upper()
@@ -280,7 +305,9 @@ def read_rows(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
                     for column in IMPORT_COLUMNS
                 }
                 if sheet_is_product:
-                    row["product_code"] = sheet_code
+                    row_product_code = text(row.get("product_code")).upper()
+                    if not row_product_code or row_product_code == sheet_code:
+                        row["product_code"] = sheet_code
                     row["__sheet_product"] = True
                 yield row_number, row
     finally:
@@ -342,7 +369,7 @@ def available_stock_for_code(connection: sqlite3.Connection, product_code: str) 
 
 
 def should_use_canonical_product(product_code: str, row: dict[str, Any]) -> bool:
-    return product_code == "CAPCUT" or bool(row.get("__sheet_product"))
+    return product_code.startswith("CAPCUT") or bool(row.get("__sheet_product"))
 
 
 def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE, mode: str = "replace") -> dict[str, Any]:
@@ -381,6 +408,7 @@ def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE, m
             try:
                 try:
                     validate_product_code(product_code)
+                    validate_product_terms(product_code, row)
                 except ValueError:
                     connection.execute(f"RELEASE SAVEPOINT {savepoint}")
                     continue
@@ -419,6 +447,7 @@ def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE, m
                 if not product_code:
                     raise ValueError("product_code is required")
                 validate_product_code(product_code)
+                validate_product_terms(product_code, row)
                 credential = credential_from_row(row)
                 now = utc_now_iso()
                 use_canonical_product = should_use_canonical_product(product_code, row)

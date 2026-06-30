@@ -35,7 +35,9 @@ CATALOG_COLUMNS = {
 }
 
 CANONICAL_CATALOG_PRODUCTS = {
-    "CAPCUT": {"name": "CAPCUT PRO", "price_vnd": 400000},
+    "CAPCUT": {"name": "CAPCUT PRO 12M", "price_vnd": 400000},
+    "CAPCUT_12M": {"name": "CAPCUT PRO 12M", "price_vnd": 400000},
+    "CAPCUT_30D": {"name": "CAPCUT PRO 30D", "price_vnd": 45000},
     "GEMINI": {"name": "Gemini AI Pro", "price_vnd": 70000},
 }
 
@@ -55,8 +57,12 @@ ACCOUNT_PRODUCT_CODE_ALIASES: dict[str, tuple[str, ...]] = {
     "ARTLIST": ("ARTLIST-1M-PRIVATE",),
     "CANVA": ("CANVA-PRO-1M-PRIVATE",),
     "CANVA PRO": ("CANVA-PRO-1M-PRIVATE",),
-    "CAPCUT": ("CAPCUT-PRO-1M-PRIVATE",),
-    "CAPCUT PRO": ("CAPCUT-PRO-1M-PRIVATE",),
+    "CAPCUT": ("CAPCUT-PRO-1M-PRIVATE", "CAPCUT_12M"),
+    "CAPCUT PRO": ("CAPCUT-PRO-1M-PRIVATE", "CAPCUT_12M"),
+    "CAPCUT_12M": ("CAPCUT", "CAPCUT-PRO-1M-PRIVATE", "CAPCUT-PRO-12M-PRIVATE", "CAPCUT PRO 12M"),
+    "CAPCUT PRO 12M": ("CAPCUT_12M", "CAPCUT", "CAPCUT-PRO-1M-PRIVATE", "CAPCUT-PRO-12M-PRIVATE"),
+    "CAPCUT_30D": ("CAPCUT-PRO-30D-PRIVATE", "CAPCUT PRO 30D"),
+    "CAPCUT PRO 30D": ("CAPCUT_30D", "CAPCUT-PRO-30D-PRIVATE"),
     "CHATGPT": ("GPT-PLUS-1M-PRIVATE",),
     "CLAUDE": ("CLAUDE-PRO-1M-PRIVATE",),
     "CLAUDE AI": ("CLAUDE-PRO-1M-PRIVATE",),
@@ -472,8 +478,10 @@ class StoreRepository:
                                 THEN 'CHATGPT'
                             WHEN UPPER(p.code) = 'GEM-AIPRO-1M-PRIVATE'
                                 THEN 'GEMINI'
-                            WHEN UPPER(p.code) = 'CAPCUT-PRO-1M-PRIVATE'
-                                THEN 'CAPCUT'
+                            WHEN UPPER(p.code) IN ('CAPCUT', 'CAPCUT_12M', 'CAPCUT-PRO-1M-PRIVATE', 'CAPCUT-PRO-12M-PRIVATE')
+                                THEN 'CAPCUT_12M'
+                            WHEN UPPER(p.code) IN ('CAPCUT_30D', 'CAPCUT-PRO-30D-PRIVATE')
+                                THEN 'CAPCUT_30D'
                             WHEN UPPER(p.code) = 'GROK-SUPER-1M-PRIVATE'
                                 THEN 'GROK'
                             ELSE UPPER(p.code)
@@ -508,7 +516,11 @@ class StoreRepository:
                   ON i.product_id = mp.id
                  AND i.status = 'available'
                  AND mp.is_catalog = 0
-                 AND (UPPER(mp.code) = mp.menu_code OR real_product.id IS NULL)
+                 AND (
+                       UPPER(mp.code) = mp.menu_code
+                    OR real_product.id IS NULL
+                    OR mp.menu_code IN ('CAPCUT_12M', 'CAPCUT_30D')
+                 )
                 GROUP BY mp.menu_code
                 ORDER BY menu_order, display_name COLLATE NOCASE, product_code
                 """
@@ -550,13 +562,33 @@ class StoreRepository:
         with self._session() as connection:
             rows = connection.execute(
                 """
+                WITH package_products AS (
+                    SELECT
+                        p.*,
+                        CASE
+                            WHEN UPPER(p.code) LIKE 'CATALOG-%'
+                                THEN SUBSTR(UPPER(p.code), LENGTH('CATALOG-') + 1)
+                            WHEN UPPER(p.code) = 'GPT-PLUS-1M-PRIVATE'
+                                THEN 'CHATGPT'
+                            WHEN UPPER(p.code) = 'GEM-AIPRO-1M-PRIVATE'
+                                THEN 'GEMINI'
+                            WHEN UPPER(p.code) IN ('CAPCUT', 'CAPCUT_12M', 'CAPCUT-PRO-1M-PRIVATE', 'CAPCUT-PRO-12M-PRIVATE')
+                                THEN 'CAPCUT_12M'
+                            WHEN UPPER(p.code) IN ('CAPCUT_30D', 'CAPCUT-PRO-30D-PRIVATE')
+                                THEN 'CAPCUT_30D'
+                            WHEN UPPER(p.code) = 'GROK-SUPER-1M-PRIVATE'
+                                THEN 'GROK'
+                            ELSE UPPER(COALESCE(NULLIF(p.category_key, ''), NULLIF(p.category, ''), p.code))
+                        END AS menu_code
+                    FROM products AS p
+                    WHERE p.active = 1 AND p.product_group = ?
+                )
                 SELECT p.id, p.code AS product_code, p.name AS display_name, p.category_key,
                        p.description, p.price_vnd, p.active, p.menu_order, p.product_group,
                        SUM(CASE WHEN i.status = 'available' THEN 1 ELSE 0 END) AS available_count
-                FROM products AS p
+                FROM package_products AS p
                 LEFT JOIN inventory_items AS i ON i.product_id = p.id
-                WHERE p.active = 1 AND p.product_group = ?
-                  AND UPPER(COALESCE(NULLIF(p.category_key, ''), NULLIF(p.category, ''), p.code)) = ?
+                WHERE p.menu_code = ?
                 GROUP BY p.id, p.code, p.name, p.category_key, p.description,
                          p.price_vnd, p.active, p.menu_order, p.product_group
                 HAVING available_count > 0 OR p.price_vnd > 0
@@ -587,31 +619,26 @@ class StoreRepository:
     def get_stock_count(self, product_code: str) -> int:
         with self._session() as connection:
             candidates = self._product_code_candidates(product_code)
-            if candidates:
-                exact_product = connection.execute(
-                    "SELECT id FROM products WHERE code = ?",
-                    (candidates[0],),
-                ).fetchone()
-                if exact_product:
-                    row = connection.execute(
-                        "SELECT COUNT(*) AS stock FROM inventory_items WHERE product_id = ? AND status = 'available'",
-                        (exact_product["id"],),
-                    ).fetchone()
-                    return int(row["stock"] if row else 0)
-            row = None
+            total = 0
+            seen_product_ids: set[str] = set()
             for candidate in candidates:
-                row = connection.execute(
+                rows = connection.execute(
                     """
-                    SELECT COUNT(*) AS stock
+                    SELECT product.id, COUNT(item.id) AS stock
                     FROM inventory_items AS item
                     JOIN products AS product ON product.id = item.product_id
                     WHERE product.code = ? AND item.status = 'available'
+                    GROUP BY product.id
                     """,
                     (candidate,),
-                ).fetchone()
-                if row and int(row["stock"] or 0) > 0:
-                    break
-        return int(row["stock"] if row else 0)
+                ).fetchall()
+                for row in rows:
+                    product_id = str(row["id"])
+                    if product_id in seen_product_ids:
+                        continue
+                    seen_product_ids.add(product_id)
+                    total += int(row["stock"] or 0)
+        return total
 
     def get_stock_summary(self) -> list[dict[str, Any]]:
         with self._session() as connection:

@@ -85,7 +85,8 @@ PRODUCT_ORDER = [
     "ADOBE",
     "ARTLIST",
     "CANVA",
-    "CAPCUT PRO",
+    "CAPCUT PRO 30D",
+    "CAPCUT PRO 12M",
     "CHATGPT",
     "CLAUDE AI",
     "CURSOR AI",
@@ -103,7 +104,9 @@ PRODUCT_ORDER = [
     "VIEWMAX",
 ]
 CATALOG_DISPLAY_NAMES = {
-    "CAPCUT": "CAPCUT PRO",
+    "CAPCUT": "CAPCUT PRO 12M",
+    "CAPCUT_12M": "CAPCUT PRO 12M",
+    "CAPCUT_30D": "CAPCUT PRO 30D",
     "GEMINI": "GEMINI AI",
 }
 
@@ -113,8 +116,12 @@ TELEGRAM_PRODUCT_CODE_MAP = {
     "ARTLIST": "ARTLIST-1M-PRIVATE",
     "CANVA": "CANVA-PRO-1M-PRIVATE",
     "CANVA PRO": "CANVA-PRO-1M-PRIVATE",
-    "CAPCUT": "CAPCUT-PRO-1M-PRIVATE",
-    "CAPCUT PRO": "CAPCUT-PRO-1M-PRIVATE",
+    "CAPCUT": "CAPCUT_12M",
+    "CAPCUT PRO": "CAPCUT_12M",
+    "CAPCUT_12M": "CAPCUT_12M",
+    "CAPCUT PRO 12M": "CAPCUT_12M",
+    "CAPCUT_30D": "CAPCUT_30D",
+    "CAPCUT PRO 30D": "CAPCUT_30D",
     "CHATGPT": "GPT-PLUS-1M-PRIVATE",
     "CLAUDE": "CLAUDE-PRO-1M-PRIVATE",
     "CLAUDE AI": "CLAUDE-PRO-1M-PRIVATE",
@@ -635,8 +642,12 @@ def _menu_stock_product_code(product_key: str) -> str | None:
         return "GEMINI"
     if normalized_key.startswith("GROK"):
         return "GROK"
+    if normalized_key.startswith("CAPCUT_30D") or "CAPCUT PRO 30D" in normalized_key:
+        return "CAPCUT_30D"
+    if normalized_key.startswith("CAPCUT_12M") or "CAPCUT PRO 12M" in normalized_key:
+        return "CAPCUT_12M"
     if normalized_key.startswith("CAPCUT"):
-        return "CAPCUT"
+        return "CAPCUT_12M"
     if normalized_key.startswith("VEO3"):
         return "VEO3"
     if normalized_key.startswith("CLAUDE"):
