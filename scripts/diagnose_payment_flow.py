@@ -44,6 +44,7 @@ def main() -> int:
         shutil.copy2(source_db, temp_db)
         previous_store_db_path = os.environ.get("STORE_DB_PATH")
         os.environ["STORE_DB_PATH"] = str(temp_db)
+        previous_make_order_id = bot._make_order_id
         try:
             payment_service = PaymentService(
                 PaymentConfig(bank_name="ACB", bank_account="123456789", bank_account_name="AI STORE", qr_url="")
@@ -54,7 +55,11 @@ def main() -> int:
                 ),
                 user_data={},
             )
-            package = bot._get_package_info(product_code, args.package) or bot._get_package_info(product_code, product_code)
+            package = bot._get_package_info(product_code, args.package)
+            if not package:
+                print("package resolves: False")
+                print("order created: no (package is unavailable or invalid)")
+                return 0
             package_code = str(package.get("package_code") or package.get("product_code") or args.package).upper()
 
             state_before = snapshot_sales_state(
@@ -91,7 +96,6 @@ def main() -> int:
                     reply_document=_noop,
                 ),
             )
-            previous_make_order_id = bot._make_order_id
             bot._make_order_id = lambda _product_name: "ORD-DIAG-PAYMENT"
             try:
                 order = bot._create_sales_order(fake_order_update, product_code, package_code, quantity)
