@@ -1281,6 +1281,29 @@ def _start_help_text() -> str:
     )
 
 
+def _dtkd_admin_help_text() -> str:
+    return (
+        "🤝 Quản trị ĐTKD\n\n"
+        "/dtkd_list\n"
+        "/dtkd_approve <ma_dtkd>\n"
+        "/dtkd_reject <ma_dtkd>\n"
+        "/dtkd_lock <ma_dtkd>\n"
+        "/dtkd_unlock <ma_dtkd>\n"
+        "/dtkd_withdrawals\n"
+        "/dtkd_pay <withdrawal_id>\n"
+        "/dtkd_approve_commission <commission_id_or_order_id>\n"
+        "/dtkd_report <ma_dtkd>"
+    )
+
+
+def _admin_help_text() -> str:
+    return (
+        f"{_start_help_text()}\n\n"
+        "Admin:\n"
+        "Dùng /dtkd để xem lệnh quản trị ĐTKD."
+    )
+
+
 def _product_list_text() -> str:
     lines = ["🎁 Sản phẩm", ""]
     for item in _catalog_category_items():
@@ -1303,31 +1326,37 @@ def _ai_daily_text() -> str:
 
 def _load_business_partners() -> dict[str, object]:
     if not BUSINESS_PARTNERS_PATH.exists():
-        return {
+        data = {
             "partners": [],
             "referrals": [],
             "order_refs": [],
             "commissions": [],
             "withdrawals": [],
+            "business_policies": [],
             "commission_policies": [],
             "kpi_rules": [],
             "retention_bonus_rules": [],
             "performance_bonus_rules": [],
         }
+        _ensure_business_policy_defaults(data)
+        return data
     try:
         data = json.loads(BUSINESS_PARTNERS_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {
+        data = {
             "partners": [],
             "referrals": [],
             "order_refs": [],
             "commissions": [],
             "withdrawals": [],
+            "business_policies": [],
             "commission_policies": [],
             "kpi_rules": [],
             "retention_bonus_rules": [],
             "performance_bonus_rules": [],
         }
+        _ensure_business_policy_defaults(data)
+        return data
     if not isinstance(data, dict):
         data = {}
     for key in (
@@ -1336,6 +1365,7 @@ def _load_business_partners() -> dict[str, object]:
         "order_refs",
         "commissions",
         "withdrawals",
+        "business_policies",
         "commission_policies",
         "kpi_rules",
         "retention_bonus_rules",
@@ -1356,6 +1386,8 @@ def _load_business_partners() -> dict[str, object]:
             }
         ]
     changed = False
+    if _ensure_business_policy_defaults(data):
+        changed = True
     for partner in _dtkd_list(data, "partners"):
         before = json.dumps(partner, ensure_ascii=False, sort_keys=True)
         normalize_partner_profile(partner)
@@ -1377,6 +1409,115 @@ def _dtkd_list(data: dict[str, object], key: str) -> list[dict[str, object]]:
         value = []
         data[key] = value
     return [item for item in value if isinstance(item, dict)]
+
+
+def _default_dtkd_business_policy() -> dict[str, object]:
+    return {
+        "policy_id": "POL-DTKD-COMMISSION-WITHDRAWAL-V1",
+        "policy_type": "dtkd_commission_withdrawal",
+        "scope": {"type": "global"},
+        "legacy_policy_ids": ["DTKD_TRIAL_3M_REVENUE_TIERS"],
+        "effective_from": "2026-07-01T00:00:00+00:00",
+        "effective_to": None,
+        "priority": 100,
+        "status": "active",
+        "config": {
+            "base_type": "revenue",
+            "fund_cap_rate": DTKD_PARTNER_FUND_CAP_RATE,
+            "trial_months": DTKD_TRIAL_MONTHS,
+            "commission_initial_status": "pending_reconcile",
+            "withdrawal_min_vnd": DTKD_WITHDRAW_MIN_VND,
+            "commission_tiers": list(DTKD_COMMISSION_TIERS),
+            "kpi_enabled": False,
+            "future_kpi_metrics": ["revenue", "new_customers", "renewal_customers", "refund_rate", "policy_compliance"],
+        },
+    }
+
+
+def _ensure_business_policy_defaults(data: dict[str, object]) -> bool:
+    changed = False
+    policies = data.setdefault("business_policies", [])
+    if not isinstance(policies, list):
+        policies = []
+        data["business_policies"] = policies
+        changed = True
+    if not any(
+        isinstance(policy, dict)
+        and str(policy.get("policy_id", "")) == "POL-DTKD-COMMISSION-WITHDRAWAL-V1"
+        for policy in policies
+    ):
+        policies.append(_default_dtkd_business_policy())
+        changed = True
+    return changed
+
+
+def _business_policy_config(policy: dict[str, object] | None) -> dict[str, object]:
+    if not isinstance(policy, dict):
+        return {}
+    config = policy.get("config")
+    return config if isinstance(config, dict) else {}
+
+
+def _active_business_policy(policy_type: str, *, partner: dict[str, object] | None = None) -> dict[str, object]:
+    fallback = _default_dtkd_business_policy() if policy_type == "dtkd_commission_withdrawal" else {}
+    try:
+        data = _load_business_partners()
+    except (OSError, RuntimeError, ValueError):
+        return fallback
+    policies = [
+        policy
+        for policy in _dtkd_list(data, "business_policies")
+        if str(policy.get("policy_type", "")) == policy_type
+        and str(policy.get("status", "active")).lower() == "active"
+    ]
+    if not policies:
+        return fallback
+    partner_policy_id = str((partner or {}).get("commission_policy_id", "") or "")
+    if partner_policy_id:
+        for policy in policies:
+            legacy_ids = policy.get("legacy_policy_ids")
+            if not isinstance(legacy_ids, list):
+                legacy_ids = []
+            if partner_policy_id == str(policy.get("policy_id", "")) or partner_policy_id in {str(item) for item in legacy_ids}:
+                return policy
+    return sorted(policies, key=lambda item: int(item.get("priority", 0) or 0), reverse=True)[0]
+
+
+def _dtkd_business_policy(partner: dict[str, object] | None = None) -> dict[str, object]:
+    return _active_business_policy("dtkd_commission_withdrawal", partner=partner)
+
+
+def _dtkd_policy_config(partner: dict[str, object] | None = None) -> dict[str, object]:
+    config = _business_policy_config(_dtkd_business_policy(partner))
+    if not config:
+        return _business_policy_config(_default_dtkd_business_policy())
+    return config
+
+
+def _dtkd_policy_fund_cap_rate(partner: dict[str, object] | None = None) -> float:
+    try:
+        return float(_dtkd_policy_config(partner).get("fund_cap_rate", DTKD_PARTNER_FUND_CAP_RATE))
+    except (TypeError, ValueError):
+        return DTKD_PARTNER_FUND_CAP_RATE
+
+
+def _dtkd_policy_trial_months(partner: dict[str, object] | None = None) -> int:
+    try:
+        return int(_dtkd_policy_config(partner).get("trial_months", DTKD_TRIAL_MONTHS))
+    except (TypeError, ValueError):
+        return DTKD_TRIAL_MONTHS
+
+
+def _dtkd_withdraw_min_vnd(partner: dict[str, object] | None = None) -> int:
+    try:
+        return int(_dtkd_policy_config(partner).get("withdrawal_min_vnd", DTKD_WITHDRAW_MIN_VND))
+    except (TypeError, ValueError):
+        return DTKD_WITHDRAW_MIN_VND
+
+
+def _dtkd_commission_initial_status(partner: dict[str, object] | None = None) -> str:
+    status = str(_dtkd_policy_config(partner).get("commission_initial_status", "pending_reconcile") or "").strip()
+    return status or "pending_reconcile"
 
 
 def _partner_internal_id(telegram_user_id: int) -> str:
@@ -1698,19 +1839,28 @@ def _dtkd_is_in_trial_period(partner: dict[str, object], now: datetime | None = 
         return True
     now = now or _utc_now()
     trial_month_index = (now.year - approved_at.year) * 12 + now.month - approved_at.month
-    return trial_month_index < DTKD_TRIAL_MONTHS
+    return trial_month_index < _dtkd_policy_trial_months(partner)
 
 
-def _dtkd_commission_rate_for_monthly_revenue(monthly_revenue: int) -> dict[str, object]:
+def _dtkd_commission_rate_for_monthly_revenue(monthly_revenue: int, policy: dict[str, object] | None = None) -> dict[str, object]:
     revenue = int(monthly_revenue or 0)
-    for tier in DTKD_COMMISSION_TIERS:
+    config = _business_policy_config(policy) if policy else _dtkd_policy_config()
+    raw_tiers = config.get("commission_tiers", config.get("tiers", DTKD_COMMISSION_TIERS))
+    tiers = raw_tiers if isinstance(raw_tiers, (list, tuple)) and raw_tiers else DTKD_COMMISSION_TIERS
+    try:
+        fund_cap_rate = float(config.get("fund_cap_rate", DTKD_PARTNER_FUND_CAP_RATE))
+    except (TypeError, ValueError):
+        fund_cap_rate = DTKD_PARTNER_FUND_CAP_RATE
+    for tier in tiers:
+        if not isinstance(tier, dict):
+            continue
         min_revenue = int(tier["min_revenue"])
         max_revenue = tier["max_revenue"]
         if revenue >= min_revenue and (max_revenue is None or revenue < int(max_revenue)):
-            rate = min(float(tier["rate"]), DTKD_PARTNER_FUND_CAP_RATE)
+            rate = min(float(tier["rate"]), fund_cap_rate)
             return {**tier, "rate": rate}
-    last_tier = DTKD_COMMISSION_TIERS[-1]
-    return {**last_tier, "rate": min(float(last_tier["rate"]), DTKD_PARTNER_FUND_CAP_RATE)}
+    last_tier = tiers[-1] if isinstance(tiers[-1], dict) else DTKD_COMMISSION_TIERS[-1]
+    return {**last_tier, "rate": min(float(last_tier["rate"]), fund_cap_rate)}
 
 
 def _dtkd_order_total(order: dict[str, object]) -> int:
@@ -1741,11 +1891,16 @@ def _dtkd_commission_policy_snapshot(partner: dict[str, object], order: dict[str
     order_id = str(order.get("order_id", ""))
     month_revenue_before = _dtkd_month_revenue_for_partner(partner, month_key, exclude_order_id=order_id)
     month_revenue_after = month_revenue_before + order_total
-    tier = _dtkd_commission_rate_for_monthly_revenue(month_revenue_after)
-    rate = min(float(tier["rate"]), DTKD_PARTNER_FUND_CAP_RATE)
+    policy = _dtkd_business_policy(partner)
+    config = _business_policy_config(policy)
+    fund_cap_rate = _dtkd_policy_fund_cap_rate(partner)
+    tier = _dtkd_commission_rate_for_monthly_revenue(month_revenue_after, policy)
+    rate = min(float(tier["rate"]), fund_cap_rate)
     return {
-        "policy_id": str(partner.get("commission_policy_id", "DTKD_TRIAL_3M_REVENUE_TIERS") or "DTKD_TRIAL_3M_REVENUE_TIERS"),
-        "base_type": "revenue",
+        "policy_id": str(policy.get("policy_id", partner.get("commission_policy_id", "DTKD_TRIAL_3M_REVENUE_TIERS")) or "DTKD_TRIAL_3M_REVENUE_TIERS"),
+        "policy_type": str(policy.get("policy_type", "dtkd_commission_withdrawal") or "dtkd_commission_withdrawal"),
+        "scope": policy.get("scope", {"type": "global"}),
+        "base_type": str(config.get("base_type", "revenue") or "revenue"),
         "month": month_key,
         "month_revenue_before": month_revenue_before,
         "month_revenue_after": month_revenue_after,
@@ -1753,11 +1908,13 @@ def _dtkd_commission_policy_snapshot(partner: dict[str, object], order: dict[str
         "tier_min_revenue": tier.get("min_revenue", 0),
         "tier_max_revenue": tier.get("max_revenue"),
         "rate": rate,
-        "fund_cap_rate": DTKD_PARTNER_FUND_CAP_RATE,
-        "trial_months": DTKD_TRIAL_MONTHS,
+        "fund_cap_rate": fund_cap_rate,
+        "trial_months": _dtkd_policy_trial_months(partner),
+        "commission_initial_status": _dtkd_commission_initial_status(partner),
+        "withdrawal_min_vnd": _dtkd_withdraw_min_vnd(partner),
         "in_trial_period": _dtkd_is_in_trial_period(partner),
-        "kpi_enabled": False,
-        "future_kpi_metrics": ["revenue", "new_customers", "renewal_customers", "refund_rate", "policy_compliance"],
+        "kpi_enabled": bool(config.get("kpi_enabled", False)),
+        "future_kpi_metrics": config.get("future_kpi_metrics", ["revenue", "new_customers", "renewal_customers", "refund_rate", "policy_compliance"]),
     }
 
 
@@ -1795,7 +1952,7 @@ def _record_partner_commission(order: dict[str, object]) -> None:
     if not partner:
         return
     policy = _dtkd_commission_policy_snapshot(partner, order)
-    rate = min(float(policy["rate"]), DTKD_PARTNER_FUND_CAP_RATE)
+    rate = min(float(policy["rate"]), float(policy.get("fund_cap_rate", DTKD_PARTNER_FUND_CAP_RATE)))
     commissions.append(
         {
             "commission_id": f"COM-{order_id}",
@@ -1806,10 +1963,10 @@ def _record_partner_commission(order: dict[str, object]) -> None:
             "referral_code": order_ref.get("referral_code", ""),
             "revenue": amount,
             "rate": rate,
-            "fund_cap_rate": DTKD_PARTNER_FUND_CAP_RATE,
+            "fund_cap_rate": float(policy.get("fund_cap_rate", DTKD_PARTNER_FUND_CAP_RATE)),
             "policy_snapshot": policy,
             "amount": int(amount * rate),
-            "status": "pending_reconcile",
+            "status": str(policy.get("commission_initial_status", "pending_reconcile") or "pending_reconcile"),
             "created_at": _utc_now_iso(),
             "approved_at": "",
             "paid_at": "",
@@ -2269,11 +2426,12 @@ async def _send_business_partner_screen(update: Update, context: ContextTypes.DE
                 f"Tổng thu nhập: {_format_vnd(int(metrics['total_income']))}đ"
             )
         elif action == "withdraw":
-            if int(metrics["available_commission"]) < DTKD_WITHDRAW_MIN_VND:
+            withdraw_min_vnd = _dtkd_withdraw_min_vnd(partner)
+            if int(metrics["available_commission"]) < withdraw_min_vnd:
                 text = (
                     "🏦 Rút tiền\n\n"
                     f"Số dư có thể rút: {_format_vnd(int(metrics['available_commission']))}đ\n"
-                    f"Số dư tối thiểu để rút: {_format_vnd(DTKD_WITHDRAW_MIN_VND)}đ"
+                    f"Số dư tối thiểu để rút: {_format_vnd(withdraw_min_vnd)}đ"
                 )
             else:
                 context.user_data["dtkd_withdraw"] = {"step": "amount"}
@@ -3407,9 +3565,10 @@ async def _handle_dtkd_withdraw_text(update: Update, context: ContextTypes.DEFAU
         return True
     metrics = _partner_metrics(partner)
     available = int(metrics["available_commission"])
-    if amount < DTKD_WITHDRAW_MIN_VND or amount > available:
+    withdraw_min_vnd = _dtkd_withdraw_min_vnd(partner)
+    if amount < withdraw_min_vnd or amount > available:
         await update.effective_message.reply_text(
-            f"Số tiền không hợp lệ. Có thể rút: {_format_vnd(available)}đ, tối thiểu: {_format_vnd(DTKD_WITHDRAW_MIN_VND)}đ."
+            f"Số tiền không hợp lệ. Có thể rút: {_format_vnd(available)}đ, tối thiểu: {_format_vnd(withdraw_min_vnd)}đ."
         )
         return True
     data = _load_business_partners()
@@ -4036,6 +4195,20 @@ async def cmd_list_licenses(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.effective_message.reply_text("\n".join(lines))
 
 
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = int(getattr(getattr(update, "effective_user", None), "id", 0) or 0)
+    admin_ids = context.application.bot_data.get("admin_ids", set())
+    text = _admin_help_text() if _is_admin(user_id, admin_ids) else _start_help_text()
+    await update.effective_message.reply_text(text, reply_markup=_main_menu_keyboard())
+
+
+async def cmd_dtkd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
+        await update.effective_message.reply_text("Khong co quyen.")
+        return
+    await update.effective_message.reply_text(_dtkd_admin_help_text())
+
+
 async def cmd_dtkd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
         await update.effective_message.reply_text("Khong co quyen.")
@@ -4605,6 +4778,7 @@ def build_application() -> Application:
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("license", cmd_license))
+    app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("grant_free", cmd_grant_free))
     app.add_handler(CommandHandler("grant_permanent", cmd_grant_permanent))
@@ -4622,6 +4796,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("transactions", cmd_transactions))
     app.add_handler(CommandHandler("revoke", cmd_revoke))
     app.add_handler(CommandHandler("list_licenses", cmd_list_licenses))
+    app.add_handler(CommandHandler("dtkd", cmd_dtkd))
     app.add_handler(CommandHandler("dtkd_list", cmd_dtkd_list))
     app.add_handler(CommandHandler("dtkd_approve", cmd_dtkd_approve))
     app.add_handler(CommandHandler("dtkd_reject", cmd_dtkd_reject))

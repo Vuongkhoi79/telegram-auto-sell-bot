@@ -65,7 +65,7 @@ async def main() -> None:
         (),
         {
             "args": [],
-            "application": type("FakeApp", (), {"bot_data": {"license_service": FakeLicenseService()}})(),
+            "application": type("FakeApp", (), {"bot_data": {"license_service": FakeLicenseService(), "admin_ids": {999}}})(),
         },
     )()
     start_message = FakeMessage()
@@ -118,6 +118,26 @@ async def main() -> None:
         "dtkd_kpi",
         "dtkd_rank",
     }.issubset(callback_data(partner_keyboard))
+
+    user_help_message = FakeMessage()
+    user_help_update = type("FakeUpdate", (), {"effective_user": FakeUser(), "effective_message": user_help_message})()
+    await bot.cmd_help(user_help_update, context)
+    user_help_text, _ = user_help_message.replies[-1]
+    assert "/dtkd" not in user_help_text
+
+    admin_user = type("FakeAdminUser", (), {"id": 999, "username": "admin", "full_name": "Admin"})()
+    admin_help_message = FakeMessage()
+    admin_help_update = type("FakeUpdate", (), {"effective_user": admin_user, "effective_message": admin_help_message})()
+    await bot.cmd_help(admin_help_update, context)
+    admin_help_text, _ = admin_help_message.replies[-1]
+    assert "Dùng /dtkd" in admin_help_text
+
+    dtkd_message = FakeMessage()
+    dtkd_update = type("FakeUpdate", (), {"effective_user": admin_user, "effective_message": dtkd_message})()
+    await bot.cmd_dtkd(dtkd_update, context)
+    dtkd_text, _ = dtkd_message.replies[-1]
+    assert "/dtkd_approve <ma_dtkd>" in dtkd_text
+    assert "/dtkd_approve_commission <commission_id_or_order_id>" in dtkd_text
     print("TOOL_MENU_TEST=PASS")
 
 
