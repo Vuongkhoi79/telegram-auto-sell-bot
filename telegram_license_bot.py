@@ -55,9 +55,17 @@ PROCESSED_TRANSACTIONS_PATH = PROJECT_ROOT / "processed_transactions.json"
 AI_DAILY_PRODUCT_NAME = "AI DAILY VIDEO CREATOR"
 DEFAULT_DOWNLOAD_URL = "https://drive.google.com/file/d/1LtCqibeDyg11hmagprhFz6zkwgquwow5/view?usp=sharing"
 ORDER_TTL_MINUTES = 5
-DTKD_COMMISSION_RATE = float(os.environ.get("DTKD_COMMISSION_RATE", "0.20") or "0.20")
-DTKD_KPI_TARGET_VND = int(os.environ.get("DTKD_KPI_TARGET_VND", "10000000") or "10000000")
-DTKD_KPI_BONUS_VND = int(os.environ.get("DTKD_KPI_BONUS_VND", "500000") or "500000")
+DTKD_PARTNER_FUND_CAP_RATE = float(os.environ.get("DTKD_PARTNER_FUND_CAP_RATE", "0.32") or "0.32")
+DTKD_TRIAL_MONTHS = int(os.environ.get("DTKD_TRIAL_MONTHS", "3") or "3")
+DTKD_COMMISSION_TIERS = (
+    {"min_revenue": 0, "max_revenue": 10_000_000, "rate": 0.20, "name": "0-10M"},
+    {"min_revenue": 10_000_000, "max_revenue": 30_000_000, "rate": 0.22, "name": "10-30M"},
+    {"min_revenue": 30_000_000, "max_revenue": 70_000_000, "rate": 0.24, "name": "30-70M"},
+    {"min_revenue": 70_000_000, "max_revenue": 150_000_000, "rate": 0.26, "name": "70-150M"},
+    {"min_revenue": 150_000_000, "max_revenue": None, "rate": 0.28, "name": "150M+"},
+)
+DTKD_KPI_TARGET_VND = int(os.environ.get("DTKD_KPI_TARGET_VND", "0") or "0")
+DTKD_KPI_BONUS_VND = int(os.environ.get("DTKD_KPI_BONUS_VND", "0") or "0")
 DTKD_WITHDRAW_MIN_VND = int(os.environ.get("DTKD_WITHDRAW_MIN_VND", "100000") or "100000")
 PRODUCT_PACKAGES = {
     "7D": 99000,
@@ -1295,16 +1303,58 @@ def _ai_daily_text() -> str:
 
 def _load_business_partners() -> dict[str, object]:
     if not BUSINESS_PARTNERS_PATH.exists():
-        return {"partners": [], "referrals": [], "order_refs": [], "commissions": [], "withdrawals": []}
+        return {
+            "partners": [],
+            "referrals": [],
+            "order_refs": [],
+            "commissions": [],
+            "withdrawals": [],
+            "commission_policies": [],
+            "kpi_rules": [],
+            "retention_bonus_rules": [],
+            "performance_bonus_rules": [],
+        }
     try:
         data = json.loads(BUSINESS_PARTNERS_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {"partners": [], "referrals": [], "order_refs": [], "commissions": [], "withdrawals": []}
+        return {
+            "partners": [],
+            "referrals": [],
+            "order_refs": [],
+            "commissions": [],
+            "withdrawals": [],
+            "commission_policies": [],
+            "kpi_rules": [],
+            "retention_bonus_rules": [],
+            "performance_bonus_rules": [],
+        }
     if not isinstance(data, dict):
         data = {}
-    for key in ("partners", "referrals", "order_refs", "commissions", "withdrawals"):
+    for key in (
+        "partners",
+        "referrals",
+        "order_refs",
+        "commissions",
+        "withdrawals",
+        "commission_policies",
+        "kpi_rules",
+        "retention_bonus_rules",
+        "performance_bonus_rules",
+    ):
         if not isinstance(data.get(key), list):
             data[key] = []
+    if not data["commission_policies"]:
+        data["commission_policies"] = [
+            {
+                "policy_id": "DTKD_TRIAL_3M_REVENUE_TIERS",
+                "name": "Hoa hồng 3 tháng đầu theo doanh số",
+                "base_type": "revenue",
+                "trial_months": DTKD_TRIAL_MONTHS,
+                "fund_cap_rate": DTKD_PARTNER_FUND_CAP_RATE,
+                "tiers": list(DTKD_COMMISSION_TIERS),
+                "active": True,
+            }
+        ]
     return data
 
 
@@ -1385,7 +1435,13 @@ def _ensure_business_partner(user: object | None, profile: dict[str, object] | N
         "status": "pending",
         "level": "Cộng tác viên",
         "referred_by": "",
-        "commission_rate": DTKD_COMMISSION_RATE,
+        "approved_at": "",
+        "commission_policy_id": "DTKD_TRIAL_3M_REVENUE_TIERS",
+        "kpi_profile": {
+            "trial_months": DTKD_TRIAL_MONTHS,
+            "kpi_enabled_after_trial": False,
+            "metrics": ["revenue", "new_customers", "renewal_customers", "refund_rate", "policy_compliance"],
+        },
         "registered_at": _utc_now_iso(),
         "updated_at": _utc_now_iso(),
         "withdrawals": [],
@@ -1475,7 +1531,7 @@ def _attach_partner_to_order(order: dict[str, object]) -> dict[str, object]:
         "partner_telegram_user_id": int(partner.get("telegram_user_id", 0) or 0),
         "partner_code": partner.get("partner_code", ""),
         "referral_code": partner.get("referral_code", ""),
-        "commission_rate": float(partner.get("commission_rate", DTKD_COMMISSION_RATE) or DTKD_COMMISSION_RATE),
+        "commission_policy_id": partner.get("commission_policy_id", "DTKD_TRIAL_3M_REVENUE_TIERS"),
         "created_at": now,
         "updated_at": now,
     }
@@ -1500,6 +1556,90 @@ def _order_refs_for_partner(partner: dict[str, object]) -> list[dict[str, object
         if int(ref.get("partner_telegram_user_id", 0) or 0) == partner_id
         or _normalize_referral_code(str(ref.get("partner_code", ""))) == partner_code
     ]
+
+
+def _parse_iso_datetime(value: object) -> datetime | None:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return None
+    try:
+        return datetime.fromisoformat(raw_value)
+    except ValueError:
+        return None
+
+
+def _dtkd_month_key(value: object | None = None) -> str:
+    parsed = _parse_iso_datetime(value) if value else None
+    return (parsed or _utc_now()).strftime("%Y-%m")
+
+
+def _dtkd_is_in_trial_period(partner: dict[str, object], now: datetime | None = None) -> bool:
+    approved_at = _parse_iso_datetime(partner.get("approved_at"))
+    if not approved_at:
+        return True
+    now = now or _utc_now()
+    trial_month_index = (now.year - approved_at.year) * 12 + now.month - approved_at.month
+    return trial_month_index < DTKD_TRIAL_MONTHS
+
+
+def _dtkd_commission_rate_for_monthly_revenue(monthly_revenue: int) -> dict[str, object]:
+    revenue = int(monthly_revenue or 0)
+    for tier in DTKD_COMMISSION_TIERS:
+        min_revenue = int(tier["min_revenue"])
+        max_revenue = tier["max_revenue"]
+        if revenue >= min_revenue and (max_revenue is None or revenue < int(max_revenue)):
+            rate = min(float(tier["rate"]), DTKD_PARTNER_FUND_CAP_RATE)
+            return {**tier, "rate": rate}
+    last_tier = DTKD_COMMISSION_TIERS[-1]
+    return {**last_tier, "rate": min(float(last_tier["rate"]), DTKD_PARTNER_FUND_CAP_RATE)}
+
+
+def _dtkd_order_total(order: dict[str, object]) -> int:
+    return int(order.get("total", order.get("total_vnd", order.get("amount", 0))) or 0)
+
+
+def _dtkd_order_month_key(order: dict[str, object]) -> str:
+    return _dtkd_month_key(order.get("paid_at") or order.get("created_at"))
+
+
+def _dtkd_month_revenue_for_partner(partner: dict[str, object], month_key: str, *, exclude_order_id: str = "") -> int:
+    excluded = str(exclude_order_id or "").upper()
+    total = 0
+    for order in _partner_orders(str(partner.get("referral_code", ""))):
+        order_id = str(order.get("order_id", "")).upper()
+        if excluded and order_id == excluded:
+            continue
+        if _dtkd_order_month_key(order) != month_key:
+            continue
+        if str(order.get("payment_status", "")).lower() == "paid" or str(order.get("order_status", "")).lower() == "delivered":
+            total += _dtkd_order_total(order)
+    return total
+
+
+def _dtkd_commission_policy_snapshot(partner: dict[str, object], order: dict[str, object]) -> dict[str, object]:
+    order_total = _dtkd_order_total(order)
+    month_key = _dtkd_order_month_key(order)
+    order_id = str(order.get("order_id", ""))
+    month_revenue_before = _dtkd_month_revenue_for_partner(partner, month_key, exclude_order_id=order_id)
+    month_revenue_after = month_revenue_before + order_total
+    tier = _dtkd_commission_rate_for_monthly_revenue(month_revenue_after)
+    rate = min(float(tier["rate"]), DTKD_PARTNER_FUND_CAP_RATE)
+    return {
+        "policy_id": str(partner.get("commission_policy_id", "DTKD_TRIAL_3M_REVENUE_TIERS") or "DTKD_TRIAL_3M_REVENUE_TIERS"),
+        "base_type": "revenue",
+        "month": month_key,
+        "month_revenue_before": month_revenue_before,
+        "month_revenue_after": month_revenue_after,
+        "tier_name": tier.get("name", ""),
+        "tier_min_revenue": tier.get("min_revenue", 0),
+        "tier_max_revenue": tier.get("max_revenue"),
+        "rate": rate,
+        "fund_cap_rate": DTKD_PARTNER_FUND_CAP_RATE,
+        "trial_months": DTKD_TRIAL_MONTHS,
+        "in_trial_period": _dtkd_is_in_trial_period(partner),
+        "kpi_enabled": False,
+        "future_kpi_metrics": ["revenue", "new_customers", "renewal_customers", "refund_rate", "policy_compliance"],
+    }
 
 
 def _record_partner_commission(order: dict[str, object]) -> None:
@@ -1531,8 +1671,12 @@ def _record_partner_commission(order: dict[str, object]) -> None:
     for commission in commissions:
         if isinstance(commission, dict) and str(commission.get("order_id", "")).upper() == order_id.upper():
             return
-    amount = int(order.get("total", order.get("total_vnd", order.get("amount", 0))) or 0)
-    rate = float(order_ref.get("commission_rate", DTKD_COMMISSION_RATE) or DTKD_COMMISSION_RATE)
+    amount = _dtkd_order_total(order)
+    partner = _find_business_partner_by_code(str(order_ref.get("partner_code", "")))
+    if not partner:
+        return
+    policy = _dtkd_commission_policy_snapshot(partner, order)
+    rate = min(float(policy["rate"]), DTKD_PARTNER_FUND_CAP_RATE)
     commissions.append(
         {
             "commission_id": f"COM-{order_id}",
@@ -1542,10 +1686,13 @@ def _record_partner_commission(order: dict[str, object]) -> None:
             "referral_code": order_ref.get("referral_code", ""),
             "revenue": amount,
             "rate": rate,
+            "fund_cap_rate": DTKD_PARTNER_FUND_CAP_RATE,
+            "policy_snapshot": policy,
             "amount": int(amount * rate),
-            "status": "approved",
+            "status": "pending_reconcile",
             "created_at": _utc_now_iso(),
-            "approved_at": _utc_now_iso(),
+            "approved_at": "",
+            "paid_at": "",
         }
     )
     _save_business_partners(data)
@@ -1573,11 +1720,14 @@ def _partner_metrics(partner: dict[str, object] | None) -> dict[str, object]:
             "today_revenue": 0,
             "month_revenue": 0,
             "commission": 0,
+            "pending_reconcile_commission": 0,
             "approved_commission": 0,
             "paid_commission": 0,
             "available_commission": 0,
             "customers": 0,
             "kpi_bonus": 0,
+            "in_trial_period": True,
+            "kpi_ready": False,
         }
     orders = _partner_orders(str(partner.get("referral_code", "")))
     paid_orders = [
@@ -1595,19 +1745,9 @@ def _partner_metrics(partner: dict[str, object] | None) -> dict[str, object]:
     today = _utc_now().date()
     month_key = _utc_now().strftime("%Y-%m")
 
-    def _order_created(order: dict[str, object]) -> datetime | None:
-        raw_value = str(order.get("paid_at") or order.get("created_at") or "")
-        try:
-            return datetime.fromisoformat(raw_value)
-        except ValueError:
-            return None
-
-    def _order_total(order: dict[str, object]) -> int:
-        return int(order.get("total", order.get("total_vnd", order.get("amount", 0))) or 0)
-
-    revenue = sum(int(order.get("total", order.get("total_vnd", order.get("amount", 0))) or 0) for order in paid_orders)
-    today_revenue = sum(_order_total(order) for order in paid_orders if (_order_created(order) or _utc_now()).date() == today)
-    month_revenue = sum(_order_total(order) for order in paid_orders if (_order_created(order) or _utc_now()).strftime("%Y-%m") == month_key)
+    revenue = sum(_dtkd_order_total(order) for order in paid_orders)
+    today_revenue = sum(_dtkd_order_total(order) for order in paid_orders if (_parse_iso_datetime(order.get("paid_at") or order.get("created_at")) or _utc_now()).date() == today)
+    month_revenue = sum(_dtkd_order_total(order) for order in paid_orders if _dtkd_order_month_key(order) == month_key)
     data = _load_business_partners()
     partner_id = int(partner.get("telegram_user_id", 0) or 0)
     commissions = [
@@ -1616,6 +1756,11 @@ def _partner_metrics(partner: dict[str, object] | None) -> dict[str, object]:
         if int(item.get("partner_telegram_user_id", 0) or 0) == partner_id
     ]
     commission = sum(int(item.get("amount", 0) or 0) for item in commissions)
+    pending_reconcile_commission = sum(
+        int(item.get("amount", 0) or 0)
+        for item in commissions
+        if str(item.get("status", "")).lower() == "pending_reconcile"
+    )
     approved_commission = sum(
         int(item.get("amount", 0) or 0)
         for item in commissions
@@ -1638,7 +1783,7 @@ def _partner_metrics(partner: dict[str, object] | None) -> dict[str, object]:
         for item in _dtkd_list(data, "referrals")
         if int(item.get("partner_telegram_user_id", 0) or 0) == partner_id
     }
-    kpi_bonus = DTKD_KPI_BONUS_VND if month_revenue >= DTKD_KPI_TARGET_VND else 0
+    kpi_bonus = 0
     approved_total = approved_commission + kpi_bonus
     available_commission = max(0, approved_total - paid_commission - pending_withdraw)
     return {
@@ -1649,6 +1794,7 @@ def _partner_metrics(partner: dict[str, object] | None) -> dict[str, object]:
         "today_revenue": today_revenue,
         "month_revenue": month_revenue,
         "commission": commission,
+        "pending_reconcile_commission": pending_reconcile_commission,
         "approved_commission": approved_commission,
         "paid_commission": paid_commission,
         "available_commission": available_commission,
@@ -1656,6 +1802,8 @@ def _partner_metrics(partner: dict[str, object] | None) -> dict[str, object]:
         "customers": len([item for item in customers if item]),
         "kpi_bonus": kpi_bonus,
         "total_income": approved_total,
+        "in_trial_period": _dtkd_is_in_trial_period(partner),
+        "kpi_ready": False,
     }
 
 
@@ -1726,6 +1874,7 @@ def _business_partner_home_text(partner: dict[str, object] | None) -> str:
         f"Mã ĐTKD: {partner.get('partner_code', '')}\n"
         f"Mã giới thiệu: {partner.get('referral_code', '')}\n"
         f"Doanh số: {_format_vnd(int(metrics['revenue']))}đ\n"
+        f"Hoa hồng chờ đối soát: {_format_vnd(int(metrics['pending_reconcile_commission']))}đ\n"
         f"Hoa hồng đã duyệt: {_format_vnd(int(metrics['approved_commission']))}đ\n"
         f"Có thể rút: {_format_vnd(int(metrics['available_commission']))}đ\n\n"
         "Chọn chức năng bên dưới."
@@ -1794,6 +1943,8 @@ def _set_partner_status(partner_code: str, status: str, admin_note: str = "") ->
         if _normalize_referral_code(str(partner.get("partner_code", ""))) == _normalize_referral_code(partner_code):
             partner["status"] = status
             partner["admin_note"] = admin_note
+            if status in {"approved", "active"} and not str(partner.get("approved_at", "") or "").strip():
+                partner["approved_at"] = _utc_now_iso()
             partner["updated_at"] = _utc_now_iso()
             _save_business_partners(data)
             return partner
@@ -1811,6 +1962,25 @@ def _set_withdrawal_status(withdrawal_id: str, status: str, admin_note: str = ""
             withdrawal["updated_at"] = _utc_now_iso()
             _save_business_partners(data)
             return withdrawal
+    return None
+
+
+def _set_commission_status(commission_key: str, status: str, admin_note: str = "") -> dict[str, object] | None:
+    data = _load_business_partners()
+    normalized = str(commission_key or "").strip().upper()
+    for commission in _dtkd_list(data, "commissions"):
+        commission_id = str(commission.get("commission_id", "")).upper()
+        order_id = str(commission.get("order_id", "")).upper()
+        if normalized in {commission_id, order_id}:
+            commission["status"] = status
+            commission["admin_note"] = admin_note
+            if status == "approved":
+                commission["approved_at"] = _utc_now_iso()
+            if status == "paid":
+                commission["paid_at"] = _utc_now_iso()
+            commission["updated_at"] = _utc_now_iso()
+            _save_business_partners(data)
+            return commission
     return None
 
 
@@ -1894,23 +2064,30 @@ async def _send_business_partner_screen(update: Update, context: ContextTypes.DE
             if not orders:
                 text = "📦 Đơn hàng của ĐTKD\n\nChưa có đơn hàng nào từ mã giới thiệu của bạn."
             else:
+                commission_by_order = {
+                    str(item.get("order_id", "")).upper(): item
+                    for item in _dtkd_list(_load_business_partners(), "commissions")
+                    if int(item.get("partner_telegram_user_id", 0) or 0) == telegram_user_id
+                }
                 lines = ["📦 Đơn hàng của ĐTKD", ""]
                 for index, order in enumerate(orders, start=1):
-                    total = int(order.get("total", order.get("total_vnd", 0)) or 0)
-                    commission = int(total * float(partner.get("commission_rate", DTKD_COMMISSION_RATE) or DTKD_COMMISSION_RATE))
+                    total = _dtkd_order_total(order)
+                    commission = commission_by_order.get(str(order.get("order_id", "")).upper(), {})
                     lines.append(
                         f"{index}. {order.get('order_id', '')}\n"
                         f"Sản phẩm: {order.get('product_name', '')}\n"
                         f"Giá bán: {_format_vnd(total)}đ\n"
                         f"Trạng thái: {order.get('payment_status', '')}/{order.get('order_status', '')}\n"
                         f"Ngày mua: {order.get('created_at', '')}\n"
-                        f"Hoa hồng phát sinh: {_format_vnd(commission)}đ"
+                        f"Hoa hồng phát sinh: {_format_vnd(int(commission.get('amount', 0) or 0))}đ\n"
+                        f"Đối soát: {commission.get('status', 'chưa tạo')}"
                     )
                 text = "\n\n".join(lines)
         elif action == "income":
             text = (
                 "💵 Thu nhập/Hoa hồng\n\n"
                 f"Hoa hồng tạm tính: {_format_vnd(int(metrics['commission']))}đ\n"
+                f"Hoa hồng chờ đối soát: {_format_vnd(int(metrics['pending_reconcile_commission']))}đ\n"
                 f"Hoa hồng đã duyệt: {_format_vnd(int(metrics['approved_commission']))}đ\n"
                 f"Hoa hồng đã thanh toán: {_format_vnd(int(metrics['paid_commission']))}đ\n"
                 f"Hoa hồng còn có thể rút: {_format_vnd(int(metrics['available_commission']))}đ\n"
@@ -1967,6 +2144,8 @@ async def _send_business_partner_screen(update: Update, context: ContextTypes.DE
             percent = int((month_revenue / DTKD_KPI_TARGET_VND) * 100) if DTKD_KPI_TARGET_VND else 0
             text = (
                 "🎯 KPI\n\n"
+                "3 tháng đầu không áp KPI, không phạt, không hạ cấp.\n"
+                "Cấu trúc KPI đã sẵn sàng cho giai đoạn sau.\n\n"
                 f"Chỉ tiêu tháng: {_format_vnd(DTKD_KPI_TARGET_VND)}đ\n"
                 f"Doanh số đã đạt: {_format_vnd(month_revenue)}đ\n"
                 f"% hoàn thành: {percent}%\n"
@@ -2001,10 +2180,16 @@ async def _send_business_partner_screen(update: Update, context: ContextTypes.DE
         elif action == "policy":
             text = (
                 "📌 Thông báo chính sách\n\n"
-                f"Chính sách hoa hồng: mặc định {int(DTKD_COMMISSION_RATE * 100)}% trên giá bán đã thanh toán thành công.\n"
+                "Chính sách hoa hồng 3 tháng đầu theo doanh số tháng:\n"
+                "0-10 triệu: 20%\n"
+                "10-30 triệu: 22%\n"
+                "30-70 triệu: 24%\n"
+                "70-150 triệu: 26%\n"
+                "Trên 150 triệu: 28%\n"
+                f"Trần quỹ ĐTKD: {int(DTKD_PARTNER_FUND_CAP_RATE * 100)}%.\n"
                 "Quy định bán hàng: không spam, không cam kết sai chính sách sản phẩm, không tự ý nâng giá gây ảnh hưởng thương hiệu.\n"
                 "Chính sách bảo hành: theo chính sách bảo hành từng sản phẩm trong bot.\n"
-                "Chính sách thanh toán: hoa hồng được rút sau khi đơn thành công và đạt số dư tối thiểu."
+                "Chính sách thanh toán: hoa hồng chờ đối soát, chỉ hoa hồng đã duyệt mới được rút."
             )
         else:
             text = "Chức năng ĐTKD không hợp lệ."
@@ -3768,6 +3953,20 @@ async def cmd_dtkd_pay(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.effective_message.reply_text(f"Đã thanh toán {args[0]}." if withdrawal else "Không tìm thấy yêu cầu rút tiền.")
 
 
+async def cmd_dtkd_approve_commission(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
+        await update.effective_message.reply_text("Khong co quyen.")
+        return
+    args = context.args or []
+    if not args:
+        await update.effective_message.reply_text("Dung: /dtkd_approve_commission <commission_id_or_order_id>")
+        return
+    commission = _set_commission_status(args[0], "approved")
+    await update.effective_message.reply_text(
+        f"Đã duyệt hoa hồng {args[0]}." if commission else "Không tìm thấy hoa hồng."
+    )
+
+
 async def cmd_dtkd_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
         await update.effective_message.reply_text("Khong co quyen.")
@@ -4253,6 +4452,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("dtkd_unlock", cmd_dtkd_unlock))
     app.add_handler(CommandHandler("dtkd_withdrawals", cmd_dtkd_withdrawals))
     app.add_handler(CommandHandler("dtkd_pay", cmd_dtkd_pay))
+    app.add_handler(CommandHandler("dtkd_approve_commission", cmd_dtkd_approve_commission))
     app.add_handler(CommandHandler("dtkd_report", cmd_dtkd_report))
     app.add_handler(CommandHandler("find", cmd_find))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text_machine_id))
