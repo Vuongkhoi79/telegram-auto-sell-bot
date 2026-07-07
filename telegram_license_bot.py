@@ -1355,6 +1355,15 @@ def _load_business_partners() -> dict[str, object]:
                 "active": True,
             }
         ]
+    changed = False
+    for partner in _dtkd_list(data, "partners"):
+        before = json.dumps(partner, ensure_ascii=False, sort_keys=True)
+        normalize_partner_profile(partner)
+        after = json.dumps(partner, ensure_ascii=False, sort_keys=True)
+        if before != after:
+            changed = True
+    if changed:
+        BUSINESS_PARTNERS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return data
 
 
@@ -1370,6 +1379,10 @@ def _dtkd_list(data: dict[str, object], key: str) -> list[dict[str, object]]:
     return [item for item in value if isinstance(item, dict)]
 
 
+def _partner_internal_id(telegram_user_id: int) -> str:
+    return f"PTR{int(telegram_user_id):010d}"
+
+
 def _partner_referral_code(telegram_user_id: int) -> str:
     return f"DTKD{int(telegram_user_id):06d}"
 
@@ -1382,20 +1395,105 @@ def _normalize_referral_code(value: str) -> str:
     return str(value or "").strip().upper()
 
 
+def _default_partner_metrics_snapshot() -> dict[str, object]:
+    return {
+        "total_revenue": 0,
+        "monthly_revenue": 0,
+        "total_orders": 0,
+        "monthly_orders": 0,
+        "pending_commission": 0,
+        "approved_commission": 0,
+        "paid_commission": 0,
+        "withdrawable_balance": 0,
+        "last_metrics_at": None,
+    }
+
+
+def normalize_partner_profile(partner: dict[str, object]) -> dict[str, object]:
+    telegram_user_id = int(partner.get("telegram_user_id", 0) or 0)
+    partner.setdefault("partner_id", _partner_internal_id(telegram_user_id) if telegram_user_id else f"PTR-{uuid.uuid4().hex[:12].upper()}")
+    partner.setdefault("telegram_user_id", telegram_user_id)
+    partner.setdefault("username", "")
+    partner.setdefault("full_name", "")
+    partner.setdefault("phone", "")
+    partner.setdefault("email", None)
+    partner.setdefault("registered_at", _utc_now_iso())
+    partner.setdefault("approved_at", "")
+    partner.setdefault("updated_at", _utc_now_iso())
+    partner.setdefault("status", "pending")
+    if not partner.get("partner_code") and telegram_user_id:
+        partner["partner_code"] = _partner_referral_code(telegram_user_id)
+    if not partner.get("referral_code") and telegram_user_id:
+        partner["referral_code"] = _partner_short_code(telegram_user_id)
+    partner.setdefault("short_code", partner.get("referral_code", ""))
+    partner.setdefault("referral_link", None)
+    partner.setdefault("sales_channel", "")
+    partner.setdefault("target_customer_group", None)
+    partner.setdefault("region", None)
+    partner.setdefault("referred_by", "")
+    partner.setdefault("leader_partner_id", None)
+    partner.setdefault("parent_partner_id", None)
+    partner.setdefault("level", "Cộng tác viên")
+    partner.setdefault("commission_policy_id", "DTKD_TRIAL_3M_REVENUE_TIERS")
+    partner.setdefault("kpi_policy_id", None)
+    partner.setdefault("rank_policy_id", None)
+    partner.setdefault("bonus_policy_id", None)
+    partner.setdefault(
+        "kpi_profile",
+        {
+            "trial_months": DTKD_TRIAL_MONTHS,
+            "kpi_enabled_after_trial": False,
+            "metrics": ["revenue", "new_customers", "renewal_customers", "refund_rate", "policy_compliance"],
+        },
+    )
+    snapshot = partner.get("metrics_snapshot")
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    defaults = _default_partner_metrics_snapshot()
+    for key, value in defaults.items():
+        snapshot.setdefault(key, value)
+    partner["metrics_snapshot"] = snapshot
+    return partner
+
+
+def get_partner_id(partner: dict[str, object]) -> str:
+    return str(normalize_partner_profile(partner).get("partner_id", "") or "")
+
+
 def _find_business_partner(telegram_user_id: int) -> dict[str, object] | None:
+    return find_partner_by_telegram_user_id(telegram_user_id)
+
+
+def find_partner_by_telegram_user_id(telegram_user_id: int) -> dict[str, object] | None:
     data = _load_business_partners()
-    for partner in data.get("partners", []):
-        if isinstance(partner, dict) and int(partner.get("telegram_user_id", 0) or 0) == int(telegram_user_id):
+    for partner in _dtkd_list(data, "partners"):
+        if int(partner.get("telegram_user_id", 0) or 0) == int(telegram_user_id):
+            return normalize_partner_profile(partner)
+    return None
+
+
+def find_partner_by_id(partner_id: str) -> dict[str, object] | None:
+    normalized = str(partner_id or "").strip().upper()
+    if not normalized:
+        return None
+    data = _load_business_partners()
+    for partner in _dtkd_list(data, "partners"):
+        if str(normalize_partner_profile(partner).get("partner_id", "")).upper() == normalized:
             return partner
     return None
 
 
 def _find_business_partner_by_code(code: str) -> dict[str, object] | None:
+    return find_partner_by_referral_code(code)
+
+
+def find_partner_by_referral_code(code: str) -> dict[str, object] | None:
     normalized = _normalize_referral_code(code)
     if not normalized:
         return None
     data = _load_business_partners()
     for partner in _dtkd_list(data, "partners"):
+        normalize_partner_profile(partner)
         codes = {
             _normalize_referral_code(str(partner.get("partner_code", ""))),
             _normalize_referral_code(str(partner.get("referral_code", ""))),
@@ -1416,6 +1514,7 @@ def _ensure_business_partner(user: object | None, profile: dict[str, object] | N
         data["partners"] = partners
     for partner in partners:
         if isinstance(partner, dict) and int(partner.get("telegram_user_id", 0) or 0) == telegram_user_id:
+            normalize_partner_profile(partner)
             partner.update({key: value for key, value in profile.items() if value not in (None, "")})
             partner["updated_at"] = _utc_now_iso()
             _save_business_partners(data)
@@ -1423,31 +1522,43 @@ def _ensure_business_partner(user: object | None, profile: dict[str, object] | N
     partner_code = _partner_referral_code(telegram_user_id)
     short_code = _partner_short_code(telegram_user_id)
     partner = {
+        "partner_id": _partner_internal_id(telegram_user_id),
         "telegram_user_id": telegram_user_id,
         "username": getattr(user, "username", "") or "",
         "full_name": getattr(user, "full_name", "") or "",
         "phone": "",
+        "email": None,
         "sales_channel": "",
+        "target_customer_group": None,
+        "region": None,
         "bank_info": "",
         "partner_code": partner_code,
         "referral_code": short_code,
         "short_code": short_code,
+        "referral_link": None,
         "status": "pending",
         "level": "Cộng tác viên",
         "referred_by": "",
+        "leader_partner_id": None,
+        "parent_partner_id": None,
         "approved_at": "",
         "commission_policy_id": "DTKD_TRIAL_3M_REVENUE_TIERS",
+        "kpi_policy_id": None,
+        "rank_policy_id": None,
+        "bonus_policy_id": None,
         "kpi_profile": {
             "trial_months": DTKD_TRIAL_MONTHS,
             "kpi_enabled_after_trial": False,
             "metrics": ["revenue", "new_customers", "renewal_customers", "refund_rate", "policy_compliance"],
         },
+        "metrics_snapshot": _default_partner_metrics_snapshot(),
         "registered_at": _utc_now_iso(),
         "updated_at": _utc_now_iso(),
         "withdrawals": [],
         "payments": [],
     }
     partner.update({key: value for key, value in profile.items() if value not in (None, "")})
+    normalize_partner_profile(partner)
     partners.append(partner)
     _save_business_partners(data)
     return partner
@@ -1455,8 +1566,9 @@ def _ensure_business_partner(user: object | None, profile: dict[str, object] | N
 
 def _save_customer_referral(customer_user: object | None, partner: dict[str, object], source_code: str) -> None:
     customer_id = int(getattr(customer_user, "id", 0) or 0)
-    partner_id = int(partner.get("telegram_user_id", 0) or 0)
-    if not customer_id or not partner_id or customer_id == partner_id:
+    partner_telegram_user_id = int(partner.get("telegram_user_id", 0) or 0)
+    partner_id = get_partner_id(partner)
+    if not customer_id or not partner_telegram_user_id or customer_id == partner_telegram_user_id:
         return
     data = _load_business_partners()
     referrals = data.setdefault("referrals", [])
@@ -1470,7 +1582,8 @@ def _save_customer_referral(customer_user: object | None, partner: dict[str, obj
                 return
             referral.update(
                 {
-                    "partner_telegram_user_id": partner_id,
+                    "partner_telegram_user_id": partner_telegram_user_id,
+                    "partner_id": partner_id,
                     "partner_code": partner.get("partner_code", ""),
                     "referral_code": partner.get("referral_code", ""),
                     "source_code": _normalize_referral_code(source_code),
@@ -1484,7 +1597,8 @@ def _save_customer_referral(customer_user: object | None, partner: dict[str, obj
             "customer_telegram_user_id": customer_id,
             "customer_username": getattr(customer_user, "username", "") or "",
             "customer_name": getattr(customer_user, "full_name", "") or "",
-            "partner_telegram_user_id": partner_id,
+            "partner_telegram_user_id": partner_telegram_user_id,
+            "partner_id": partner_id,
             "partner_code": partner.get("partner_code", ""),
             "referral_code": partner.get("referral_code", ""),
             "source_code": _normalize_referral_code(source_code),
@@ -1493,6 +1607,7 @@ def _save_customer_referral(customer_user: object | None, partner: dict[str, obj
         }
     )
     _save_business_partners(data)
+    update_partner_metrics_snapshot(get_partner_id(partner))
 
 
 def _customer_referral(telegram_user_id: int) -> dict[str, object] | None:
@@ -1528,6 +1643,7 @@ def _attach_partner_to_order(order: dict[str, object]) -> dict[str, object]:
     payload = {
         "order_id": order_id,
         "customer_telegram_user_id": customer_id,
+        "partner_id": get_partner_id(partner),
         "partner_telegram_user_id": int(partner.get("telegram_user_id", 0) or 0),
         "partner_code": partner.get("partner_code", ""),
         "referral_code": partner.get("referral_code", ""),
@@ -1542,18 +1658,21 @@ def _attach_partner_to_order(order: dict[str, object]) -> dict[str, object]:
     _save_business_partners(data)
     order["partner_code"] = payload["partner_code"]
     order["referral_code"] = payload["referral_code"]
+    order["partner_id"] = payload["partner_id"]
     order["partner_telegram_user_id"] = payload["partner_telegram_user_id"]
     return order
 
 
 def _order_refs_for_partner(partner: dict[str, object]) -> list[dict[str, object]]:
-    partner_id = int(partner.get("telegram_user_id", 0) or 0)
+    partner_id = get_partner_id(partner)
+    partner_telegram_user_id = int(partner.get("telegram_user_id", 0) or 0)
     partner_code = _normalize_referral_code(str(partner.get("partner_code", "")))
     data = _load_business_partners()
     return [
         ref
         for ref in _dtkd_list(data, "order_refs")
-        if int(ref.get("partner_telegram_user_id", 0) or 0) == partner_id
+        if str(ref.get("partner_id", "") or "") == partner_id
+        or int(ref.get("partner_telegram_user_id", 0) or 0) == partner_telegram_user_id
         or _normalize_referral_code(str(ref.get("partner_code", ""))) == partner_code
     ]
 
@@ -1681,6 +1800,7 @@ def _record_partner_commission(order: dict[str, object]) -> None:
         {
             "commission_id": f"COM-{order_id}",
             "order_id": order_id,
+            "partner_id": get_partner_id(partner),
             "partner_telegram_user_id": int(order_ref.get("partner_telegram_user_id", 0) or 0),
             "partner_code": order_ref.get("partner_code", ""),
             "referral_code": order_ref.get("referral_code", ""),
@@ -1749,11 +1869,13 @@ def _partner_metrics(partner: dict[str, object] | None) -> dict[str, object]:
     today_revenue = sum(_dtkd_order_total(order) for order in paid_orders if (_parse_iso_datetime(order.get("paid_at") or order.get("created_at")) or _utc_now()).date() == today)
     month_revenue = sum(_dtkd_order_total(order) for order in paid_orders if _dtkd_order_month_key(order) == month_key)
     data = _load_business_partners()
-    partner_id = int(partner.get("telegram_user_id", 0) or 0)
+    partner_id = get_partner_id(partner)
+    partner_telegram_user_id = int(partner.get("telegram_user_id", 0) or 0)
     commissions = [
         item
         for item in _dtkd_list(data, "commissions")
-        if int(item.get("partner_telegram_user_id", 0) or 0) == partner_id
+        if str(item.get("partner_id", "") or "") == partner_id
+        or int(item.get("partner_telegram_user_id", 0) or 0) == partner_telegram_user_id
     ]
     commission = sum(int(item.get("amount", 0) or 0) for item in commissions)
     pending_reconcile_commission = sum(
@@ -1769,19 +1891,26 @@ def _partner_metrics(partner: dict[str, object] | None) -> dict[str, object]:
     paid_commission = sum(
         int(item.get("amount", 0) or 0)
         for item in _dtkd_list(data, "withdrawals")
-        if int(item.get("partner_telegram_user_id", 0) or 0) == partner_id
+        if (
+            str(item.get("partner_id", "") or "") == partner_id
+            or int(item.get("partner_telegram_user_id", 0) or 0) == partner_telegram_user_id
+        )
         and str(item.get("status", "")).lower() in {"paid", "completed", "done"}
     )
     pending_withdraw = sum(
         int(item.get("amount", 0) or 0)
         for item in _dtkd_list(data, "withdrawals")
-        if int(item.get("partner_telegram_user_id", 0) or 0) == partner_id
+        if (
+            str(item.get("partner_id", "") or "") == partner_id
+            or int(item.get("partner_telegram_user_id", 0) or 0) == partner_telegram_user_id
+        )
         and str(item.get("status", "")).lower() == "pending"
     )
     customers = {
         int(item.get("customer_telegram_user_id", 0) or 0)
         for item in _dtkd_list(data, "referrals")
-        if int(item.get("partner_telegram_user_id", 0) or 0) == partner_id
+        if str(item.get("partner_id", "") or "") == partner_id
+        or int(item.get("partner_telegram_user_id", 0) or 0) == partner_telegram_user_id
     }
     kpi_bonus = 0
     approved_total = approved_commission + kpi_bonus
@@ -1805,6 +1934,40 @@ def _partner_metrics(partner: dict[str, object] | None) -> dict[str, object]:
         "in_trial_period": _dtkd_is_in_trial_period(partner),
         "kpi_ready": False,
     }
+
+
+def update_partner_metrics_snapshot(partner_id: str) -> dict[str, object] | None:
+    data = _load_business_partners()
+    normalized = str(partner_id or "").strip()
+    if not normalized:
+        return None
+    for partner in _dtkd_list(data, "partners"):
+        normalize_partner_profile(partner)
+        if str(partner.get("partner_id", "")) != normalized:
+            continue
+        metrics = _partner_metrics(partner)
+        snapshot = {
+            "total_revenue": int(metrics["revenue"]),
+            "monthly_revenue": int(metrics["month_revenue"]),
+            "total_orders": len(metrics["paid_orders"]),
+            "monthly_orders": len(
+                [
+                    order
+                    for order in metrics["paid_orders"]
+                    if _dtkd_order_month_key(order) == _dtkd_month_key()
+                ]
+            ),
+            "pending_commission": int(metrics["pending_reconcile_commission"]),
+            "approved_commission": int(metrics["approved_commission"]),
+            "paid_commission": int(metrics["paid_commission"]),
+            "withdrawable_balance": int(metrics["available_commission"]),
+            "last_metrics_at": _utc_now_iso(),
+        }
+        partner["metrics_snapshot"] = snapshot
+        partner["updated_at"] = _utc_now_iso()
+        _save_business_partners(data)
+        return snapshot
+    return None
 
 
 def _partner_referral_link(context: ContextTypes.DEFAULT_TYPE, referral_code: str) -> str:
@@ -1939,8 +2102,14 @@ async def _notify_admins_dtkd_withdrawal(context: ContextTypes.DEFAULT_TYPE, wit
 
 def _set_partner_status(partner_code: str, status: str, admin_note: str = "") -> dict[str, object] | None:
     data = _load_business_partners()
+    normalized = _normalize_referral_code(partner_code)
     for partner in _dtkd_list(data, "partners"):
-        if _normalize_referral_code(str(partner.get("partner_code", ""))) == _normalize_referral_code(partner_code):
+        normalize_partner_profile(partner)
+        if normalized in {
+            _normalize_referral_code(str(partner.get("partner_id", ""))),
+            _normalize_referral_code(str(partner.get("partner_code", ""))),
+            _normalize_referral_code(str(partner.get("referral_code", ""))),
+        }:
             partner["status"] = status
             partner["admin_note"] = admin_note
             if status in {"approved", "active"} and not str(partner.get("approved_at", "") or "").strip():
@@ -1961,6 +2130,8 @@ def _set_withdrawal_status(withdrawal_id: str, status: str, admin_note: str = ""
                 withdrawal["paid_at"] = _utc_now_iso()
             withdrawal["updated_at"] = _utc_now_iso()
             _save_business_partners(data)
+            if withdrawal.get("partner_id"):
+                update_partner_metrics_snapshot(str(withdrawal.get("partner_id", "")))
             return withdrawal
     return None
 
@@ -1980,6 +2151,8 @@ def _set_commission_status(commission_key: str, status: str, admin_note: str = "
                 commission["paid_at"] = _utc_now_iso()
             commission["updated_at"] = _utc_now_iso()
             _save_business_partners(data)
+            if commission.get("partner_id"):
+                update_partner_metrics_snapshot(str(commission.get("partner_id", "")))
             return commission
     return None
 
@@ -2067,7 +2240,8 @@ async def _send_business_partner_screen(update: Update, context: ContextTypes.DE
                 commission_by_order = {
                     str(item.get("order_id", "")).upper(): item
                     for item in _dtkd_list(_load_business_partners(), "commissions")
-                    if int(item.get("partner_telegram_user_id", 0) or 0) == telegram_user_id
+                    if str(item.get("partner_id", "") or "") == get_partner_id(partner)
+                    or int(item.get("partner_telegram_user_id", 0) or 0) == telegram_user_id
                 }
                 lines = ["📦 Đơn hàng của ĐTKD", ""]
                 for index, order in enumerate(orders, start=1):
@@ -2113,7 +2287,8 @@ async def _send_business_partner_screen(update: Update, context: ContextTypes.DE
             withdrawals = [
                 item
                 for item in _dtkd_list(data, "withdrawals")
-                if int(item.get("partner_telegram_user_id", 0) or 0) == telegram_user_id
+                if str(item.get("partner_id", "") or "") == get_partner_id(partner)
+                or int(item.get("partner_telegram_user_id", 0) or 0) == telegram_user_id
             ]
             if not withdrawals:
                 text = "🧾 Lịch sử thanh toán\n\nChưa có lịch sử thanh toán hoa hồng."
@@ -3244,6 +3419,7 @@ async def _handle_dtkd_withdraw_text(update: Update, context: ContextTypes.DEFAU
         data["withdrawals"] = withdrawals
     withdrawal = {
         "withdrawal_id": f"WDR-{_utc_now().strftime('%Y%m%d%H%M%S')}-{int(partner.get('telegram_user_id', 0) or 0)}",
+        "partner_id": get_partner_id(partner),
         "partner_telegram_user_id": int(partner.get("telegram_user_id", 0) or 0),
         "partner_code": partner.get("partner_code", ""),
         "amount": amount,
@@ -3254,6 +3430,7 @@ async def _handle_dtkd_withdraw_text(update: Update, context: ContextTypes.DEFAU
     }
     withdrawals.append(withdrawal)
     _save_business_partners(data)
+    update_partner_metrics_snapshot(get_partner_id(partner))
     context.user_data.pop("dtkd_withdraw", None)
     await update.effective_message.reply_text(
         "Đã tạo yêu cầu rút tiền.\n\n"
