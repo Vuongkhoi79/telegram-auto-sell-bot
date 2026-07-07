@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sqlite3
 import uuid
 from contextlib import closing
@@ -50,7 +51,24 @@ IMPORTS_DIR = PROJECT_ROOT / "imports"
 INVENTORY_PATH = PROJECT_ROOT / "inventory.json"
 ORDERS_DB_PATH = PROJECT_ROOT / "orders_db.json"
 DEFAULT_ORDERS_DB_PATH = ORDERS_DB_PATH
-BUSINESS_PARTNERS_PATH = PROJECT_ROOT / "business_partners.json"
+LEGACY_BUSINESS_PARTNERS_PATH = PROJECT_ROOT / "business_partners.json"
+
+
+def _resolve_business_partners_path() -> Path:
+    raw_data_dir = os.environ.get("DATA_DIR", "").strip()
+    if not raw_data_dir:
+        return LEGACY_BUSINESS_PARTNERS_PATH
+    data_dir = Path(raw_data_dir).expanduser()
+    if not data_dir.is_absolute():
+        data_dir = PROJECT_ROOT / data_dir
+    data_dir.mkdir(parents=True, exist_ok=True)
+    target_path = data_dir / "business_partners.json"
+    if not target_path.exists() and LEGACY_BUSINESS_PARTNERS_PATH.exists():
+        shutil.copy2(LEGACY_BUSINESS_PARTNERS_PATH, target_path)
+    return target_path
+
+
+BUSINESS_PARTNERS_PATH = _resolve_business_partners_path()
 PROCESSED_TRANSACTIONS_PATH = PROJECT_ROOT / "processed_transactions.json"
 AI_DAILY_PRODUCT_NAME = "AI DAILY VIDEO CREATOR"
 DEFAULT_DOWNLOAD_URL = "https://drive.google.com/file/d/1LtCqibeDyg11hmagprhFz6zkwgquwow5/view?usp=sharing"
@@ -1395,11 +1413,13 @@ def _load_business_partners() -> dict[str, object]:
         if before != after:
             changed = True
     if changed:
+        BUSINESS_PARTNERS_PATH.parent.mkdir(parents=True, exist_ok=True)
         BUSINESS_PARTNERS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return data
 
 
 def _save_business_partners(data: dict[str, object]) -> None:
+    BUSINESS_PARTNERS_PATH.parent.mkdir(parents=True, exist_ok=True)
     BUSINESS_PARTNERS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -4775,6 +4795,7 @@ def build_application() -> Application:
         store_db_path,
         cfg["BANK_PROVIDER"],
     )
+    logger.info("Business partners data loaded BUSINESS_PARTNERS_PATH=%s", BUSINESS_PARTNERS_PATH)
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("license", cmd_license))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -19,7 +20,9 @@ class FakeUser:
 
 def main() -> None:
     original_business_partners_path = bot.BUSINESS_PARTNERS_PATH
+    original_legacy_business_partners_path = bot.LEGACY_BUSINESS_PARTNERS_PATH
     original_orders_path = bot.ORDERS_DB_PATH
+    original_data_dir = os.environ.get("DATA_DIR")
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
         bot.BUSINESS_PARTNERS_PATH = tmp_path / "business_partners.json"
@@ -91,6 +94,51 @@ def main() -> None:
         assert new_partner["email"] is None
         assert new_partner["metrics_snapshot"]["total_revenue"] == 0
 
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+        legacy_path = tmp_path / "source" / "business_partners.json"
+        data_dir = tmp_path / "data"
+        legacy_path.parent.mkdir(parents=True, exist_ok=True)
+        legacy_path.write_text(
+            json.dumps(
+                {
+                    "partners": [
+                        {
+                            "telegram_user_id": 555,
+                            "partner_code": "DTKD000555",
+                            "referral_code": "AIDAILY555",
+                            "status": "pending",
+                        }
+                    ],
+                    "referrals": [],
+                    "order_refs": [],
+                    "commissions": [],
+                    "withdrawals": [],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        os.environ["DATA_DIR"] = str(data_dir)
+        bot.LEGACY_BUSINESS_PARTNERS_PATH = legacy_path
+        bot.BUSINESS_PARTNERS_PATH = bot._resolve_business_partners_path()
+        assert bot.BUSINESS_PARTNERS_PATH == data_dir / "business_partners.json"
+        assert bot.BUSINESS_PARTNERS_PATH.exists()
+        migrated = bot._load_business_partners()
+        assert migrated["partners"][0]["partner_code"] == "DTKD000555"
+        persisted_partner = bot._ensure_business_partner(FakeUser(), {"phone": "0900000000"})
+        assert persisted_partner["partner_code"] == "DTKD987654"
+        reloaded_after_restart = bot._load_business_partners()
+        assert any(item.get("partner_code") == "DTKD987654" for item in reloaded_after_restart["partners"])
+        locked_partner = bot._set_partner_status("DTKD987654", "locked")
+        assert locked_partner is not None
+        assert locked_partner["status"] == "locked"
+
+    if original_data_dir is None:
+        os.environ.pop("DATA_DIR", None)
+    else:
+        os.environ["DATA_DIR"] = original_data_dir
+    bot.LEGACY_BUSINESS_PARTNERS_PATH = original_legacy_business_partners_path
     bot.BUSINESS_PARTNERS_PATH = original_business_partners_path
     bot.ORDERS_DB_PATH = original_orders_path
     print("DTKD_PARTNER_PROFILE_TEST=PASS")

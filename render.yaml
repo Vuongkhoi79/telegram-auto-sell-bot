@@ -8,4 +8,6 @@ services:
     envVars:
       - key: STORE_DB_PATH
         value: /var/data/store.db
+      - key: DATA_DIR
+        value: /var/data
     autoDeploy: true
