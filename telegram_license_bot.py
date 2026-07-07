@@ -1343,11 +1343,6 @@ def _ai_daily_text() -> str:
 
 
 def _load_business_partners() -> dict[str, object]:
-    logger.debug(
-        "DTKD_LOAD_START path=%s data_dir=%s",
-        BUSINESS_PARTNERS_PATH,
-        os.environ.get("DATA_DIR", "").strip() or "",
-    )
     if not BUSINESS_PARTNERS_PATH.exists():
         data = {
             "partners": [],
@@ -1362,13 +1357,6 @@ def _load_business_partners() -> dict[str, object]:
             "performance_bonus_rules": [],
         }
         _ensure_business_policy_defaults(data)
-        logger.debug(
-            "DTKD_LOAD_EMPTY path=%s exists=%s partner_count=%s partner_codes=%s",
-            BUSINESS_PARTNERS_PATH,
-            False,
-            len(_dtkd_list(data, "partners")),
-            [str(item.get("partner_code", "")) for item in _dtkd_list(data, "partners")],
-        )
         return data
     try:
         data = json.loads(BUSINESS_PARTNERS_PATH.read_text(encoding="utf-8"))
@@ -1386,13 +1374,6 @@ def _load_business_partners() -> dict[str, object]:
             "performance_bonus_rules": [],
         }
         _ensure_business_policy_defaults(data)
-        logger.debug(
-            "DTKD_LOAD_FALLBACK path=%s exists=%s partner_count=%s partner_codes=%s",
-            BUSINESS_PARTNERS_PATH,
-            BUSINESS_PARTNERS_PATH.exists(),
-            len(_dtkd_list(data, "partners")),
-            [str(item.get("partner_code", "")) for item in _dtkd_list(data, "partners")],
-        )
         return data
     if not isinstance(data, dict):
         data = {}
@@ -1434,38 +1415,15 @@ def _load_business_partners() -> dict[str, object]:
     if changed:
         BUSINESS_PARTNERS_PATH.parent.mkdir(parents=True, exist_ok=True)
         BUSINESS_PARTNERS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    partner_list = _dtkd_list(data, "partners")
-    logger.debug(
-        "DTKD_LOAD_DONE path=%s exists=%s size=%s partner_count=%s partner_codes=%s",
-        BUSINESS_PARTNERS_PATH,
-        BUSINESS_PARTNERS_PATH.exists(),
-        BUSINESS_PARTNERS_PATH.stat().st_size if BUSINESS_PARTNERS_PATH.exists() else 0,
-        len(partner_list),
-        [str(item.get("partner_code", "")) for item in partner_list],
-    )
     return data
 
 
 def _save_business_partners(data: dict[str, object]) -> None:
-    partner_list = _dtkd_list(data, "partners")
-    logger.debug(
-        "DTKD_SAVE_START path=%s partner_count=%s partner_codes=%s",
-        BUSINESS_PARTNERS_PATH,
-        len(partner_list),
-        [str(item.get("partner_code", "")) for item in partner_list],
-    )
     BUSINESS_PARTNERS_PATH.parent.mkdir(parents=True, exist_ok=True)
     try:
         BUSINESS_PARTNERS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
-        logger.exception("DTKD_SAVE_FAIL path=%s", BUSINESS_PARTNERS_PATH)
         raise
-    logger.debug(
-        "DTKD_SAVE_OK path=%s size=%s partner_count=%s",
-        BUSINESS_PARTNERS_PATH,
-        BUSINESS_PARTNERS_PATH.stat().st_size if BUSINESS_PARTNERS_PATH.exists() else 0,
-        len(partner_list),
-    )
 
 
 def _dtkd_list(data: dict[str, object], key: str) -> list[dict[str, object]]:
@@ -1723,20 +1681,7 @@ def _ensure_business_partner(user: object | None, profile: dict[str, object] | N
             normalize_partner_profile(partner)
             partner.update({key: value for key, value in profile.items() if value not in (None, "")})
             partner["updated_at"] = _utc_now_iso()
-            logger.debug(
-                "DTKD_ENSURE_UPDATE telegram_user_id=%s partner_code=%s partner_count_before=%s",
-                telegram_user_id,
-                partner.get("partner_code", ""),
-                len(partners),
-            )
             _save_business_partners(data)
-            logger.debug(
-                "DTKD_ENSURE_UPDATE_OK telegram_user_id=%s partner_code=%s partner_count_after=%s save_path=%s",
-                telegram_user_id,
-                partner.get("partner_code", ""),
-                len(partners),
-                BUSINESS_PARTNERS_PATH,
-            )
             return partner
     partner_code = _partner_referral_code(telegram_user_id)
     short_code = _partner_short_code(telegram_user_id)
@@ -1778,22 +1723,8 @@ def _ensure_business_partner(user: object | None, profile: dict[str, object] | N
     }
     partner.update({key: value for key, value in profile.items() if value not in (None, "")})
     normalize_partner_profile(partner)
-    logger.debug(
-        "DTKD_ENSURE_APPEND telegram_user_id=%s partner_code=%s partner_count_before=%s save_path=%s",
-        telegram_user_id,
-        partner_code,
-        len(partners),
-        BUSINESS_PARTNERS_PATH,
-    )
     partners.append(partner)
     _save_business_partners(data)
-    logger.debug(
-        "DTKD_ENSURE_APPEND_OK telegram_user_id=%s partner_code=%s partner_count_after=%s save_path=%s",
-        telegram_user_id,
-        partner_code,
-        len(partners),
-        BUSINESS_PARTNERS_PATH,
-    )
     return partner
 
 
@@ -2352,16 +2283,6 @@ async def _notify_admins_dtkd_withdrawal(context: ContextTypes.DEFAULT_TYPE, wit
 def _set_partner_status(partner_code: str, status: str, admin_note: str = "") -> dict[str, object] | None:
     data = _load_business_partners()
     normalized = _normalize_referral_code(partner_code)
-    partner_list = _dtkd_list(data, "partners")
-    logger.debug(
-        "DTKD_SET_STATUS_START input_code=%s normalized=%s status=%s path=%s partner_count=%s partner_codes=%s",
-        partner_code,
-        normalized,
-        status,
-        BUSINESS_PARTNERS_PATH,
-        len(partner_list),
-        [str(item.get("partner_code", "")) for item in partner_list],
-    )
     for partner in _dtkd_list(data, "partners"):
         normalize_partner_profile(partner)
         if normalized in {
@@ -2369,34 +2290,13 @@ def _set_partner_status(partner_code: str, status: str, admin_note: str = "") ->
             _normalize_referral_code(str(partner.get("partner_code", ""))),
             _normalize_referral_code(str(partner.get("referral_code", ""))),
         }:
-            before_status = str(partner.get("status", ""))
             partner["status"] = status
             partner["admin_note"] = admin_note
             if status in {"approved", "active"} and not str(partner.get("approved_at", "") or "").strip():
                 partner["approved_at"] = _utc_now_iso()
             partner["updated_at"] = _utc_now_iso()
-            logger.debug(
-                "DTKD_SET_STATUS_MATCH input_code=%s matched_partner_code=%s partner_id=%s before_status=%s after_status=%s",
-                partner_code,
-                partner.get("partner_code", ""),
-                partner.get("partner_id", ""),
-                before_status,
-                partner.get("status", ""),
-            )
             _save_business_partners(data)
-            logger.debug(
-                "DTKD_SET_STATUS_OK input_code=%s matched_partner_code=%s save_path=%s",
-                partner_code,
-                partner.get("partner_code", ""),
-                BUSINESS_PARTNERS_PATH,
-            )
             return partner
-    logger.debug(
-        "DTKD_SET_STATUS_MISS input_code=%s normalized=%s partner_codes=%s",
-        partner_code,
-        normalized,
-        [str(item.get("partner_code", "")) for item in partner_list],
-    )
     return None
 
 
@@ -4338,12 +4238,6 @@ async def cmd_dtkd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     data = _load_business_partners()
     partners = _dtkd_list(data, "partners")
-    logger.debug(
-        "DTKD_LIST path=%s partner_count=%s partner_codes=%s",
-        BUSINESS_PARTNERS_PATH,
-        len(partners),
-        [str(item.get("partner_code", "")) for item in partners],
-    )
     if not partners:
         await update.effective_message.reply_text("Chưa có ĐTKD nào.")
         return
@@ -4905,18 +4799,7 @@ def build_application() -> Application:
         store_db_path,
         cfg["BANK_PROVIDER"],
     )
-    startup_partner_data = _load_business_partners()
-    startup_partner_list = _dtkd_list(startup_partner_data, "partners")
     logger.info("Business partners data loaded BUSINESS_PARTNERS_PATH=%s", BUSINESS_PARTNERS_PATH)
-    logger.debug(
-        "DTKD_STARTUP path=%s data_dir=%s exists=%s size=%s partner_count=%s partner_codes=%s",
-        BUSINESS_PARTNERS_PATH,
-        os.environ.get("DATA_DIR", "").strip() or "",
-        BUSINESS_PARTNERS_PATH.exists(),
-        BUSINESS_PARTNERS_PATH.stat().st_size if BUSINESS_PARTNERS_PATH.exists() else 0,
-        len(startup_partner_list),
-        [str(item.get("partner_code", "")) for item in startup_partner_list],
-    )
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("license", cmd_license))
