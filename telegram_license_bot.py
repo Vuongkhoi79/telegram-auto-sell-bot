@@ -50,10 +50,15 @@ IMPORTS_DIR = PROJECT_ROOT / "imports"
 INVENTORY_PATH = PROJECT_ROOT / "inventory.json"
 ORDERS_DB_PATH = PROJECT_ROOT / "orders_db.json"
 DEFAULT_ORDERS_DB_PATH = ORDERS_DB_PATH
+BUSINESS_PARTNERS_PATH = PROJECT_ROOT / "business_partners.json"
 PROCESSED_TRANSACTIONS_PATH = PROJECT_ROOT / "processed_transactions.json"
 AI_DAILY_PRODUCT_NAME = "AI DAILY VIDEO CREATOR"
 DEFAULT_DOWNLOAD_URL = "https://drive.google.com/file/d/1LtCqibeDyg11hmagprhFz6zkwgquwow5/view?usp=sharing"
 ORDER_TTL_MINUTES = 5
+DTKD_COMMISSION_RATE = float(os.environ.get("DTKD_COMMISSION_RATE", "0.20") or "0.20")
+DTKD_KPI_TARGET_VND = int(os.environ.get("DTKD_KPI_TARGET_VND", "10000000") or "10000000")
+DTKD_KPI_BONUS_VND = int(os.environ.get("DTKD_KPI_BONUS_VND", "500000") or "500000")
+DTKD_WITHDRAW_MIN_VND = int(os.environ.get("DTKD_WITHDRAW_MIN_VND", "100000") or "100000")
 PRODUCT_PACKAGES = {
     "7D": 99000,
     "30D": 199000,
@@ -455,6 +460,7 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("💰 Nạp tiền", callback_data="menu_payment"),
                 InlineKeyboardButton("📦 Đơn hàng", callback_data="menu_orders"),
             ],
+            [InlineKeyboardButton("🤝 ĐTKD", callback_data="menu_partners")],
             [InlineKeyboardButton("💬 Hỗ trợ", callback_data="menu_support")],
         ]
     )
@@ -872,7 +878,7 @@ def _find_order(order_id: str) -> dict[str, object] | None:
 
 
 def _update_order(order_id: str, **changes: object) -> dict[str, object] | None:
-    if "payment_status" in changes and "status" not in changes:
+    if "payment_status" in changes and "status" not in changes and "order_status" not in changes:
         changes["status"] = changes["payment_status"]
     path = _resolve_store_db_path()
     if _sqlite_orders_enabled() and path.is_file():
@@ -1022,6 +1028,7 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
             raise InventoryReservationError("Sản phẩm hiện đã hết hàng, vui lòng quay lại sau.") from exc
     else:
         raise InventoryReservationError("Sản phẩm chưa có cấu hình kho SQLite.")
+    order = _attach_partner_to_order(order)
     orders = _load_orders()
     orders.append(order)
     _save_orders(orders)
@@ -1074,6 +1081,7 @@ def _create_license_sales_order(update: Update, product_id: str, machine_id: str
         "license_file": "",
         "inventory_source": "license",
     }
+    order = _attach_partner_to_order(order)
     orders = _load_orders()
     orders.append(order)
     _save_orders(orders)
@@ -1283,6 +1291,724 @@ def _ai_daily_text() -> str:
         "💎 License trả phí\n"
         "🛡 Hỗ trợ kích hoạt"
     )
+
+
+def _load_business_partners() -> dict[str, object]:
+    if not BUSINESS_PARTNERS_PATH.exists():
+        return {"partners": [], "referrals": [], "order_refs": [], "commissions": [], "withdrawals": []}
+    try:
+        data = json.loads(BUSINESS_PARTNERS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"partners": [], "referrals": [], "order_refs": [], "commissions": [], "withdrawals": []}
+    if not isinstance(data, dict):
+        data = {}
+    for key in ("partners", "referrals", "order_refs", "commissions", "withdrawals"):
+        if not isinstance(data.get(key), list):
+            data[key] = []
+    return data
+
+
+def _save_business_partners(data: dict[str, object]) -> None:
+    BUSINESS_PARTNERS_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _dtkd_list(data: dict[str, object], key: str) -> list[dict[str, object]]:
+    value = data.setdefault(key, [])
+    if not isinstance(value, list):
+        value = []
+        data[key] = value
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _partner_referral_code(telegram_user_id: int) -> str:
+    return f"DTKD{int(telegram_user_id):06d}"
+
+
+def _partner_short_code(telegram_user_id: int) -> str:
+    return f"AIDAILY{int(telegram_user_id)}"
+
+
+def _normalize_referral_code(value: str) -> str:
+    return str(value or "").strip().upper()
+
+
+def _find_business_partner(telegram_user_id: int) -> dict[str, object] | None:
+    data = _load_business_partners()
+    for partner in data.get("partners", []):
+        if isinstance(partner, dict) and int(partner.get("telegram_user_id", 0) or 0) == int(telegram_user_id):
+            return partner
+    return None
+
+
+def _find_business_partner_by_code(code: str) -> dict[str, object] | None:
+    normalized = _normalize_referral_code(code)
+    if not normalized:
+        return None
+    data = _load_business_partners()
+    for partner in _dtkd_list(data, "partners"):
+        codes = {
+            _normalize_referral_code(str(partner.get("partner_code", ""))),
+            _normalize_referral_code(str(partner.get("referral_code", ""))),
+            _normalize_referral_code(str(partner.get("short_code", ""))),
+        }
+        if normalized in codes:
+            return partner
+    return None
+
+
+def _ensure_business_partner(user: object | None, profile: dict[str, object] | None = None) -> dict[str, object]:
+    telegram_user_id = int(getattr(user, "id", 0) or 0)
+    profile = profile or {}
+    data = _load_business_partners()
+    partners = data.setdefault("partners", [])
+    if not isinstance(partners, list):
+        partners = []
+        data["partners"] = partners
+    for partner in partners:
+        if isinstance(partner, dict) and int(partner.get("telegram_user_id", 0) or 0) == telegram_user_id:
+            partner.update({key: value for key, value in profile.items() if value not in (None, "")})
+            partner["updated_at"] = _utc_now_iso()
+            _save_business_partners(data)
+            return partner
+    partner_code = _partner_referral_code(telegram_user_id)
+    short_code = _partner_short_code(telegram_user_id)
+    partner = {
+        "telegram_user_id": telegram_user_id,
+        "username": getattr(user, "username", "") or "",
+        "full_name": getattr(user, "full_name", "") or "",
+        "phone": "",
+        "sales_channel": "",
+        "bank_info": "",
+        "partner_code": partner_code,
+        "referral_code": short_code,
+        "short_code": short_code,
+        "status": "pending",
+        "level": "Cộng tác viên",
+        "referred_by": "",
+        "commission_rate": DTKD_COMMISSION_RATE,
+        "registered_at": _utc_now_iso(),
+        "updated_at": _utc_now_iso(),
+        "withdrawals": [],
+        "payments": [],
+    }
+    partner.update({key: value for key, value in profile.items() if value not in (None, "")})
+    partners.append(partner)
+    _save_business_partners(data)
+    return partner
+
+
+def _save_customer_referral(customer_user: object | None, partner: dict[str, object], source_code: str) -> None:
+    customer_id = int(getattr(customer_user, "id", 0) or 0)
+    partner_id = int(partner.get("telegram_user_id", 0) or 0)
+    if not customer_id or not partner_id or customer_id == partner_id:
+        return
+    data = _load_business_partners()
+    referrals = data.setdefault("referrals", [])
+    if not isinstance(referrals, list):
+        referrals = []
+        data["referrals"] = referrals
+    now = _utc_now_iso()
+    for referral in referrals:
+        if isinstance(referral, dict) and int(referral.get("customer_telegram_user_id", 0) or 0) == customer_id:
+            if referral.get("partner_code"):
+                return
+            referral.update(
+                {
+                    "partner_telegram_user_id": partner_id,
+                    "partner_code": partner.get("partner_code", ""),
+                    "referral_code": partner.get("referral_code", ""),
+                    "source_code": _normalize_referral_code(source_code),
+                    "updated_at": now,
+                }
+            )
+            _save_business_partners(data)
+            return
+    referrals.append(
+        {
+            "customer_telegram_user_id": customer_id,
+            "customer_username": getattr(customer_user, "username", "") or "",
+            "customer_name": getattr(customer_user, "full_name", "") or "",
+            "partner_telegram_user_id": partner_id,
+            "partner_code": partner.get("partner_code", ""),
+            "referral_code": partner.get("referral_code", ""),
+            "source_code": _normalize_referral_code(source_code),
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+    _save_business_partners(data)
+
+
+def _customer_referral(telegram_user_id: int) -> dict[str, object] | None:
+    data = _load_business_partners()
+    for referral in _dtkd_list(data, "referrals"):
+        if int(referral.get("customer_telegram_user_id", 0) or 0) == int(telegram_user_id):
+            return referral
+    return None
+
+
+def _attach_partner_to_order(order: dict[str, object]) -> dict[str, object]:
+    customer_id = int(order.get("telegram_user_id", 0) or 0)
+    referral = _customer_referral(customer_id)
+    if not referral:
+        return order
+    partner = _find_business_partner_by_code(str(referral.get("partner_code", "")))
+    if not partner or str(partner.get("status", "")).lower() not in {"approved", "active"}:
+        return order
+    data = _load_business_partners()
+    order_refs = data.setdefault("order_refs", [])
+    if not isinstance(order_refs, list):
+        order_refs = []
+        data["order_refs"] = order_refs
+    order_id = str(order.get("order_id", "")).strip()
+    if not order_id:
+        return order
+    now = _utc_now_iso()
+    existing = None
+    for item in order_refs:
+        if isinstance(item, dict) and str(item.get("order_id", "")).upper() == order_id.upper():
+            existing = item
+            break
+    payload = {
+        "order_id": order_id,
+        "customer_telegram_user_id": customer_id,
+        "partner_telegram_user_id": int(partner.get("telegram_user_id", 0) or 0),
+        "partner_code": partner.get("partner_code", ""),
+        "referral_code": partner.get("referral_code", ""),
+        "commission_rate": float(partner.get("commission_rate", DTKD_COMMISSION_RATE) or DTKD_COMMISSION_RATE),
+        "created_at": now,
+        "updated_at": now,
+    }
+    if existing:
+        existing.update(payload)
+    else:
+        order_refs.append(payload)
+    _save_business_partners(data)
+    order["partner_code"] = payload["partner_code"]
+    order["referral_code"] = payload["referral_code"]
+    order["partner_telegram_user_id"] = payload["partner_telegram_user_id"]
+    return order
+
+
+def _order_refs_for_partner(partner: dict[str, object]) -> list[dict[str, object]]:
+    partner_id = int(partner.get("telegram_user_id", 0) or 0)
+    partner_code = _normalize_referral_code(str(partner.get("partner_code", "")))
+    data = _load_business_partners()
+    return [
+        ref
+        for ref in _dtkd_list(data, "order_refs")
+        if int(ref.get("partner_telegram_user_id", 0) or 0) == partner_id
+        or _normalize_referral_code(str(ref.get("partner_code", ""))) == partner_code
+    ]
+
+
+def _record_partner_commission(order: dict[str, object]) -> None:
+    order_id = str(order.get("order_id", "")).strip()
+    if not order_id:
+        return
+    data = _load_business_partners()
+    order_ref = None
+    for ref in _dtkd_list(data, "order_refs"):
+        if str(ref.get("order_id", "")).upper() == order_id.upper():
+            order_ref = ref
+            break
+    if not order_ref:
+        customer_id = int(order.get("telegram_user_id", 0) or 0)
+        referral = _customer_referral(customer_id)
+        if referral:
+            order = _attach_partner_to_order(order)
+            data = _load_business_partners()
+            for ref in _dtkd_list(data, "order_refs"):
+                if str(ref.get("order_id", "")).upper() == order_id.upper():
+                    order_ref = ref
+                    break
+    if not order_ref:
+        return
+    commissions = data.setdefault("commissions", [])
+    if not isinstance(commissions, list):
+        commissions = []
+        data["commissions"] = commissions
+    for commission in commissions:
+        if isinstance(commission, dict) and str(commission.get("order_id", "")).upper() == order_id.upper():
+            return
+    amount = int(order.get("total", order.get("total_vnd", order.get("amount", 0))) or 0)
+    rate = float(order_ref.get("commission_rate", DTKD_COMMISSION_RATE) or DTKD_COMMISSION_RATE)
+    commissions.append(
+        {
+            "commission_id": f"COM-{order_id}",
+            "order_id": order_id,
+            "partner_telegram_user_id": int(order_ref.get("partner_telegram_user_id", 0) or 0),
+            "partner_code": order_ref.get("partner_code", ""),
+            "referral_code": order_ref.get("referral_code", ""),
+            "revenue": amount,
+            "rate": rate,
+            "amount": int(amount * rate),
+            "status": "approved",
+            "created_at": _utc_now_iso(),
+            "approved_at": _utc_now_iso(),
+        }
+    )
+    _save_business_partners(data)
+
+
+def _partner_orders(referral_code: str) -> list[dict[str, object]]:
+    partner = _find_business_partner_by_code(referral_code)
+    if not partner:
+        return []
+    order_ids = {str(ref.get("order_id", "")).upper() for ref in _order_refs_for_partner(partner)}
+    matches: list[dict[str, object]] = []
+    for order in _load_orders():
+        if str(order.get("order_id", "")).upper() in order_ids:
+            matches.append(order)
+    return matches
+
+
+def _partner_metrics(partner: dict[str, object] | None) -> dict[str, object]:
+    if not partner:
+        return {
+            "orders": [],
+            "paid_orders": [],
+            "cancelled_orders": [],
+            "revenue": 0,
+            "today_revenue": 0,
+            "month_revenue": 0,
+            "commission": 0,
+            "approved_commission": 0,
+            "paid_commission": 0,
+            "available_commission": 0,
+            "customers": 0,
+            "kpi_bonus": 0,
+        }
+    orders = _partner_orders(str(partner.get("referral_code", "")))
+    paid_orders = [
+        order
+        for order in orders
+        if str(order.get("payment_status", "")).lower() == "paid"
+        or str(order.get("order_status", "")).lower() == "delivered"
+    ]
+    cancelled_orders = [
+        order
+        for order in orders
+        if str(order.get("payment_status", "")).lower() in {"cancelled", "expired", "failed", "refunded"}
+        or str(order.get("order_status", "")).lower() in {"cancelled", "expired", "failed"}
+    ]
+    today = _utc_now().date()
+    month_key = _utc_now().strftime("%Y-%m")
+
+    def _order_created(order: dict[str, object]) -> datetime | None:
+        raw_value = str(order.get("paid_at") or order.get("created_at") or "")
+        try:
+            return datetime.fromisoformat(raw_value)
+        except ValueError:
+            return None
+
+    def _order_total(order: dict[str, object]) -> int:
+        return int(order.get("total", order.get("total_vnd", order.get("amount", 0))) or 0)
+
+    revenue = sum(int(order.get("total", order.get("total_vnd", order.get("amount", 0))) or 0) for order in paid_orders)
+    today_revenue = sum(_order_total(order) for order in paid_orders if (_order_created(order) or _utc_now()).date() == today)
+    month_revenue = sum(_order_total(order) for order in paid_orders if (_order_created(order) or _utc_now()).strftime("%Y-%m") == month_key)
+    data = _load_business_partners()
+    partner_id = int(partner.get("telegram_user_id", 0) or 0)
+    commissions = [
+        item
+        for item in _dtkd_list(data, "commissions")
+        if int(item.get("partner_telegram_user_id", 0) or 0) == partner_id
+    ]
+    commission = sum(int(item.get("amount", 0) or 0) for item in commissions)
+    approved_commission = sum(
+        int(item.get("amount", 0) or 0)
+        for item in commissions
+        if str(item.get("status", "")).lower() in {"approved", "paid"}
+    )
+    paid_commission = sum(
+        int(item.get("amount", 0) or 0)
+        for item in _dtkd_list(data, "withdrawals")
+        if int(item.get("partner_telegram_user_id", 0) or 0) == partner_id
+        and str(item.get("status", "")).lower() in {"paid", "completed", "done"}
+    )
+    pending_withdraw = sum(
+        int(item.get("amount", 0) or 0)
+        for item in _dtkd_list(data, "withdrawals")
+        if int(item.get("partner_telegram_user_id", 0) or 0) == partner_id
+        and str(item.get("status", "")).lower() == "pending"
+    )
+    customers = {
+        int(item.get("customer_telegram_user_id", 0) or 0)
+        for item in _dtkd_list(data, "referrals")
+        if int(item.get("partner_telegram_user_id", 0) or 0) == partner_id
+    }
+    kpi_bonus = DTKD_KPI_BONUS_VND if month_revenue >= DTKD_KPI_TARGET_VND else 0
+    approved_total = approved_commission + kpi_bonus
+    available_commission = max(0, approved_total - paid_commission - pending_withdraw)
+    return {
+        "orders": orders,
+        "paid_orders": paid_orders,
+        "cancelled_orders": cancelled_orders,
+        "revenue": revenue,
+        "today_revenue": today_revenue,
+        "month_revenue": month_revenue,
+        "commission": commission,
+        "approved_commission": approved_commission,
+        "paid_commission": paid_commission,
+        "available_commission": available_commission,
+        "pending_withdraw": pending_withdraw,
+        "customers": len([item for item in customers if item]),
+        "kpi_bonus": kpi_bonus,
+        "total_income": approved_total,
+    }
+
+
+def _partner_referral_link(context: ContextTypes.DEFAULT_TYPE, referral_code: str) -> str:
+    bot_username = str(
+        context.application.bot_data.get("bot_username")
+        or os.environ.get("BOT_USERNAME", "")
+        or ""
+    ).strip().lstrip("@")
+    if bot_username:
+        return f"https://t.me/{bot_username}?start={quote(referral_code)}"
+    return f"/start {referral_code}"
+
+
+def _business_partner_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📝 Đăng ký ĐTKD", callback_data="dtkd_register"),
+                InlineKeyboardButton("👤 Hồ sơ ĐTKD", callback_data="dtkd_profile"),
+            ],
+            [
+                InlineKeyboardButton("🎟 Mã giới thiệu", callback_data="dtkd_ref_code"),
+                InlineKeyboardButton("🔗 Link giới thiệu", callback_data="dtkd_ref_link"),
+            ],
+            [
+                InlineKeyboardButton("📈 Doanh số", callback_data="dtkd_sales"),
+                InlineKeyboardButton("📦 Đơn hàng", callback_data="dtkd_orders"),
+            ],
+            [
+                InlineKeyboardButton("💵 Thu nhập/Hoa hồng", callback_data="dtkd_income"),
+                InlineKeyboardButton("🏦 Rút tiền", callback_data="dtkd_withdraw"),
+            ],
+            [
+                InlineKeyboardButton("🧾 Lịch sử thanh toán", callback_data="dtkd_payments"),
+                InlineKeyboardButton("📣 Marketing", callback_data="dtkd_marketing"),
+            ],
+            [
+                InlineKeyboardButton("🎯 KPI", callback_data="dtkd_kpi"),
+                InlineKeyboardButton("🏆 Xếp hạng", callback_data="dtkd_rank"),
+            ],
+            [InlineKeyboardButton("📌 Chính sách", callback_data="dtkd_policy")],
+            [InlineKeyboardButton("🏠 Menu chính", callback_data="menu_main")],
+        ]
+    )
+
+
+def _business_partner_back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🤝 ĐTKD", callback_data="menu_partners")],
+            [InlineKeyboardButton("🏠 Menu chính", callback_data="menu_main")],
+        ]
+    )
+
+
+def _business_partner_home_text(partner: dict[str, object] | None) -> str:
+    if not partner:
+        return (
+            "🤝 ĐTKD - Đối tác kinh doanh\n\n"
+            "Module dành cho đối tác giới thiệu khách hàng.\n\n"
+            "Bao gồm đăng ký đối tác, mã giới thiệu, doanh số, đơn hàng, thu nhập/hoa hồng, rút tiền, lịch sử thanh toán, link giới thiệu, marketing, KPI và xếp hạng."
+        )
+    metrics = _partner_metrics(partner)
+    return (
+        "🤝 ĐTKD - Đối tác kinh doanh\n\n"
+        f"Trạng thái: {partner.get('status', 'active')}\n"
+        f"Mã ĐTKD: {partner.get('partner_code', '')}\n"
+        f"Mã giới thiệu: {partner.get('referral_code', '')}\n"
+        f"Doanh số: {_format_vnd(int(metrics['revenue']))}đ\n"
+        f"Hoa hồng đã duyệt: {_format_vnd(int(metrics['approved_commission']))}đ\n"
+        f"Có thể rút: {_format_vnd(int(metrics['available_commission']))}đ\n\n"
+        "Chọn chức năng bên dưới."
+    )
+
+
+async def _send_business_partner_home(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
+    user = getattr(update, "effective_user", None)
+    partner = _find_business_partner(int(getattr(user, "id", 0) or 0))
+    await _show_navigation_screen(update, _business_partner_home_text(partner), _business_partner_keyboard(), edit=edit)
+
+
+async def _notify_admins_dtkd_registration(context: ContextTypes.DEFAULT_TYPE, partner: dict[str, object]) -> None:
+    admin_ids: set[int] = context.application.bot_data.get("admin_ids", set())
+    if not admin_ids:
+        return
+    text = (
+        "Có đăng ký ĐTKD mới cần duyệt.\n\n"
+        f"Mã ĐTKD: {partner.get('partner_code', '')}\n"
+        f"Họ tên: {partner.get('full_name', '')}\n"
+        f"SĐT: {partner.get('phone', '')}\n"
+        f"Telegram ID: {partner.get('telegram_user_id', '')}\n"
+        f"Username: @{partner.get('username', '')}\n"
+        f"Kênh bán hàng: {partner.get('sales_channel', '')}\n"
+        f"Ngân hàng: {partner.get('bank_info', '')}"
+    )
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Duyệt", callback_data=f"dtkd_admin_approve:{partner.get('partner_code', '')}"),
+                InlineKeyboardButton("Từ chối", callback_data=f"dtkd_admin_reject:{partner.get('partner_code', '')}"),
+            ]
+        ]
+    )
+    for admin_id in admin_ids:
+        await context.bot.send_message(chat_id=admin_id, text=text, reply_markup=keyboard)
+
+
+async def _notify_admins_dtkd_withdrawal(context: ContextTypes.DEFAULT_TYPE, withdrawal: dict[str, object], partner: dict[str, object]) -> None:
+    admin_ids: set[int] = context.application.bot_data.get("admin_ids", set())
+    if not admin_ids:
+        return
+    text = (
+        "Có yêu cầu rút tiền ĐTKD cần duyệt.\n\n"
+        f"Mã yêu cầu: {withdrawal.get('withdrawal_id', '')}\n"
+        f"Mã ĐTKD: {partner.get('partner_code', '')}\n"
+        f"Họ tên: {partner.get('full_name', '')}\n"
+        f"Số tiền: {_format_vnd(int(withdrawal.get('amount', 0) or 0))}đ\n"
+        f"Ngân hàng: {partner.get('bank_info', '')}"
+    )
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Đã thanh toán", callback_data=f"dtkd_admin_pay:{withdrawal.get('withdrawal_id', '')}"),
+                InlineKeyboardButton("Từ chối", callback_data=f"dtkd_admin_reject_withdraw:{withdrawal.get('withdrawal_id', '')}"),
+            ]
+        ]
+    )
+    for admin_id in admin_ids:
+        await context.bot.send_message(chat_id=admin_id, text=text, reply_markup=keyboard)
+
+
+def _set_partner_status(partner_code: str, status: str, admin_note: str = "") -> dict[str, object] | None:
+    data = _load_business_partners()
+    for partner in _dtkd_list(data, "partners"):
+        if _normalize_referral_code(str(partner.get("partner_code", ""))) == _normalize_referral_code(partner_code):
+            partner["status"] = status
+            partner["admin_note"] = admin_note
+            partner["updated_at"] = _utc_now_iso()
+            _save_business_partners(data)
+            return partner
+    return None
+
+
+def _set_withdrawal_status(withdrawal_id: str, status: str, admin_note: str = "") -> dict[str, object] | None:
+    data = _load_business_partners()
+    for withdrawal in _dtkd_list(data, "withdrawals"):
+        if str(withdrawal.get("withdrawal_id", "")).upper() == str(withdrawal_id or "").upper():
+            withdrawal["status"] = status
+            withdrawal["admin_note"] = admin_note
+            if status == "paid":
+                withdrawal["paid_at"] = _utc_now_iso()
+            withdrawal["updated_at"] = _utc_now_iso()
+            _save_business_partners(data)
+            return withdrawal
+    return None
+
+
+async def _handle_dtkd_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, data: str) -> None:
+    user_id = int(getattr(getattr(update, "effective_user", None), "id", 0) or 0)
+    if not _is_admin(user_id, context.application.bot_data.get("admin_ids", set())):
+        await _safe_edit_or_send(update, "Không có quyền admin.", _main_menu_keyboard(), edit=True)
+        return
+    action, _, value = data.partition(":")
+    value = value.strip()
+    if action == "dtkd_admin_approve":
+        partner = _set_partner_status(value, "approved")
+        text = f"Đã duyệt ĐTKD {value}." if partner else "Không tìm thấy ĐTKD."
+    elif action == "dtkd_admin_reject":
+        partner = _set_partner_status(value, "rejected")
+        text = f"Đã từ chối ĐTKD {value}." if partner else "Không tìm thấy ĐTKD."
+    elif action == "dtkd_admin_pay":
+        withdrawal = _set_withdrawal_status(value, "paid")
+        text = f"Đã cập nhật thanh toán {value}." if withdrawal else "Không tìm thấy yêu cầu rút tiền."
+    elif action == "dtkd_admin_reject_withdraw":
+        withdrawal = _set_withdrawal_status(value, "rejected")
+        text = f"Đã từ chối yêu cầu rút tiền {value}." if withdrawal else "Không tìm thấy yêu cầu rút tiền."
+    else:
+        text = "Lệnh admin ĐTKD không hợp lệ."
+    await _safe_edit_or_send(update, text, _main_menu_keyboard(), edit=True)
+
+
+async def _send_business_partner_screen(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str, *, edit: bool = False) -> None:
+    user = getattr(update, "effective_user", None)
+    telegram_user_id = int(getattr(user, "id", 0) or 0)
+    partner = _find_business_partner(telegram_user_id)
+    if action == "register":
+        if partner and str(partner.get("status", "")).lower() in {"pending", "approved", "active"}:
+            text = (
+                "📝 Đăng ký ĐTKD\n\n"
+                f"Bạn đã có hồ sơ ĐTKD.\nMã ĐTKD: {partner.get('partner_code', '')}\nTrạng thái: {partner.get('status', '')}"
+            )
+        else:
+            context.user_data["dtkd_registration"] = {"step": "full_name", "data": {}}
+            text = "📝 Đăng ký ĐTKD\n\nVui lòng nhập Họ tên:"
+    elif not partner:
+        text = "Bạn chưa đăng ký ĐTKD. Vui lòng chọn Đăng ký ĐTKD trước."
+    else:
+        metrics = _partner_metrics(partner)
+        referral_code = str(partner.get("referral_code", ""))
+        referral_link = _partner_referral_link(context, referral_code)
+        if action == "profile":
+            text = (
+                "👤 Hồ sơ ĐTKD\n\n"
+                f"Mã ĐTKD: {partner.get('partner_code', '')}\n"
+                f"Họ tên: {partner.get('full_name', '')}\n"
+                f"Số điện thoại: {partner.get('phone', '')}\n"
+                f"Telegram ID: {partner.get('telegram_user_id', '')}\n"
+                f"Telegram username: @{partner.get('username', '')}\n"
+                f"Trạng thái: {partner.get('status', '')}\n"
+                f"Cấp bậc: {partner.get('level', '')}\n"
+                f"Ngày tham gia: {partner.get('registered_at', '')}\n"
+                f"Người giới thiệu: {partner.get('referred_by', '') or 'Không có'}"
+            )
+        elif action == "ref_code":
+            text = (
+                "🎟 Mã ĐTKD / Mã giới thiệu\n\n"
+                f"Mã ĐTKD: {partner.get('partner_code', '')}\n"
+                f"Mã giới thiệu: {referral_code}\n"
+                f"Link giới thiệu: {referral_link}"
+            )
+        elif action == "ref_link":
+            text = f"🔗 Link giới thiệu\n\n{referral_link}"
+        elif action == "sales":
+            text = (
+                "📈 Doanh số\n\n"
+                f"Hôm nay: {_format_vnd(int(metrics['today_revenue']))}đ\n"
+                f"Tháng này: {_format_vnd(int(metrics['month_revenue']))}đ\n"
+                f"Tổng doanh số: {_format_vnd(int(metrics['revenue']))}đ\n"
+                f"Số đơn thành công: {len(metrics['paid_orders'])}\n"
+                f"Số đơn hủy: {len(metrics['cancelled_orders'])}\n"
+                f"Số khách đã giới thiệu: {metrics['customers']}"
+            )
+        elif action == "orders":
+            orders = metrics["orders"][-10:]
+            if not orders:
+                text = "📦 Đơn hàng của ĐTKD\n\nChưa có đơn hàng nào từ mã giới thiệu của bạn."
+            else:
+                lines = ["📦 Đơn hàng của ĐTKD", ""]
+                for index, order in enumerate(orders, start=1):
+                    total = int(order.get("total", order.get("total_vnd", 0)) or 0)
+                    commission = int(total * float(partner.get("commission_rate", DTKD_COMMISSION_RATE) or DTKD_COMMISSION_RATE))
+                    lines.append(
+                        f"{index}. {order.get('order_id', '')}\n"
+                        f"Sản phẩm: {order.get('product_name', '')}\n"
+                        f"Giá bán: {_format_vnd(total)}đ\n"
+                        f"Trạng thái: {order.get('payment_status', '')}/{order.get('order_status', '')}\n"
+                        f"Ngày mua: {order.get('created_at', '')}\n"
+                        f"Hoa hồng phát sinh: {_format_vnd(commission)}đ"
+                    )
+                text = "\n\n".join(lines)
+        elif action == "income":
+            text = (
+                "💵 Thu nhập/Hoa hồng\n\n"
+                f"Hoa hồng tạm tính: {_format_vnd(int(metrics['commission']))}đ\n"
+                f"Hoa hồng đã duyệt: {_format_vnd(int(metrics['approved_commission']))}đ\n"
+                f"Hoa hồng đã thanh toán: {_format_vnd(int(metrics['paid_commission']))}đ\n"
+                f"Hoa hồng còn có thể rút: {_format_vnd(int(metrics['available_commission']))}đ\n"
+                f"Thưởng KPI: {_format_vnd(int(metrics['kpi_bonus']))}đ\n"
+                f"Tổng thu nhập: {_format_vnd(int(metrics['total_income']))}đ"
+            )
+        elif action == "withdraw":
+            if int(metrics["available_commission"]) < DTKD_WITHDRAW_MIN_VND:
+                text = (
+                    "🏦 Rút tiền\n\n"
+                    f"Số dư có thể rút: {_format_vnd(int(metrics['available_commission']))}đ\n"
+                    f"Số dư tối thiểu để rút: {_format_vnd(DTKD_WITHDRAW_MIN_VND)}đ"
+                )
+            else:
+                context.user_data["dtkd_withdraw"] = {"step": "amount"}
+                text = (
+                    "🏦 Rút tiền\n\n"
+                    f"Số dư có thể rút: {_format_vnd(int(metrics['available_commission']))}đ\n"
+                    "Vui lòng nhập số tiền muốn rút:"
+                )
+        elif action == "payments":
+            data = _load_business_partners()
+            withdrawals = [
+                item
+                for item in _dtkd_list(data, "withdrawals")
+                if int(item.get("partner_telegram_user_id", 0) or 0) == telegram_user_id
+            ]
+            if not withdrawals:
+                text = "🧾 Lịch sử thanh toán\n\nChưa có lịch sử thanh toán hoa hồng."
+            else:
+                lines = ["🧾 Lịch sử thanh toán", ""]
+                for index, item in enumerate(withdrawals[-10:], start=1):
+                    lines.append(
+                        f"{index}. Ngày yêu cầu: {item.get('requested_at', '')}\n"
+                        f"Số tiền: {_format_vnd(int(item.get('amount', 0) or 0))}đ\n"
+                        f"Trạng thái: {item.get('status', '')}\n"
+                        f"Ngày thanh toán: {item.get('paid_at', '')}\n"
+                        f"Ghi chú admin: {item.get('admin_note', '')}"
+                    )
+                text = "\n\n".join(lines)
+        elif action == "marketing":
+            text = (
+                "📣 Công cụ Marketing\n\n"
+                "Caption mẫu:\n"
+                "Tài khoản AI chính hãng, giá tốt, giao tự động 24/7 tại AIDAILY79.\n\n"
+                "Banner: Liên hệ admin để nhận bộ banner mới nhất.\n"
+                "Nội dung giới thiệu sản phẩm: ChatGPT, Gemini, Grok, CapCut Pro và các tài khoản AI phổ biến.\n"
+                "Link cộng đồng: https://t.me/Aidaily79\n"
+                "Bảng giá: Xem trực tiếp trong mục Sản phẩm của bot.\n\n"
+                f"Link giới thiệu của tôi: {referral_link}"
+            )
+        elif action == "kpi":
+            month_revenue = int(metrics["month_revenue"])
+            percent = int((month_revenue / DTKD_KPI_TARGET_VND) * 100) if DTKD_KPI_TARGET_VND else 0
+            text = (
+                "🎯 KPI\n\n"
+                f"Chỉ tiêu tháng: {_format_vnd(DTKD_KPI_TARGET_VND)}đ\n"
+                f"Doanh số đã đạt: {_format_vnd(month_revenue)}đ\n"
+                f"% hoàn thành: {percent}%\n"
+                f"Thưởng nếu đạt KPI: {_format_vnd(DTKD_KPI_BONUS_VND)}đ"
+            )
+        elif action == "rank":
+            partners = [item for item in _load_business_partners().get("partners", []) if isinstance(item, dict)]
+            ranked = sorted(
+                partners,
+                key=lambda item: (
+                    int(_partner_metrics(item)["month_revenue"]),
+                    len(_partner_metrics(item)["paid_orders"]),
+                    int(_partner_metrics(item)["total_income"]),
+                ),
+                reverse=True,
+            )
+            lines = ["🏆 Xếp hạng", ""]
+            if not ranked:
+                lines.append("Chưa có dữ liệu xếp hạng.")
+            else:
+                for index, item in enumerate(ranked[:10], start=1):
+                    item_metrics = _partner_metrics(item)
+                    name = str(item.get("full_name") or item.get("username") or item.get("partner_code") or "ĐTKD")
+                    marker = " (Bạn)" if int(item.get("telegram_user_id", 0) or 0) == telegram_user_id else ""
+                    lines.append(
+                        f"{index}. {name}{marker} - "
+                        f"DS tháng {_format_vnd(int(item_metrics['month_revenue']))}đ | "
+                        f"Đơn {len(item_metrics['paid_orders'])} | "
+                        f"Thu nhập {_format_vnd(int(item_metrics['total_income']))}đ"
+                    )
+            text = "\n".join(lines)
+        elif action == "policy":
+            text = (
+                "📌 Thông báo chính sách\n\n"
+                f"Chính sách hoa hồng: mặc định {int(DTKD_COMMISSION_RATE * 100)}% trên giá bán đã thanh toán thành công.\n"
+                "Quy định bán hàng: không spam, không cam kết sai chính sách sản phẩm, không tự ý nâng giá gây ảnh hưởng thương hiệu.\n"
+                "Chính sách bảo hành: theo chính sách bảo hành từng sản phẩm trong bot.\n"
+                "Chính sách thanh toán: hoa hồng được rút sau khi đơn thành công và đạt số dư tối thiểu."
+            )
+        else:
+            text = "Chức năng ĐTKD không hợp lệ."
+    await _show_navigation_screen(update, text, _business_partner_back_keyboard(), edit=edit)
 
 
 def _packages_for_product(product_name: str) -> list[dict[str, object]]:
@@ -2218,13 +2944,24 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
     args = context.args or []
     machine_id = ""
+    referral_code = ""
     if args:
         candidate = str(args[0]).strip().upper()
         if _looks_like_machine_id(candidate):
             machine_id = candidate
+        else:
+            referral_code = candidate
     user = update.effective_user
     license_service: LicenseService = context.application.bot_data["license_service"]
     license_service.touch_user(user.id, _user_label(user), machine_id=machine_id, source="start", reminder_state="new")
+
+    if referral_code:
+        partner = _find_business_partner_by_code(referral_code)
+        if partner and str(partner.get("status", "")).lower() in {"approved", "active"}:
+            _save_customer_referral(user, partner, referral_code)
+            if getattr(context, "user_data", None) is not None:
+                context.user_data["referral_code"] = partner.get("referral_code", "")
+                context.user_data["partner_code"] = partner.get("partner_code", "")
 
     if machine_id:
         handled = await _maybe_issue_deeplink_license(update, context, machine_id)
@@ -2247,11 +2984,113 @@ async def cmd_license(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await _handle_machine_id_free_license(update, context, machine_id, source="license_command")
 
 
+async def _handle_dtkd_registration_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    state = context.user_data.get("dtkd_registration") if getattr(context, "user_data", None) is not None else None
+    if not isinstance(state, dict):
+        return False
+    step = str(state.get("step", "full_name"))
+    data = state.setdefault("data", {})
+    if not isinstance(data, dict):
+        data = {}
+        state["data"] = data
+    prompts = {
+        "full_name": ("full_name", "Vui lòng nhập Số điện thoại:", "phone"),
+        "phone": ("phone", "Vui lòng nhập Telegram username:", "username"),
+        "username": ("username", "Vui lòng nhập Kênh bán hàng chính: Facebook/Zalo/TikTok/Website/Khác", "sales_channel"),
+        "sales_channel": ("sales_channel", "Vui lòng nhập Thông tin ngân hàng nhận thanh toán:", "bank_info"),
+    }
+    if step in prompts:
+        field, prompt, next_step = prompts[step]
+        data[field] = text.strip()
+        state["step"] = next_step
+        await update.effective_message.reply_text(prompt)
+        return True
+    if step == "bank_info":
+        data["bank_info"] = text.strip()
+        user = update.effective_user
+        profile = {
+            "full_name": data.get("full_name", getattr(user, "full_name", "") or ""),
+            "phone": data.get("phone", ""),
+            "username": str(data.get("username", getattr(user, "username", "") or "")).lstrip("@"),
+            "sales_channel": data.get("sales_channel", ""),
+            "bank_info": data.get("bank_info", ""),
+            "status": "pending",
+        }
+        partner = _ensure_business_partner(user, profile)
+        context.user_data.pop("dtkd_registration", None)
+        await update.effective_message.reply_text(
+            "Đăng ký ĐTKD đã được gửi.\n\n"
+            f"Mã ĐTKD: {partner.get('partner_code', '')}\n"
+            f"Mã giới thiệu: {partner.get('referral_code', '')}\n"
+            "Trạng thái: Chờ duyệt",
+            reply_markup=_business_partner_back_keyboard(),
+        )
+        await _notify_admins_dtkd_registration(context, partner)
+        return True
+    return False
+
+
+async def _handle_dtkd_withdraw_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    state = context.user_data.get("dtkd_withdraw") if getattr(context, "user_data", None) is not None else None
+    if not isinstance(state, dict):
+        return False
+    amount_text = re.sub(r"[^\d]", "", text)
+    try:
+        amount = int(amount_text)
+    except ValueError:
+        await update.effective_message.reply_text("Số tiền không hợp lệ. Vui lòng nhập lại số tiền muốn rút:")
+        return True
+    partner = _find_business_partner(int(getattr(update.effective_user, "id", 0) or 0))
+    if not partner:
+        context.user_data.pop("dtkd_withdraw", None)
+        await update.effective_message.reply_text("Bạn chưa có hồ sơ ĐTKD.", reply_markup=_business_partner_back_keyboard())
+        return True
+    metrics = _partner_metrics(partner)
+    available = int(metrics["available_commission"])
+    if amount < DTKD_WITHDRAW_MIN_VND or amount > available:
+        await update.effective_message.reply_text(
+            f"Số tiền không hợp lệ. Có thể rút: {_format_vnd(available)}đ, tối thiểu: {_format_vnd(DTKD_WITHDRAW_MIN_VND)}đ."
+        )
+        return True
+    data = _load_business_partners()
+    withdrawals = data.setdefault("withdrawals", [])
+    if not isinstance(withdrawals, list):
+        withdrawals = []
+        data["withdrawals"] = withdrawals
+    withdrawal = {
+        "withdrawal_id": f"WDR-{_utc_now().strftime('%Y%m%d%H%M%S')}-{int(partner.get('telegram_user_id', 0) or 0)}",
+        "partner_telegram_user_id": int(partner.get("telegram_user_id", 0) or 0),
+        "partner_code": partner.get("partner_code", ""),
+        "amount": amount,
+        "status": "pending",
+        "requested_at": _utc_now_iso(),
+        "paid_at": "",
+        "admin_note": "",
+    }
+    withdrawals.append(withdrawal)
+    _save_business_partners(data)
+    context.user_data.pop("dtkd_withdraw", None)
+    await update.effective_message.reply_text(
+        "Đã tạo yêu cầu rút tiền.\n\n"
+        f"Mã yêu cầu: {withdrawal.get('withdrawal_id', '')}\n"
+        f"Số tiền: {_format_vnd(amount)}đ\n"
+        "Trạng thái: Chờ duyệt",
+        reply_markup=_business_partner_back_keyboard(),
+    )
+    await _notify_admins_dtkd_withdrawal(context, withdrawal, partner)
+    return True
+
+
 async def on_text_machine_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message or not message.text:
         return
-    text = message.text.strip().upper()
+    raw_text = message.text.strip()
+    if await _handle_dtkd_registration_text(update, context, raw_text):
+        return
+    if await _handle_dtkd_withdraw_text(update, context, raw_text):
+        return
+    text = raw_text.upper()
     pending_product_id = pending_license_product_by_user.get(int(update.effective_user.id))
     if pending_product_id:
         logger.info(
@@ -2418,6 +3257,7 @@ async def fulfill_order(context: ContextTypes.DEFAULT_TYPE, order_id: str) -> di
                 delivery=str(license_path),
                 license_file=str(license_path),
             )
+            _record_partner_commission(updated_order or sales_order)
             customer_id = sales_order.get("telegram_user_id")
             if customer_id:
                 plan = str(sales_order.get("plan", "")).upper()
@@ -2457,6 +3297,8 @@ async def fulfill_order(context: ContextTypes.DEFAULT_TYPE, order_id: str) -> di
             delivered_at=now if delivered and delivery_text else "",
             delivery=delivery_text,
         )
+        if delivered and delivery_text:
+            _record_partner_commission(updated_order or sales_order)
         customer_id = sales_order.get("telegram_user_id")
         if customer_id:
             customer_text = (
@@ -2832,6 +3674,126 @@ async def cmd_list_licenses(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.effective_message.reply_text("\n".join(lines))
 
 
+async def cmd_dtkd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
+        await update.effective_message.reply_text("Khong co quyen.")
+        return
+    partners = _dtkd_list(_load_business_partners(), "partners")
+    if not partners:
+        await update.effective_message.reply_text("Chưa có ĐTKD nào.")
+        return
+    lines = ["Danh sách ĐTKD:"]
+    for partner in partners[-50:]:
+        lines.append(
+            f"{partner.get('partner_code', '')} | {partner.get('full_name', '')} | "
+            f"{partner.get('status', '')} | @{partner.get('username', '')}"
+        )
+    await update.effective_message.reply_text("\n".join(lines))
+
+
+async def cmd_dtkd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
+        await update.effective_message.reply_text("Khong co quyen.")
+        return
+    args = context.args or []
+    if not args:
+        await update.effective_message.reply_text("Dung: /dtkd_approve <ma_dtkd>")
+        return
+    partner = _set_partner_status(args[0], "approved")
+    await update.effective_message.reply_text(f"Đã duyệt {args[0]}." if partner else "Không tìm thấy ĐTKD.")
+
+
+async def cmd_dtkd_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
+        await update.effective_message.reply_text("Khong co quyen.")
+        return
+    args = context.args or []
+    if not args:
+        await update.effective_message.reply_text("Dung: /dtkd_reject <ma_dtkd>")
+        return
+    partner = _set_partner_status(args[0], "rejected")
+    await update.effective_message.reply_text(f"Đã từ chối {args[0]}." if partner else "Không tìm thấy ĐTKD.")
+
+
+async def cmd_dtkd_lock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
+        await update.effective_message.reply_text("Khong co quyen.")
+        return
+    args = context.args or []
+    if not args:
+        await update.effective_message.reply_text("Dung: /dtkd_lock <ma_dtkd>")
+        return
+    partner = _set_partner_status(args[0], "locked")
+    await update.effective_message.reply_text(f"Đã khóa {args[0]}." if partner else "Không tìm thấy ĐTKD.")
+
+
+async def cmd_dtkd_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
+        await update.effective_message.reply_text("Khong co quyen.")
+        return
+    args = context.args or []
+    if not args:
+        await update.effective_message.reply_text("Dung: /dtkd_unlock <ma_dtkd>")
+        return
+    partner = _set_partner_status(args[0], "approved")
+    await update.effective_message.reply_text(f"Đã mở khóa {args[0]}." if partner else "Không tìm thấy ĐTKD.")
+
+
+async def cmd_dtkd_withdrawals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
+        await update.effective_message.reply_text("Khong co quyen.")
+        return
+    withdrawals = _dtkd_list(_load_business_partners(), "withdrawals")
+    if not withdrawals:
+        await update.effective_message.reply_text("Chưa có yêu cầu rút tiền.")
+        return
+    lines = ["Yêu cầu rút tiền ĐTKD:"]
+    for item in withdrawals[-50:]:
+        lines.append(
+            f"{item.get('withdrawal_id', '')} | {item.get('partner_code', '')} | "
+            f"{_format_vnd(int(item.get('amount', 0) or 0))}đ | {item.get('status', '')}"
+        )
+    await update.effective_message.reply_text("\n".join(lines))
+
+
+async def cmd_dtkd_pay(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
+        await update.effective_message.reply_text("Khong co quyen.")
+        return
+    args = context.args or []
+    if not args:
+        await update.effective_message.reply_text("Dung: /dtkd_pay <withdrawal_id>")
+        return
+    withdrawal = _set_withdrawal_status(args[0], "paid")
+    await update.effective_message.reply_text(f"Đã thanh toán {args[0]}." if withdrawal else "Không tìm thấy yêu cầu rút tiền.")
+
+
+async def cmd_dtkd_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
+        await update.effective_message.reply_text("Khong co quyen.")
+        return
+    args = context.args or []
+    if not args:
+        await update.effective_message.reply_text("Dung: /dtkd_report <ma_dtkd>")
+        return
+    partner = _find_business_partner_by_code(args[0])
+    if not partner:
+        await update.effective_message.reply_text("Không tìm thấy ĐTKD.")
+        return
+    metrics = _partner_metrics(partner)
+    await update.effective_message.reply_text(
+        "Báo cáo ĐTKD\n\n"
+        f"Mã ĐTKD: {partner.get('partner_code', '')}\n"
+        f"Họ tên: {partner.get('full_name', '')}\n"
+        f"Trạng thái: {partner.get('status', '')}\n"
+        f"Doanh số tháng: {_format_vnd(int(metrics['month_revenue']))}đ\n"
+        f"Tổng doanh số: {_format_vnd(int(metrics['revenue']))}đ\n"
+        f"Đơn thành công: {len(metrics['paid_orders'])}\n"
+        f"Thu nhập: {_format_vnd(int(metrics['total_income']))}đ\n"
+        f"Có thể rút: {_format_vnd(int(metrics['available_commission']))}đ"
+    )
+
+
 async def cmd_find(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
         await update.effective_message.reply_text("Khong co quyen.")
@@ -2881,6 +3843,12 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     elif data == "menu_tools":
         # Tool is the original license/download branch, separate from account catalog products.
         await _show_navigation_screen(update, _ai_daily_text(), _ai_daily_keyboard(), edit=True)
+    elif data == "menu_partners":
+        await _send_business_partner_home(update, context, edit=True)
+    elif data.startswith("dtkd_admin_"):
+        await _handle_dtkd_admin_callback(update, context, data)
+    elif data.startswith("dtkd_"):
+        await _send_business_partner_screen(update, context, data.removeprefix("dtkd_"), edit=True)
     elif data == "menu_orders":
         await _send_orders(update, context, edit=True)
     elif data == "menu_history":
@@ -3278,6 +4246,14 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("transactions", cmd_transactions))
     app.add_handler(CommandHandler("revoke", cmd_revoke))
     app.add_handler(CommandHandler("list_licenses", cmd_list_licenses))
+    app.add_handler(CommandHandler("dtkd_list", cmd_dtkd_list))
+    app.add_handler(CommandHandler("dtkd_approve", cmd_dtkd_approve))
+    app.add_handler(CommandHandler("dtkd_reject", cmd_dtkd_reject))
+    app.add_handler(CommandHandler("dtkd_lock", cmd_dtkd_lock))
+    app.add_handler(CommandHandler("dtkd_unlock", cmd_dtkd_unlock))
+    app.add_handler(CommandHandler("dtkd_withdrawals", cmd_dtkd_withdrawals))
+    app.add_handler(CommandHandler("dtkd_pay", cmd_dtkd_pay))
+    app.add_handler(CommandHandler("dtkd_report", cmd_dtkd_report))
     app.add_handler(CommandHandler("find", cmd_find))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text_machine_id))
     logger.warning("CALLBACK HANDLER ORDER: 1 handler=on_menu pattern=None")

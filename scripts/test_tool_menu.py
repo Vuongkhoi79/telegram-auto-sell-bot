@@ -72,7 +72,7 @@ async def main() -> None:
     start_update = type("FakeUpdate", (), {"effective_user": FakeUser(), "effective_message": start_message})()
     await bot.cmd_start(start_update, context)
     _, main_keyboard = start_message.replies[-1]
-    assert {"menu_products", "menu_tools"}.issubset(callback_data(main_keyboard))
+    assert {"menu_products", "menu_tools", "menu_partners"}.issubset(callback_data(main_keyboard))
 
     tool_query = FakeQuery("menu_tools")
     tool_update = type("FakeUpdate", (), {"callback_query": tool_query})()
@@ -86,19 +86,38 @@ async def main() -> None:
     download_query = FakeQuery("menu_download")
     download_update = type("FakeUpdate", (), {"callback_query": download_query})()
     await bot._on_menu_impl(download_update, context)
-    assert "Admin chưa cấu hình link tải Tool" in download_query.edits[-1][0]
+    assert "AI Daily Video Creator" in download_query.edits[-1][0]
 
     context.application.bot_data["tool_download_url"] = "https://example.test/ai-daily.zip"
     configured_download_query = FakeQuery("menu_download")
     configured_download_update = type("FakeUpdate", (), {"callback_query": configured_download_query})()
     await bot._on_menu_impl(configured_download_update, context)
-    assert configured_download_query.edits[-1][0] == "Tải AI Daily Video Creator tại đây: https://example.test/ai-daily.zip"
+    assert "https://example.test/ai-daily.zip" in configured_download_query.edits[-1][0]
 
     back_query = FakeQuery("menu_main")
     back_update = type("FakeUpdate", (), {"callback_query": back_query})()
     await bot._on_menu_impl(back_update, context)
     _, restored_main_keyboard = back_query.edits[-1]
-    assert {"menu_products", "menu_tools"}.issubset(callback_data(restored_main_keyboard))
+    assert {"menu_products", "menu_tools", "menu_partners"}.issubset(callback_data(restored_main_keyboard))
+
+    partner_query = FakeQuery("menu_partners")
+    partner_update = type("FakeUpdate", (), {"callback_query": partner_query, "effective_user": FakeUser()})()
+    await bot._on_menu_impl(partner_update, context)
+    partner_text, partner_keyboard = partner_query.edits[-1]
+    assert "Module" in partner_text
+    assert {
+        "dtkd_register",
+        "dtkd_ref_code",
+        "dtkd_sales",
+        "dtkd_orders",
+        "dtkd_income",
+        "dtkd_withdraw",
+        "dtkd_payments",
+        "dtkd_ref_link",
+        "dtkd_marketing",
+        "dtkd_kpi",
+        "dtkd_rank",
+    }.issubset(callback_data(partner_keyboard))
     print("TOOL_MENU_TEST=PASS")
 
 

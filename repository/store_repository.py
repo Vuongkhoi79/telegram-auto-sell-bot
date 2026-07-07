@@ -422,7 +422,7 @@ class StoreRepository:
         order = self.find_order(order_id)
         if not order:
             return None
-        if "payment_status" in changes and "status" not in changes:
+        if "payment_status" in changes and "status" not in changes and "order_status" not in changes:
             changes["status"] = changes["payment_status"]
         updates: dict[str, Any] = {}
         for key, value in changes.items():
