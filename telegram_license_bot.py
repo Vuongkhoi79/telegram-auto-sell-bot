@@ -3125,8 +3125,13 @@ def _format_history_order(order: dict[str, object], index: int) -> str:
         value = str(order.get(name, "") or "").strip()
         return value if value else "N/A"
 
+    buyer_label = str(order.get("username", "") or "").strip() or "Chưa lưu thông tin"
+    buyer_id = int(order.get("telegram_user_id", 0) or 0)
+    buyer_id_text = str(buyer_id) if buyer_id > 0 else "Chưa lưu ID"
+
     return (
         f"{index}. {_field('order_id')}\n"
+        f"Người mua: {buyer_label} | ID: {buyer_id_text}\n"
         f"Sản phẩm: {_field('product_name')}\n"
         f"Mã sản phẩm: {_field('product_code')}\n"
         f"Gói: {_field('package_name')}\n"
@@ -3145,11 +3150,58 @@ async def _send_purchase_history(update: Update, context: ContextTypes.DEFAULT_T
     telegram_user_id = int(getattr(user, "id", 0) or 0)
     orders: list[dict[str, object]] = []
     store_db_path = _resolve_store_db_path(context.application.bot_data.get("store_db_path"))
-    if store_db_path.is_file():
+    exists = store_db_path.is_file()
+    size_bytes = store_db_path.stat().st_size if exists else 0
+    logger.info(
+        "PURCHASE_HISTORY_VIEW store_db_path=%s exists=%s size_bytes=%s telegram_user_id=%s",
+        store_db_path,
+        exists,
+        size_bytes,
+        telegram_user_id,
+    )
+    if exists:
         try:
             orders = StoreRepository(store_db_path).get_orders_by_telegram_user(telegram_user_id, limit=10)
-        except (OSError, RuntimeError, sqlite3.Error):
-            orders = []
+        except (OSError, RuntimeError, sqlite3.Error) as exc:
+            logger.exception(
+                "PURCHASE_HISTORY_READ_FAILED store_db_path=%s telegram_user_id=%s",
+                store_db_path,
+                telegram_user_id,
+            )
+            text = "🧾 Lịch sử mua hàng\n\nKhông đọc được lịch sử đơn hàng, vui lòng liên hệ hỗ trợ."
+            keyboard = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("📦 Sản phẩm", callback_data="menu_products"),
+                        InlineKeyboardButton("🏠 Menu chính", callback_data="menu_main"),
+                    ]
+                ]
+            )
+            await _show_navigation_screen(update, text, keyboard, edit=edit)
+            return
+    else:
+        logger.error(
+            "PURCHASE_HISTORY_DB_MISSING store_db_path=%s telegram_user_id=%s",
+            store_db_path,
+            telegram_user_id,
+        )
+        text = "🧾 Lịch sử mua hàng\n\nKhông đọc được lịch sử đơn hàng, vui lòng liên hệ hỗ trợ."
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("📦 Sản phẩm", callback_data="menu_products"),
+                    InlineKeyboardButton("🏠 Menu chính", callback_data="menu_main"),
+                ]
+            ]
+        )
+        await _show_navigation_screen(update, text, keyboard, edit=edit)
+        return
+    logger.info(
+        "PURCHASE_HISTORY_RESULT store_db_path=%s telegram_user_id=%s orders_count=%s",
+        store_db_path,
+        telegram_user_id,
+        len(orders),
+    )
     if not orders:
         text = "🧾 Lịch sử mua hàng\n\nBạn chưa có đơn hàng nào."
     else:

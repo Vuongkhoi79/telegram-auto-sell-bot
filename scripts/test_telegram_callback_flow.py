@@ -181,6 +181,19 @@ class TelegramCallbackFlowTest(unittest.TestCase):
         self.assertIn("Lịch sử mua hàng", empty_text)
         self.assertIn("Bạn chưa có đơn hàng nào.", empty_text)
 
+        missing_history_context = SimpleNamespace(
+            application=SimpleNamespace(
+                bot_data={
+                    "store_db_path": Path(self.temp_dir.name) / "missing-store.db",
+                }
+            )
+        )
+        missing_update = FakeUpdate("menu_history")
+        asyncio.run(bot._send_purchase_history(missing_update, missing_history_context, edit=True))
+        missing_text = missing_update.callback_query.edits[-1][0]
+        self.assertIn("Không đọc được lịch sử đơn hàng, vui lòng liên hệ hỗ trợ.", missing_text)
+        self.assertNotIn("Bạn chưa có đơn hàng nào.", missing_text)
+
         now = "2026-06-26T00:00:00+00:00"
         repo = StoreRepository(self.db_path)
         repo.upsert_order(
@@ -188,6 +201,25 @@ class TelegramCallbackFlowTest(unittest.TestCase):
                 "order_id": "ORD-HIST-001",
                 "telegram_user_id": 42,
                 "username": "Test User",
+                "product_code": "GEMINI",
+                "product_name": "GEMINI AI",
+                "package_name": "Gemini AI Pro",
+                "quantity": 1,
+                "unit_price_vnd": 70000,
+                "total_vnd": 70000,
+                "delivery_type": "account",
+                "payment_status": "paid",
+                "order_status": "delivered",
+                "created_at": now,
+                "paid_at": now,
+                "delivered_at": now,
+            }
+        )
+        repo.upsert_order(
+            {
+                "order_id": "ORD-HIST-NO-USER",
+                "telegram_user_id": 42,
+                "username": "",
                 "product_code": "GEMINI",
                 "product_name": "GEMINI AI",
                 "package_name": "Gemini AI Pro",
@@ -226,6 +258,8 @@ class TelegramCallbackFlowTest(unittest.TestCase):
         asyncio.run(bot._on_menu_impl(history_update, self.context))
         history_text = history_update.callback_query.edits[-1][0]
         self.assertIn("ORD-HIST-001", history_text)
+        self.assertIn("Người mua: Test User | ID: 42", history_text)
+        self.assertIn("Người mua: Chưa lưu thông tin | ID: 42", history_text)
         self.assertIn("GEMINI AI", history_text)
         self.assertNotIn("ORD-HIST-OTHER", history_text)
         self.assertEqual(before_stock, self._gemini_stock_counts())
