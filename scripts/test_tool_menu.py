@@ -59,6 +59,14 @@ def callback_data(keyboard) -> set[str]:
     }
 
 
+def button_texts(keyboard) -> list[str]:
+    return [
+        button.text
+        for row in keyboard.inline_keyboard
+        for button in row
+    ]
+
+
 async def main() -> None:
     context = type(
         "FakeContext",
@@ -73,6 +81,9 @@ async def main() -> None:
     await bot.cmd_start(start_update, context)
     _, main_keyboard = start_message.replies[-1]
     assert {"menu_products", "menu_tools", "menu_partners"}.issubset(callback_data(main_keyboard))
+    main_texts = button_texts(main_keyboard)
+    assert "🔗 Affiliate" in main_texts
+    assert "🤝 ĐTKD" not in main_texts
 
     tool_query = FakeQuery("menu_tools")
     tool_update = type("FakeUpdate", (), {"callback_query": tool_query})()
@@ -99,6 +110,9 @@ async def main() -> None:
     await bot._on_menu_impl(back_update, context)
     _, restored_main_keyboard = back_query.edits[-1]
     assert {"menu_products", "menu_tools", "menu_partners"}.issubset(callback_data(restored_main_keyboard))
+    restored_main_texts = button_texts(restored_main_keyboard)
+    assert "🔗 Affiliate" in restored_main_texts
+    assert "🤝 ĐTKD" not in restored_main_texts
 
     partner_query = FakeQuery("menu_partners")
     partner_update = type("FakeUpdate", (), {"callback_query": partner_query, "effective_user": FakeUser()})()
@@ -131,12 +145,13 @@ async def main() -> None:
     await bot.cmd_help(admin_help_update, context)
     admin_help_text, _ = admin_help_message.replies[-1]
     assert "Dùng /dtkd" in admin_help_text
+    assert "Affiliate" in admin_help_text
 
     dtkd_message = FakeMessage()
     dtkd_update = type("FakeUpdate", (), {"effective_user": admin_user, "effective_message": dtkd_message})()
     await bot.cmd_dtkd(dtkd_update, context)
     dtkd_text, _ = dtkd_message.replies[-1]
-    assert "/dtkd_approve <ma_dtkd>" in dtkd_text
+    assert "/dtkd_approve <ma_affiliate>" in dtkd_text
     assert "/dtkd_approve_commission <commission_id_or_order_id>" in dtkd_text
     print("TOOL_MENU_TEST=PASS")
 

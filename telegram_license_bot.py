@@ -73,15 +73,8 @@ PROCESSED_TRANSACTIONS_PATH = PROJECT_ROOT / "processed_transactions.json"
 AI_DAILY_PRODUCT_NAME = "AI DAILY VIDEO CREATOR"
 DEFAULT_DOWNLOAD_URL = "https://drive.google.com/file/d/1LtCqibeDyg11hmagprhFz6zkwgquwow5/view?usp=sharing"
 ORDER_TTL_MINUTES = 5
-DTKD_PARTNER_FUND_CAP_RATE = float(os.environ.get("DTKD_PARTNER_FUND_CAP_RATE", "0.32") or "0.32")
-DTKD_TRIAL_MONTHS = int(os.environ.get("DTKD_TRIAL_MONTHS", "3") or "3")
-DTKD_COMMISSION_TIERS = (
-    {"min_revenue": 0, "max_revenue": 10_000_000, "rate": 0.20, "name": "0-10M"},
-    {"min_revenue": 10_000_000, "max_revenue": 30_000_000, "rate": 0.22, "name": "10-30M"},
-    {"min_revenue": 30_000_000, "max_revenue": 70_000_000, "rate": 0.24, "name": "30-70M"},
-    {"min_revenue": 70_000_000, "max_revenue": 150_000_000, "rate": 0.26, "name": "70-150M"},
-    {"min_revenue": 150_000_000, "max_revenue": None, "rate": 0.28, "name": "150M+"},
-)
+DTKD_AFFILIATE_COMMISSION_RATE = float(os.environ.get("DTKD_AFFILIATE_COMMISSION_RATE", "0.10") or "0.10")
+DTKD_COMMISSION_RECONCILE_DELAY_HOURS = int(os.environ.get("DTKD_COMMISSION_RECONCILE_DELAY_HOURS", "24") or "24")
 DTKD_KPI_TARGET_VND = int(os.environ.get("DTKD_KPI_TARGET_VND", "0") or "0")
 DTKD_KPI_BONUS_VND = int(os.environ.get("DTKD_KPI_BONUS_VND", "0") or "0")
 DTKD_WITHDRAW_MIN_VND = int(os.environ.get("DTKD_WITHDRAW_MIN_VND", "100000") or "100000")
@@ -445,6 +438,11 @@ def _is_message_not_modified(exc: BadRequest) -> bool:
     return "message is not modified" in str(exc).lower()
 
 
+def _clear_pending_dtkd_order_ref(context: ContextTypes.DEFAULT_TYPE) -> None:
+    if getattr(context, "user_data", None) is not None:
+        context.user_data.pop("dtkd_order_ref", None)
+
+
 async def _safe_edit_or_send(update: Update, text: str, reply_markup: InlineKeyboardMarkup | None = None, *, edit: bool = False) -> None:
     query = getattr(update, "callback_query", None)
     if edit and query:
@@ -486,7 +484,7 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("💰 Nạp tiền", callback_data="menu_payment"),
                 InlineKeyboardButton("📦 Đơn hàng", callback_data="menu_orders"),
             ],
-            [InlineKeyboardButton("🤝 ĐTKD", callback_data="menu_partners")],
+            [InlineKeyboardButton("🔗 Affiliate", callback_data="menu_partners")],
             [InlineKeyboardButton("💬 Hỗ trợ", callback_data="menu_support")],
         ]
     )
@@ -887,19 +885,62 @@ def _load_processed_transactions() -> list[dict[str, object]]:
     return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
 
 
+def _dtkd_order_ref_for_order_id(order_id: str) -> dict[str, object] | None:
+    normalized = str(order_id or "").strip().upper()
+    if not normalized:
+        return None
+    try:
+        data = _load_business_partners()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    for ref in _dtkd_list(data, "order_refs"):
+        if str(ref.get("order_id", "")).upper() == normalized:
+            return ref
+    return None
+
+
+def _dtkd_enrich_order_accounting(order: dict[str, object] | None) -> dict[str, object] | None:
+    if not order:
+        return order
+    order_ref = _dtkd_order_ref_for_order_id(str(order.get("order_id", "")))
+    if not order_ref:
+        order.setdefault("gross_amount", _order_payable_amount(order))
+        order.setdefault("total_amount", _order_payable_amount(order))
+        order.setdefault("commission_amount", 0)
+        order.setdefault("payable_amount", _order_payable_amount(order))
+        order.setdefault("net_revenue", _order_payable_amount(order))
+        return order
+    for key in (
+        "partner_id",
+        "partner_code",
+        "partner_telegram_user_id",
+        "referral_code",
+        "gross_amount",
+        "total_amount",
+        "commission_amount",
+        "payable_amount",
+        "net_revenue",
+        "commission_status",
+        "commission_deduction_mode",
+    ):
+        if key in order_ref:
+            order[key] = order_ref[key]
+    return order
+
+
 def _find_order(order_id: str) -> dict[str, object] | None:
     path = _resolve_store_db_path()
     if _sqlite_orders_enabled() and path.is_file():
         try:
             order = StoreRepository(path).find_order(order_id)
             if order:
-                return order
+                return _dtkd_enrich_order_accounting(order)
         except (OSError, RuntimeError, sqlite3.Error) as exc:
             logger.error("SQLite order lookup failed for %s; account sales fail closed: %s", order_id, exc)
             return None
     for order in reversed(_load_orders() if not (_sqlite_orders_enabled() and path.is_file()) else []):
         if str(order.get("order_id", "")).upper() == order_id.upper():
-            return order
+            return _dtkd_enrich_order_accounting(order)
     return None
 
 
@@ -912,7 +953,7 @@ def _update_order(order_id: str, **changes: object) -> dict[str, object] | None:
             repository = StoreRepository(path)
             updated = repository.update_order(order_id, **changes)
             if updated:
-                return updated
+                return _dtkd_enrich_order_accounting(updated)
         except (OSError, RuntimeError, sqlite3.Error) as exc:
             logger.error("SQLite order update failed for %s; account sales fail closed: %s", order_id, exc)
             return None
@@ -921,11 +962,19 @@ def _update_order(order_id: str, **changes: object) -> dict[str, object] | None:
         if str(order.get("order_id", "")).upper() == order_id.upper():
             order.update(changes)
             _save_orders(orders)
-            return order
+            return _dtkd_enrich_order_accounting(order)
     return None
 
 
-def _create_sales_order(update: Update, product_name: str, package_name: str, quantity: int) -> dict[str, object]:
+def _create_sales_order(
+    update: Update,
+    product_name: str,
+    package_name: str,
+    quantity: int,
+    *,
+    referral_code: str = "",
+    attach_existing_referral: bool = True,
+) -> dict[str, object]:
     callback_data = str(getattr(getattr(update, "callback_query", None), "data", "") or "")
     user_id = getattr(getattr(update, "effective_user", None), "id", None)
     store_db_path = _resolve_store_db_path()
@@ -1000,6 +1049,11 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
         "quantity": int(quantity),
         "unit_price": int(unit_price),
         "total": int(unit_price) * int(quantity),
+        "gross_amount": int(unit_price) * int(quantity),
+        "total_amount": int(unit_price) * int(quantity),
+        "commission_amount": 0,
+        "net_revenue": int(unit_price) * int(quantity),
+        "commission_status": "",
         "amount": int(unit_price) * int(quantity),
         "delivery_type": "account",
         "payment_method": "",
@@ -1054,7 +1108,12 @@ def _create_sales_order(update: Update, product_name: str, package_name: str, qu
             raise InventoryReservationError("Sản phẩm hiện đã hết hàng, vui lòng quay lại sau.") from exc
     else:
         raise InventoryReservationError("Sản phẩm chưa có cấu hình kho SQLite.")
-    order = _attach_partner_to_order(order)
+    if referral_code:
+        partner = _find_business_partner_by_code(referral_code)
+        if partner:
+            order = _attach_partner_code_to_order(order, partner, referral_code)
+    elif attach_existing_referral:
+        order = _attach_partner_to_order(order)
     orders = _load_orders()
     orders.append(order)
     _save_orders(orders)
@@ -1301,16 +1360,16 @@ def _start_help_text() -> str:
 
 def _dtkd_admin_help_text() -> str:
     return (
-        "🤝 Quản trị ĐTKD\n\n"
+        "🔗 Quản trị Affiliate\n\n"
         "/dtkd_list\n"
-        "/dtkd_approve <ma_dtkd>\n"
-        "/dtkd_reject <ma_dtkd>\n"
-        "/dtkd_lock <ma_dtkd>\n"
-        "/dtkd_unlock <ma_dtkd>\n"
+        "/dtkd_approve <ma_affiliate>\n"
+        "/dtkd_reject <ma_affiliate>\n"
+        "/dtkd_lock <ma_affiliate>\n"
+        "/dtkd_unlock <ma_affiliate>\n"
         "/dtkd_withdrawals\n"
         "/dtkd_pay <withdrawal_id>\n"
         "/dtkd_approve_commission <commission_id_or_order_id>\n"
-        "/dtkd_report <ma_dtkd>"
+        "/dtkd_report <ma_affiliate>"
     )
 
 
@@ -1318,7 +1377,7 @@ def _admin_help_text() -> str:
     return (
         f"{_start_help_text()}\n\n"
         "Admin:\n"
-        "Dùng /dtkd để xem lệnh quản trị ĐTKD."
+        "Dùng /dtkd để xem lệnh quản trị Affiliate."
     )
 
 
@@ -1350,6 +1409,7 @@ def _load_business_partners() -> dict[str, object]:
             "order_refs": [],
             "commissions": [],
             "withdrawals": [],
+            "monthly_bonus_notifications": [],
             "business_policies": [],
             "commission_policies": [],
             "kpi_rules": [],
@@ -1367,6 +1427,7 @@ def _load_business_partners() -> dict[str, object]:
             "order_refs": [],
             "commissions": [],
             "withdrawals": [],
+            "monthly_bonus_notifications": [],
             "business_policies": [],
             "commission_policies": [],
             "kpi_rules": [],
@@ -1383,6 +1444,7 @@ def _load_business_partners() -> dict[str, object]:
         "order_refs",
         "commissions",
         "withdrawals",
+        "monthly_bonus_notifications",
         "business_policies",
         "commission_policies",
         "kpi_rules",
@@ -1394,12 +1456,11 @@ def _load_business_partners() -> dict[str, object]:
     if not data["commission_policies"]:
         data["commission_policies"] = [
             {
-                "policy_id": "DTKD_TRIAL_3M_REVENUE_TIERS",
-                "name": "Hoa hồng 3 tháng đầu theo doanh số",
+                "policy_id": "DTKD_AFFILIATE_10PCT",
+                "name": "Affiliate 10% sau đối soát 24 giờ",
                 "base_type": "revenue",
-                "trial_months": DTKD_TRIAL_MONTHS,
-                "fund_cap_rate": DTKD_PARTNER_FUND_CAP_RATE,
-                "tiers": list(DTKD_COMMISSION_TIERS),
+                "rate": DTKD_AFFILIATE_COMMISSION_RATE,
+                "reconcile_delay_hours": DTKD_COMMISSION_RECONCILE_DELAY_HOURS,
                 "active": True,
             }
         ]
@@ -1436,8 +1497,8 @@ def _dtkd_list(data: dict[str, object], key: str) -> list[dict[str, object]]:
 
 def _default_dtkd_business_policy() -> dict[str, object]:
     return {
-        "policy_id": "POL-DTKD-COMMISSION-WITHDRAWAL-V1",
-        "policy_type": "dtkd_commission_withdrawal",
+        "policy_id": "POL-DTKD-AFFILIATE-V1",
+        "policy_type": "dtkd_affiliate",
         "scope": {"type": "global"},
         "legacy_policy_ids": ["DTKD_TRIAL_3M_REVENUE_TIERS"],
         "effective_from": "2026-07-01T00:00:00+00:00",
@@ -1446,11 +1507,12 @@ def _default_dtkd_business_policy() -> dict[str, object]:
         "status": "active",
         "config": {
             "base_type": "revenue",
-            "fund_cap_rate": DTKD_PARTNER_FUND_CAP_RATE,
-            "trial_months": DTKD_TRIAL_MONTHS,
             "commission_initial_status": "pending_reconcile",
+            "commission_ready_status": "withdrawable",
+            "commission_rate": DTKD_AFFILIATE_COMMISSION_RATE,
+            "reconcile_delay_hours": DTKD_COMMISSION_RECONCILE_DELAY_HOURS,
             "withdrawal_min_vnd": DTKD_WITHDRAW_MIN_VND,
-            "commission_tiers": list(DTKD_COMMISSION_TIERS),
+            "monthly_campaigns": [],
             "kpi_enabled": False,
             "future_kpi_metrics": ["revenue", "new_customers", "renewal_customers", "refund_rate", "policy_compliance"],
         },
@@ -1466,11 +1528,36 @@ def _ensure_business_policy_defaults(data: dict[str, object]) -> bool:
         changed = True
     if not any(
         isinstance(policy, dict)
-        and str(policy.get("policy_id", "")) == "POL-DTKD-COMMISSION-WITHDRAWAL-V1"
+        and str(policy.get("policy_id", "")) == "POL-DTKD-AFFILIATE-V1"
         for policy in policies
     ):
         policies.append(_default_dtkd_business_policy())
         changed = True
+    for policy in policies:
+        if not isinstance(policy, dict) or str(policy.get("policy_id", "")) != "POL-DTKD-AFFILIATE-V1":
+            continue
+        config = policy.setdefault("config", {})
+        if not isinstance(config, dict):
+            config = {}
+            policy["config"] = config
+            changed = True
+        defaults = _default_dtkd_business_policy()["config"]
+        for key in (
+            "base_type",
+            "commission_initial_status",
+            "commission_ready_status",
+            "commission_rate",
+            "reconcile_delay_hours",
+            "withdrawal_min_vnd",
+            "monthly_campaigns",
+        ):
+            if key not in config:
+                config[key] = defaults[key]
+                changed = True
+        for old_key in ("fund_cap_rate", "trial_months", "commission_tiers", "tier_basis", "monthly_bonus_status", "monthly_bonus_notify_day"):
+            if old_key in config:
+                config.pop(old_key, None)
+                changed = True
     return changed
 
 
@@ -1482,7 +1569,7 @@ def _business_policy_config(policy: dict[str, object] | None) -> dict[str, objec
 
 
 def _active_business_policy(policy_type: str, *, partner: dict[str, object] | None = None) -> dict[str, object]:
-    fallback = _default_dtkd_business_policy() if policy_type == "dtkd_commission_withdrawal" else {}
+    fallback = _default_dtkd_business_policy() if policy_type in {"dtkd_affiliate", "dtkd_commission_withdrawal"} else {}
     try:
         data = _load_business_partners()
     except (OSError, RuntimeError, ValueError):
@@ -1507,7 +1594,7 @@ def _active_business_policy(policy_type: str, *, partner: dict[str, object] | No
 
 
 def _dtkd_business_policy(partner: dict[str, object] | None = None) -> dict[str, object]:
-    return _active_business_policy("dtkd_commission_withdrawal", partner=partner)
+    return _active_business_policy("dtkd_affiliate", partner=partner)
 
 
 def _dtkd_policy_config(partner: dict[str, object] | None = None) -> dict[str, object]:
@@ -1517,18 +1604,8 @@ def _dtkd_policy_config(partner: dict[str, object] | None = None) -> dict[str, o
     return config
 
 
-def _dtkd_policy_fund_cap_rate(partner: dict[str, object] | None = None) -> float:
-    try:
-        return float(_dtkd_policy_config(partner).get("fund_cap_rate", DTKD_PARTNER_FUND_CAP_RATE))
-    except (TypeError, ValueError):
-        return DTKD_PARTNER_FUND_CAP_RATE
-
-
 def _dtkd_policy_trial_months(partner: dict[str, object] | None = None) -> int:
-    try:
-        return int(_dtkd_policy_config(partner).get("trial_months", DTKD_TRIAL_MONTHS))
-    except (TypeError, ValueError):
-        return DTKD_TRIAL_MONTHS
+    return 0
 
 
 def _dtkd_withdraw_min_vnd(partner: dict[str, object] | None = None) -> int:
@@ -1598,14 +1675,14 @@ def normalize_partner_profile(partner: dict[str, object]) -> dict[str, object]:
     partner.setdefault("leader_partner_id", None)
     partner.setdefault("parent_partner_id", None)
     partner.setdefault("level", "Cộng tác viên")
-    partner.setdefault("commission_policy_id", "DTKD_TRIAL_3M_REVENUE_TIERS")
+    partner.setdefault("commission_policy_id", "DTKD_AFFILIATE_10PCT")
     partner.setdefault("kpi_policy_id", None)
     partner.setdefault("rank_policy_id", None)
     partner.setdefault("bonus_policy_id", None)
     partner.setdefault(
         "kpi_profile",
         {
-            "trial_months": DTKD_TRIAL_MONTHS,
+            "trial_months": 0,
             "kpi_enabled_after_trial": False,
             "metrics": ["revenue", "new_customers", "renewal_customers", "refund_rate", "policy_compliance"],
         },
@@ -1706,12 +1783,12 @@ def _ensure_business_partner(user: object | None, profile: dict[str, object] | N
         "leader_partner_id": None,
         "parent_partner_id": None,
         "approved_at": "",
-        "commission_policy_id": "DTKD_TRIAL_3M_REVENUE_TIERS",
+        "commission_policy_id": "DTKD_AFFILIATE_10PCT",
         "kpi_policy_id": None,
         "rank_policy_id": None,
         "bonus_policy_id": None,
         "kpi_profile": {
-            "trial_months": DTKD_TRIAL_MONTHS,
+            "trial_months": 0,
             "kpi_enabled_after_trial": False,
             "metrics": ["revenue", "new_customers", "renewal_customers", "refund_rate", "policy_compliance"],
         },
@@ -1728,12 +1805,12 @@ def _ensure_business_partner(user: object | None, profile: dict[str, object] | N
     return partner
 
 
-def _save_customer_referral(customer_user: object | None, partner: dict[str, object], source_code: str) -> None:
+def _save_customer_referral(customer_user: object | None, partner: dict[str, object], source_code: str) -> bool:
     customer_id = int(getattr(customer_user, "id", 0) or 0)
     partner_telegram_user_id = int(partner.get("telegram_user_id", 0) or 0)
     partner_id = get_partner_id(partner)
     if not customer_id or not partner_telegram_user_id or customer_id == partner_telegram_user_id:
-        return
+        return False
     data = _load_business_partners()
     referrals = data.setdefault("referrals", [])
     if not isinstance(referrals, list):
@@ -1743,7 +1820,7 @@ def _save_customer_referral(customer_user: object | None, partner: dict[str, obj
     for referral in referrals:
         if isinstance(referral, dict) and int(referral.get("customer_telegram_user_id", 0) or 0) == customer_id:
             if referral.get("partner_code"):
-                return
+                return False
             referral.update(
                 {
                     "partner_telegram_user_id": partner_telegram_user_id,
@@ -1755,7 +1832,7 @@ def _save_customer_referral(customer_user: object | None, partner: dict[str, obj
                 }
             )
             _save_business_partners(data)
-            return
+            return True
     referrals.append(
         {
             "customer_telegram_user_id": customer_id,
@@ -1772,6 +1849,7 @@ def _save_customer_referral(customer_user: object | None, partner: dict[str, obj
     )
     _save_business_partners(data)
     update_partner_metrics_snapshot(get_partner_id(partner))
+    return True
 
 
 def _customer_referral(telegram_user_id: int) -> dict[str, object] | None:
@@ -1811,10 +1889,11 @@ def _attach_partner_to_order(order: dict[str, object]) -> dict[str, object]:
         "partner_telegram_user_id": int(partner.get("telegram_user_id", 0) or 0),
         "partner_code": partner.get("partner_code", ""),
         "referral_code": partner.get("referral_code", ""),
-        "commission_policy_id": partner.get("commission_policy_id", "DTKD_TRIAL_3M_REVENUE_TIERS"),
+        "commission_policy_id": partner.get("commission_policy_id", "DTKD_AFFILIATE_10PCT"),
         "created_at": now,
         "updated_at": now,
     }
+    payload.update(_dtkd_order_commission_accounting(partner, order))
     if existing:
         existing.update(payload)
     else:
@@ -1824,6 +1903,66 @@ def _attach_partner_to_order(order: dict[str, object]) -> dict[str, object]:
     order["referral_code"] = payload["referral_code"]
     order["partner_id"] = payload["partner_id"]
     order["partner_telegram_user_id"] = payload["partner_telegram_user_id"]
+    order["gross_amount"] = payload["gross_amount"]
+    order["total_amount"] = payload["total_amount"]
+    order["commission_amount"] = payload["commission_amount"]
+    order["payable_amount"] = payload["payable_amount"]
+    order["net_revenue"] = payload["net_revenue"]
+    order["commission_status"] = payload["commission_status"]
+    order["commission_deduction_mode"] = payload["commission_deduction_mode"]
+    order["total"] = payload["payable_amount"]
+    order["amount"] = payload["payable_amount"]
+    return order
+
+
+def _attach_partner_code_to_order(order: dict[str, object], partner: dict[str, object], source_code: str) -> dict[str, object]:
+    if str(partner.get("status", "")).lower() not in {"approved", "active"}:
+        return order
+    data = _load_business_partners()
+    order_refs = data.setdefault("order_refs", [])
+    if not isinstance(order_refs, list):
+        order_refs = []
+        data["order_refs"] = order_refs
+    order_id = str(order.get("order_id", "")).strip()
+    if not order_id:
+        return order
+    now = _utc_now_iso()
+    payload = {
+        "order_id": order_id,
+        "customer_telegram_user_id": int(order.get("telegram_user_id", 0) or 0),
+        "partner_id": get_partner_id(partner),
+        "partner_telegram_user_id": int(partner.get("telegram_user_id", 0) or 0),
+        "partner_code": partner.get("partner_code", ""),
+        "referral_code": partner.get("referral_code", ""),
+        "source_code": _normalize_referral_code(source_code),
+        "commission_policy_id": partner.get("commission_policy_id", "DTKD_AFFILIATE_10PCT"),
+        "created_at": now,
+        "updated_at": now,
+    }
+    payload.update(_dtkd_order_commission_accounting(partner, order))
+    existing = None
+    for item in order_refs:
+        if isinstance(item, dict) and str(item.get("order_id", "")).upper() == order_id.upper():
+            existing = item
+            break
+    if existing:
+        existing.update(payload)
+    else:
+        order_refs.append(payload)
+    _save_business_partners(data)
+    order["partner_id"] = payload["partner_id"]
+    order["partner_telegram_user_id"] = payload["partner_telegram_user_id"]
+    order["partner_code"] = payload["partner_code"]
+    order["referral_code"] = payload["referral_code"]
+    order["gross_amount"] = payload["gross_amount"]
+    order["total_amount"] = payload["total_amount"]
+    order["commission_amount"] = payload["commission_amount"]
+    order["payable_amount"] = payload["payable_amount"]
+    order["net_revenue"] = payload["net_revenue"]
+    order["commission_status"] = payload["commission_status"]
+    order["commission_deduction_mode"] = payload["commission_deduction_mode"]
+    order["total"] = payload["payable_amount"]
+    order["amount"] = payload["payable_amount"]
     return order
 
 
@@ -1866,28 +2005,20 @@ def _dtkd_is_in_trial_period(partner: dict[str, object], now: datetime | None = 
 
 
 def _dtkd_commission_rate_for_monthly_revenue(monthly_revenue: int, policy: dict[str, object] | None = None) -> dict[str, object]:
-    revenue = int(monthly_revenue or 0)
     config = _business_policy_config(policy) if policy else _dtkd_policy_config()
-    raw_tiers = config.get("commission_tiers", config.get("tiers", DTKD_COMMISSION_TIERS))
-    tiers = raw_tiers if isinstance(raw_tiers, (list, tuple)) and raw_tiers else DTKD_COMMISSION_TIERS
     try:
-        fund_cap_rate = float(config.get("fund_cap_rate", DTKD_PARTNER_FUND_CAP_RATE))
+        rate = float(config.get("commission_rate", DTKD_AFFILIATE_COMMISSION_RATE))
     except (TypeError, ValueError):
-        fund_cap_rate = DTKD_PARTNER_FUND_CAP_RATE
-    for tier in tiers:
-        if not isinstance(tier, dict):
-            continue
-        min_revenue = int(tier["min_revenue"])
-        max_revenue = tier["max_revenue"]
-        if revenue >= min_revenue and (max_revenue is None or revenue < int(max_revenue)):
-            rate = min(float(tier["rate"]), fund_cap_rate)
-            return {**tier, "rate": rate}
-    last_tier = tiers[-1] if isinstance(tiers[-1], dict) else DTKD_COMMISSION_TIERS[-1]
-    return {**last_tier, "rate": min(float(last_tier["rate"]), fund_cap_rate)}
+        rate = DTKD_AFFILIATE_COMMISSION_RATE
+    return {"rate": rate, "name": "affiliate_10pct", "monthly_bonus_vnd": 0, "manual_bonus": False}
 
 
 def _dtkd_order_total(order: dict[str, object]) -> int:
-    return int(order.get("total", order.get("total_vnd", order.get("amount", 0))) or 0)
+    return int(order.get("gross_amount", order.get("total", order.get("total_vnd", order.get("amount", 0)))) or 0)
+
+
+def _order_payable_amount(order: dict[str, object]) -> int:
+    return int(order.get("total", order.get("total_vnd", order.get("amount", order.get("payable_amount", 0)))) or 0)
 
 
 def _dtkd_order_month_key(order: dict[str, object]) -> str:
@@ -1908,6 +2039,29 @@ def _dtkd_month_revenue_for_partner(partner: dict[str, object], month_key: str, 
     return total
 
 
+def _dtkd_month_payable_revenue_for_partner(partner: dict[str, object], month_key: str, *, exclude_order_id: str = "") -> int:
+    excluded = str(exclude_order_id or "").upper()
+    total = 0
+    for order in _partner_orders(str(partner.get("referral_code", ""))):
+        order_id = str(order.get("order_id", "")).upper()
+        if excluded and order_id == excluded:
+            continue
+        if _dtkd_order_month_key(order) != month_key:
+            continue
+        if str(order.get("payment_status", "")).lower() == "paid" or str(order.get("order_status", "")).lower() == "delivered":
+            total += _order_payable_amount(order)
+    return total
+
+
+def _dtkd_commission_tier_for_order(partner: dict[str, object], order: dict[str, object], policy: dict[str, object]) -> dict[str, object]:
+    config = _business_policy_config(policy)
+    try:
+        rate = float(config.get("commission_rate", DTKD_AFFILIATE_COMMISSION_RATE))
+    except (TypeError, ValueError):
+        rate = DTKD_AFFILIATE_COMMISSION_RATE
+    return {"rate": rate, "name": "affiliate_10pct", "month_payable_before": 0, "month_payable_after": 0}
+
+
 def _dtkd_commission_policy_snapshot(partner: dict[str, object], order: dict[str, object]) -> dict[str, object]:
     order_total = _dtkd_order_total(order)
     month_key = _dtkd_order_month_key(order)
@@ -1916,28 +2070,42 @@ def _dtkd_commission_policy_snapshot(partner: dict[str, object], order: dict[str
     month_revenue_after = month_revenue_before + order_total
     policy = _dtkd_business_policy(partner)
     config = _business_policy_config(policy)
-    fund_cap_rate = _dtkd_policy_fund_cap_rate(partner)
-    tier = _dtkd_commission_rate_for_monthly_revenue(month_revenue_after, policy)
-    rate = min(float(tier["rate"]), fund_cap_rate)
+    tier = _dtkd_commission_tier_for_order(partner, order, policy)
+    rate = float(tier["rate"])
     return {
-        "policy_id": str(policy.get("policy_id", partner.get("commission_policy_id", "DTKD_TRIAL_3M_REVENUE_TIERS")) or "DTKD_TRIAL_3M_REVENUE_TIERS"),
-        "policy_type": str(policy.get("policy_type", "dtkd_commission_withdrawal") or "dtkd_commission_withdrawal"),
+        "policy_id": str(policy.get("policy_id", partner.get("commission_policy_id", "DTKD_AFFILIATE_10PCT")) or "DTKD_AFFILIATE_10PCT"),
+        "policy_type": str(policy.get("policy_type", "dtkd_affiliate") or "dtkd_affiliate"),
         "scope": policy.get("scope", {"type": "global"}),
         "base_type": str(config.get("base_type", "revenue") or "revenue"),
         "month": month_key,
         "month_revenue_before": month_revenue_before,
         "month_revenue_after": month_revenue_after,
-        "tier_name": tier.get("name", ""),
-        "tier_min_revenue": tier.get("min_revenue", 0),
-        "tier_max_revenue": tier.get("max_revenue"),
         "rate": rate,
-        "fund_cap_rate": fund_cap_rate,
-        "trial_months": _dtkd_policy_trial_months(partner),
+        "reconcile_delay_hours": int(config.get("reconcile_delay_hours", DTKD_COMMISSION_RECONCILE_DELAY_HOURS) or DTKD_COMMISSION_RECONCILE_DELAY_HOURS),
         "commission_initial_status": _dtkd_commission_initial_status(partner),
+        "commission_ready_status": str(config.get("commission_ready_status", "withdrawable") or "withdrawable"),
         "withdrawal_min_vnd": _dtkd_withdraw_min_vnd(partner),
-        "in_trial_period": _dtkd_is_in_trial_period(partner),
+        "monthly_campaigns": config.get("monthly_campaigns", []),
         "kpi_enabled": bool(config.get("kpi_enabled", False)),
         "future_kpi_metrics": config.get("future_kpi_metrics", ["revenue", "new_customers", "renewal_customers", "refund_rate", "policy_compliance"]),
+    }
+
+
+def _dtkd_order_commission_accounting(partner: dict[str, object], order: dict[str, object]) -> dict[str, object]:
+    gross_amount = _dtkd_order_total(order)
+    policy = _dtkd_commission_policy_snapshot(partner, order)
+    rate = float(policy["rate"])
+    commission_amount = int(gross_amount * rate)
+    return {
+        "gross_amount": gross_amount,
+        "total_amount": gross_amount,
+        "commission_amount": commission_amount,
+        "payable_amount": gross_amount,
+        "net_revenue": gross_amount,
+        "commission_status": str(policy.get("commission_initial_status", "pending_reconcile") or "pending_reconcile"),
+        "commission_deduction_mode": "affiliate",
+        "rate": rate,
+        "policy_snapshot": policy,
     }
 
 
@@ -1970,12 +2138,42 @@ def _record_partner_commission(order: dict[str, object]) -> None:
     for commission in commissions:
         if isinstance(commission, dict) and str(commission.get("order_id", "")).upper() == order_id.upper():
             return
-    amount = _dtkd_order_total(order)
+    amount = int(order_ref.get("gross_amount", _dtkd_order_total(order)) or _dtkd_order_total(order))
     partner = _find_business_partner_by_code(str(order_ref.get("partner_code", "")))
     if not partner:
         return
-    policy = _dtkd_commission_policy_snapshot(partner, order)
-    rate = min(float(policy["rate"]), float(policy.get("fund_cap_rate", DTKD_PARTNER_FUND_CAP_RATE)))
+    customer_id = int(order_ref.get("customer_telegram_user_id", order.get("telegram_user_id", 0)) or 0)
+    partner_telegram_user_id = int(partner.get("telegram_user_id", order_ref.get("partner_telegram_user_id", 0)) or 0)
+    if customer_id and partner_telegram_user_id and customer_id == partner_telegram_user_id:
+        order_ref["commission_status"] = "rejected_self_referral"
+        order_ref["self_referral"] = True
+        order_ref["updated_at"] = _utc_now_iso()
+        _save_business_partners(data)
+        return
+    policy = order_ref.get("policy_snapshot")
+    if not isinstance(policy, dict):
+        policy = _dtkd_commission_policy_snapshot(partner, order)
+    try:
+        rate = float(order_ref.get("rate", policy.get("rate", 0)) or 0)
+    except (TypeError, ValueError):
+        rate = 0
+    try:
+        commission_amount = int(order_ref.get("commission_amount", 0) or 0)
+    except (TypeError, ValueError):
+        commission_amount = 0
+    if commission_amount <= 0:
+        commission_amount = int(amount * rate)
+    commission_status = str(
+        order_ref.get("commission_status")
+        or policy.get("commission_initial_status", "pending_reconcile")
+        or "pending_reconcile"
+    )
+    delivered_at = _parse_iso_datetime(order.get("delivered_at") or order_ref.get("delivered_at"))
+    paid_at = _parse_iso_datetime(order.get("paid_at") or order_ref.get("paid_at"))
+    reconcile_base_at = delivered_at or paid_at
+    delay_hours = int(policy.get("reconcile_delay_hours", DTKD_COMMISSION_RECONCILE_DELAY_HOURS) or DTKD_COMMISSION_RECONCILE_DELAY_HOURS)
+    if reconcile_base_at and _utc_now() >= reconcile_base_at + timedelta(hours=delay_hours):
+        commission_status = str(policy.get("commission_ready_status", "withdrawable") or "withdrawable")
     commissions.append(
         {
             "commission_id": f"COM-{order_id}",
@@ -1986,11 +2184,18 @@ def _record_partner_commission(order: dict[str, object]) -> None:
             "referral_code": order_ref.get("referral_code", ""),
             "revenue": amount,
             "rate": rate,
-            "fund_cap_rate": float(policy.get("fund_cap_rate", DTKD_PARTNER_FUND_CAP_RATE)),
             "policy_snapshot": policy,
-            "amount": int(amount * rate),
-            "status": str(policy.get("commission_initial_status", "pending_reconcile") or "pending_reconcile"),
+            "gross_amount": int(order_ref.get("gross_amount", amount) or amount),
+            "total_amount": int(order_ref.get("total_amount", amount) or amount),
+            "payable_amount": int(order_ref.get("payable_amount", amount) or amount),
+            "commission_amount": commission_amount,
+            "net_revenue": int(order_ref.get("net_revenue", amount) or amount),
+            "commission_deduction_mode": "affiliate",
+            "payable_commission_amount": commission_amount,
+            "amount": commission_amount,
+            "status": commission_status,
             "created_at": _utc_now_iso(),
+            "reconcile_after": (reconcile_base_at + timedelta(hours=delay_hours)).isoformat() if reconcile_base_at else "",
             "approved_at": "",
             "paid_at": "",
         }
@@ -2002,10 +2207,32 @@ def _partner_orders(referral_code: str) -> list[dict[str, object]]:
     partner = _find_business_partner_by_code(referral_code)
     if not partner:
         return []
-    order_ids = {str(ref.get("order_id", "")).upper() for ref in _order_refs_for_partner(partner)}
+    refs_by_order_id = {
+        str(ref.get("order_id", "")).upper(): ref
+        for ref in _order_refs_for_partner(partner)
+        if str(ref.get("order_id", "")).strip()
+    }
+    order_ids = set(refs_by_order_id)
     matches: list[dict[str, object]] = []
     for order in _load_orders():
-        if str(order.get("order_id", "")).upper() in order_ids:
+        order_id = str(order.get("order_id", "")).upper()
+        if order_id in order_ids:
+            ref = refs_by_order_id.get(order_id, {})
+            for key in (
+                "partner_id",
+                "partner_code",
+                "partner_telegram_user_id",
+                "referral_code",
+                "gross_amount",
+                "total_amount",
+                "commission_amount",
+                "payable_amount",
+                "net_revenue",
+                "commission_status",
+                "commission_deduction_mode",
+            ):
+                if key in ref:
+                    order[key] = ref[key]
             matches.append(order)
     return matches
 
@@ -2026,6 +2253,10 @@ def _partner_metrics(partner: dict[str, object] | None) -> dict[str, object]:
             "available_commission": 0,
             "customers": 0,
             "kpi_bonus": 0,
+            "monthly_payable_revenue": 0,
+            "monthly_bonus_vnd": 0,
+            "monthly_bonus_manual": False,
+            "monthly_bonus_status": "pending_bonus_payment",
             "in_trial_period": True,
             "kpi_ready": False,
         }
@@ -2048,6 +2279,7 @@ def _partner_metrics(partner: dict[str, object] | None) -> dict[str, object]:
     revenue = sum(_dtkd_order_total(order) for order in paid_orders)
     today_revenue = sum(_dtkd_order_total(order) for order in paid_orders if (_parse_iso_datetime(order.get("paid_at") or order.get("created_at")) or _utc_now()).date() == today)
     month_revenue = sum(_dtkd_order_total(order) for order in paid_orders if _dtkd_order_month_key(order) == month_key)
+    monthly_payable_revenue = month_revenue
     data = _load_business_partners()
     partner_id = get_partner_id(partner)
     partner_telegram_user_id = int(partner.get("telegram_user_id", 0) or 0)
@@ -2057,7 +2289,7 @@ def _partner_metrics(partner: dict[str, object] | None) -> dict[str, object]:
         if str(item.get("partner_id", "") or "") == partner_id
         or int(item.get("partner_telegram_user_id", 0) or 0) == partner_telegram_user_id
     ]
-    commission = sum(int(item.get("amount", 0) or 0) for item in commissions)
+    commission = sum(int(item.get("commission_amount", item.get("amount", 0)) or 0) for item in commissions)
     pending_reconcile_commission = sum(
         int(item.get("amount", 0) or 0)
         for item in commissions
@@ -2066,7 +2298,7 @@ def _partner_metrics(partner: dict[str, object] | None) -> dict[str, object]:
     approved_commission = sum(
         int(item.get("amount", 0) or 0)
         for item in commissions
-        if str(item.get("status", "")).lower() in {"approved", "paid"}
+        if str(item.get("status", "")).lower() in {"withdrawable", "approved", "paid"}
     )
     paid_commission = sum(
         int(item.get("amount", 0) or 0)
@@ -2093,6 +2325,9 @@ def _partner_metrics(partner: dict[str, object] | None) -> dict[str, object]:
         or int(item.get("partner_telegram_user_id", 0) or 0) == partner_telegram_user_id
     }
     kpi_bonus = 0
+    monthly_bonus = _dtkd_monthly_bonus_for_partner(partner, month_key)
+    monthly_bonus_manual = bool(monthly_bonus.get("monthly_bonus_manual", False))
+    monthly_bonus_vnd = int(monthly_bonus.get("monthly_bonus_vnd", 0) or 0)
     approved_total = approved_commission + kpi_bonus
     available_commission = max(0, approved_total - paid_commission - pending_withdraw)
     return {
@@ -2110,10 +2345,113 @@ def _partner_metrics(partner: dict[str, object] | None) -> dict[str, object]:
         "pending_withdraw": pending_withdraw,
         "customers": len([item for item in customers if item]),
         "kpi_bonus": kpi_bonus,
+        "monthly_payable_revenue": monthly_payable_revenue,
+        "monthly_bonus_vnd": monthly_bonus_vnd,
+        "monthly_bonus_manual": monthly_bonus_manual,
+        "monthly_bonus_status": str(monthly_bonus.get("monthly_bonus_status", "") or ""),
         "total_income": approved_total,
-        "in_trial_period": _dtkd_is_in_trial_period(partner),
+        "in_trial_period": False,
         "kpi_ready": False,
     }
+
+
+def _dtkd_monthly_bonus_for_partner(partner: dict[str, object], month_key: str) -> dict[str, object]:
+    orders = _partner_orders(str(partner.get("referral_code", "")))
+    paid_orders = [
+        order
+        for order in orders
+        if (
+            str(order.get("payment_status", "")).lower() == "paid"
+            or str(order.get("order_status", "")).lower() == "delivered"
+        )
+        and _dtkd_order_month_key(order) == month_key
+    ]
+    revenue = sum(_dtkd_order_total(order) for order in paid_orders)
+    campaigns = _dtkd_policy_config(partner).get("monthly_campaigns", [])
+    campaign = None
+    if isinstance(campaigns, list):
+        for item in campaigns:
+            if isinstance(item, dict) and str(item.get("month_key", "")) == month_key:
+                campaign = item
+                break
+    bonus_amount = 0
+    if isinstance(campaign, dict):
+        thresholds = campaign.get("thresholds", [])
+        if isinstance(thresholds, list):
+            for threshold in thresholds:
+                if not isinstance(threshold, dict):
+                    continue
+                try:
+                    min_revenue = int(threshold.get("min_revenue", 0) or 0)
+                    amount = int(threshold.get("bonus_vnd", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if revenue >= min_revenue:
+                    bonus_amount = max(bonus_amount, amount)
+    return {
+        "month_key": month_key,
+        "payable_revenue": revenue,
+        "monthly_bonus_vnd": bonus_amount,
+        "monthly_bonus_manual": False,
+        "monthly_bonus_status": "pending_bonus_payment" if bonus_amount else "",
+        "paid_order_count": len(paid_orders),
+    }
+
+
+async def dtkd_monthly_bonus_notification_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    now = datetime.now(timezone(timedelta(hours=7)))
+    policy = _dtkd_business_policy(None)
+    notify_day = int(policy.get("monthly_bonus_notify_day", 5) or 5)
+    if now.day != notify_day:
+        return
+    target_month = (now.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
+    data = _load_business_partners()
+    notifications = data.setdefault("monthly_bonus_notifications", [])
+    if not isinstance(notifications, list):
+        notifications = []
+        data["monthly_bonus_notifications"] = notifications
+    sent_keys = {
+        (str(item.get("partner_id", "")), str(item.get("month_key", "")))
+        for item in notifications
+        if isinstance(item, dict)
+    }
+    for partner in _dtkd_list(data, "partners"):
+        normalize_partner_profile(partner)
+        if str(partner.get("status", "")).lower() not in {"approved", "active"}:
+            continue
+        partner_id = get_partner_id(partner)
+        if (partner_id, target_month) in sent_keys:
+            continue
+        chat_id = int(partner.get("telegram_user_id", 0) or 0)
+        if not chat_id:
+            continue
+        bonus = _dtkd_monthly_bonus_for_partner(partner, target_month)
+        if not bonus["monthly_bonus_status"]:
+            continue
+        amount_text = "Thỏa thuận thủ công" if bonus["monthly_bonus_manual"] else f"{_format_vnd(int(bonus['monthly_bonus_vnd']))}đ"
+        text = (
+            f"Thông báo chiến dịch tháng Affiliate {target_month}\n"
+            f"Doanh số affiliate: {_format_vnd(int(bonus['payable_revenue']))}đ\n"
+            f"Thưởng chiến dịch: {amount_text}\n"
+            f"Trạng thái: pending_bonus_payment\n"
+            "Admin sẽ xử lý thanh toán thủ công."
+        )
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=text)
+            notifications.append(
+                {
+                    "partner_id": partner_id,
+                    "partner_telegram_user_id": chat_id,
+                    "month_key": target_month,
+                    "monthly_bonus_vnd": bonus["monthly_bonus_vnd"],
+                    "monthly_bonus_manual": bonus["monthly_bonus_manual"],
+                    "status": "pending_bonus_payment",
+                    "notified_at": _utc_now_iso(),
+                }
+            )
+            _save_business_partners(data)
+        except Exception as exc:
+            logger.warning("DTKD monthly bonus notification failed partner_id=%s: %s", partner_id, exc)
 
 
 def update_partner_metrics_snapshot(partner_id: str) -> dict[str, object] | None:
@@ -2151,9 +2489,13 @@ def update_partner_metrics_snapshot(partner_id: str) -> dict[str, object] | None
 
 
 def _partner_referral_link(context: ContextTypes.DEFAULT_TYPE, referral_code: str) -> str:
+    context_bot = getattr(context, "bot", None)
+    application_bot = getattr(getattr(context, "application", None), "bot", None)
     bot_username = str(
         context.application.bot_data.get("bot_username")
         or os.environ.get("BOT_USERNAME", "")
+        or getattr(context_bot, "username", "")
+        or getattr(application_bot, "username", "")
         or ""
     ).strip().lstrip("@")
     if bot_username:
@@ -2161,34 +2503,35 @@ def _partner_referral_link(context: ContextTypes.DEFAULT_TYPE, referral_code: st
     return f"/start {referral_code}"
 
 
-def _business_partner_keyboard() -> InlineKeyboardMarkup:
+def _business_partner_keyboard(partner: dict[str, object] | None = None) -> InlineKeyboardMarkup:
+    ref_code_label = "🆔 Mã Affiliate"
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("📝 Đăng ký ĐTKD", callback_data="dtkd_register"),
-                InlineKeyboardButton("👤 Hồ sơ ĐTKD", callback_data="dtkd_profile"),
+                InlineKeyboardButton("📝 Đăng ký Affiliate", callback_data="dtkd_register"),
+                InlineKeyboardButton("👤 Hồ sơ Affiliate", callback_data="dtkd_profile"),
             ],
             [
-                InlineKeyboardButton("🎟 Mã giới thiệu", callback_data="dtkd_ref_code"),
-                InlineKeyboardButton("🔗 Link giới thiệu", callback_data="dtkd_ref_link"),
+                InlineKeyboardButton(ref_code_label, callback_data="dtkd_ref_code"),
+                InlineKeyboardButton("🔗 Link Affiliate", callback_data="dtkd_ref_link"),
             ],
             [
-                InlineKeyboardButton("📈 Doanh số", callback_data="dtkd_sales"),
+                InlineKeyboardButton("📈 Doanh số Affiliate", callback_data="dtkd_sales"),
                 InlineKeyboardButton("📦 Đơn hàng", callback_data="dtkd_orders"),
             ],
             [
-                InlineKeyboardButton("💵 Thu nhập/Hoa hồng", callback_data="dtkd_income"),
-                InlineKeyboardButton("🏦 Rút tiền", callback_data="dtkd_withdraw"),
+                InlineKeyboardButton("💵 Hoa hồng Affiliate", callback_data="dtkd_income"),
+                InlineKeyboardButton("🏦 Rút hoa hồng", callback_data="dtkd_withdraw"),
             ],
             [
                 InlineKeyboardButton("🧾 Lịch sử thanh toán", callback_data="dtkd_payments"),
                 InlineKeyboardButton("📣 Marketing", callback_data="dtkd_marketing"),
             ],
             [
-                InlineKeyboardButton("🎯 KPI", callback_data="dtkd_kpi"),
+                InlineKeyboardButton("🎯 Chiến dịch tháng", callback_data="dtkd_kpi"),
                 InlineKeyboardButton("🏆 Xếp hạng", callback_data="dtkd_rank"),
             ],
-            [InlineKeyboardButton("📌 Chính sách", callback_data="dtkd_policy")],
+            [InlineKeyboardButton("📌 Chính sách Affiliate", callback_data="dtkd_policy")],
             [InlineKeyboardButton("🏠 Menu chính", callback_data="menu_main")],
         ]
     )
@@ -2197,7 +2540,7 @@ def _business_partner_keyboard() -> InlineKeyboardMarkup:
 def _business_partner_back_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("🤝 ĐTKD", callback_data="menu_partners")],
+            [InlineKeyboardButton("🔗 Affiliate", callback_data="menu_partners")],
             [InlineKeyboardButton("🏠 Menu chính", callback_data="menu_main")],
         ]
     )
@@ -2206,19 +2549,19 @@ def _business_partner_back_keyboard() -> InlineKeyboardMarkup:
 def _business_partner_home_text(partner: dict[str, object] | None) -> str:
     if not partner:
         return (
-            "🤝 ĐTKD - Đối tác kinh doanh\n\n"
+            "🔗 Affiliate\n\n"
             "Module dành cho đối tác giới thiệu khách hàng.\n\n"
-            "Bao gồm đăng ký đối tác, mã giới thiệu, doanh số, đơn hàng, thu nhập/hoa hồng, rút tiền, lịch sử thanh toán, link giới thiệu, marketing, KPI và xếp hạng."
+            "Bao gồm đăng ký Affiliate, mã Affiliate, link Affiliate, doanh số, hoa hồng, rút hoa hồng, lịch sử thanh toán, marketing, chiến dịch tháng và xếp hạng."
         )
     metrics = _partner_metrics(partner)
     return (
-        "🤝 ĐTKD - Đối tác kinh doanh\n\n"
+        "🔗 Affiliate\n\n"
         f"Trạng thái: {partner.get('status', 'active')}\n"
-        f"Mã ĐTKD: {partner.get('partner_code', '')}\n"
-        f"Mã giới thiệu: {partner.get('referral_code', '')}\n"
-        f"Doanh số: {_format_vnd(int(metrics['revenue']))}đ\n"
-        f"Hoa hồng chờ đối soát: {_format_vnd(int(metrics['pending_reconcile_commission']))}đ\n"
-        f"Hoa hồng đã duyệt: {_format_vnd(int(metrics['approved_commission']))}đ\n"
+        f"Mã Affiliate: {partner.get('partner_code', '')}\n"
+        f"Referral code: {partner.get('referral_code', '')}\n"
+        f"Doanh số Affiliate: {_format_vnd(int(metrics['revenue']))}đ\n"
+        f"Hoa hồng Affiliate chờ đối soát: {_format_vnd(int(metrics['pending_reconcile_commission']))}đ\n"
+        f"Hoa hồng Affiliate được rút: {_format_vnd(int(metrics['approved_commission']))}đ\n"
         f"Có thể rút: {_format_vnd(int(metrics['available_commission']))}đ\n\n"
         "Chọn chức năng bên dưới."
     )
@@ -2227,7 +2570,7 @@ def _business_partner_home_text(partner: dict[str, object] | None) -> str:
 async def _send_business_partner_home(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
     user = getattr(update, "effective_user", None)
     partner = _find_business_partner(int(getattr(user, "id", 0) or 0))
-    await _show_navigation_screen(update, _business_partner_home_text(partner), _business_partner_keyboard(), edit=edit)
+    await _show_navigation_screen(update, _business_partner_home_text(partner), _business_partner_keyboard(partner), edit=edit)
 
 
 async def _notify_admins_dtkd_registration(context: ContextTypes.DEFAULT_TYPE, partner: dict[str, object]) -> None:
@@ -2235,8 +2578,8 @@ async def _notify_admins_dtkd_registration(context: ContextTypes.DEFAULT_TYPE, p
     if not admin_ids:
         return
     text = (
-        "Có đăng ký ĐTKD mới cần duyệt.\n\n"
-        f"Mã ĐTKD: {partner.get('partner_code', '')}\n"
+        "Có đăng ký Affiliate mới cần duyệt.\n\n"
+        f"Mã Affiliate: {partner.get('partner_code', '')}\n"
         f"Họ tên: {partner.get('full_name', '')}\n"
         f"SĐT: {partner.get('phone', '')}\n"
         f"Telegram ID: {partner.get('telegram_user_id', '')}\n"
@@ -2261,9 +2604,9 @@ async def _notify_admins_dtkd_withdrawal(context: ContextTypes.DEFAULT_TYPE, wit
     if not admin_ids:
         return
     text = (
-        "Có yêu cầu rút tiền ĐTKD cần duyệt.\n\n"
+        "Có yêu cầu rút hoa hồng Affiliate cần duyệt.\n\n"
         f"Mã yêu cầu: {withdrawal.get('withdrawal_id', '')}\n"
-        f"Mã ĐTKD: {partner.get('partner_code', '')}\n"
+        f"Mã Affiliate: {partner.get('partner_code', '')}\n"
         f"Họ tên: {partner.get('full_name', '')}\n"
         f"Số tiền: {_format_vnd(int(withdrawal.get('amount', 0) or 0))}đ\n"
         f"Ngân hàng: {partner.get('bank_info', '')}"
@@ -2346,10 +2689,10 @@ async def _handle_dtkd_admin_callback(update: Update, context: ContextTypes.DEFA
     value = value.strip()
     if action == "dtkd_admin_approve":
         partner = _set_partner_status(value, "approved")
-        text = f"Đã duyệt ĐTKD {value}." if partner else "Không tìm thấy ĐTKD."
+        text = f"Đã duyệt Affiliate {value}." if partner else "Không tìm thấy Affiliate."
     elif action == "dtkd_admin_reject":
         partner = _set_partner_status(value, "rejected")
-        text = f"Đã từ chối ĐTKD {value}." if partner else "Không tìm thấy ĐTKD."
+        text = f"Đã từ chối Affiliate {value}." if partner else "Không tìm thấy Affiliate."
     elif action == "dtkd_admin_pay":
         withdrawal = _set_withdrawal_status(value, "paid")
         text = f"Đã cập nhật thanh toán {value}." if withdrawal else "Không tìm thấy yêu cầu rút tiền."
@@ -2357,7 +2700,7 @@ async def _handle_dtkd_admin_callback(update: Update, context: ContextTypes.DEFA
         withdrawal = _set_withdrawal_status(value, "rejected")
         text = f"Đã từ chối yêu cầu rút tiền {value}." if withdrawal else "Không tìm thấy yêu cầu rút tiền."
     else:
-        text = "Lệnh admin ĐTKD không hợp lệ."
+        text = "Lệnh admin Affiliate không hợp lệ."
     await _safe_edit_or_send(update, text, _main_menu_keyboard(), edit=True)
 
 
@@ -2368,22 +2711,24 @@ async def _send_business_partner_screen(update: Update, context: ContextTypes.DE
     if action == "register":
         if partner and str(partner.get("status", "")).lower() in {"pending", "approved", "active"}:
             text = (
-                "📝 Đăng ký ĐTKD\n\n"
-                f"Bạn đã có hồ sơ ĐTKD.\nMã ĐTKD: {partner.get('partner_code', '')}\nTrạng thái: {partner.get('status', '')}"
+                "📝 Đăng ký Affiliate\n\n"
+                f"Bạn đã có hồ sơ Affiliate.\nMã Affiliate: {partner.get('partner_code', '')}\nTrạng thái: {partner.get('status', '')}"
             )
         else:
             context.user_data["dtkd_registration"] = {"step": "full_name", "data": {}}
-            text = "📝 Đăng ký ĐTKD\n\nVui lòng nhập Họ tên:"
+            text = "📝 Đăng ký Affiliate\n\nVui lòng nhập Họ tên:"
     elif not partner:
-        text = "Bạn chưa đăng ký ĐTKD. Vui lòng chọn Đăng ký ĐTKD trước."
+        text = "Bạn chưa đăng ký Affiliate. Vui lòng chọn Đăng ký Affiliate trước."
     else:
         metrics = _partner_metrics(partner)
         referral_code = str(partner.get("referral_code", ""))
         referral_link = _partner_referral_link(context, referral_code)
-        if action == "profile":
+        if action == "apply_own_code":
+            text = "Affiliate không tự áp mã cho đơn của chính bạn. Vui lòng gửi mã/link Affiliate cho khách mua hàng."
+        elif action == "profile":
             text = (
-                "👤 Hồ sơ ĐTKD\n\n"
-                f"Mã ĐTKD: {partner.get('partner_code', '')}\n"
+                "👤 Hồ sơ Affiliate\n\n"
+                f"Mã Affiliate: {partner.get('partner_code', '')}\n"
                 f"Họ tên: {partner.get('full_name', '')}\n"
                 f"Số điện thoại: {partner.get('phone', '')}\n"
                 f"Telegram ID: {partner.get('telegram_user_id', '')}\n"
@@ -2394,17 +2739,42 @@ async def _send_business_partner_screen(update: Update, context: ContextTypes.DE
                 f"Người giới thiệu: {partner.get('referred_by', '') or 'Không có'}"
             )
         elif action == "ref_code":
+            if str(partner.get("status", "")).lower() in {"approved", "active"}:
+                status_text = "Đã duyệt" if str(partner.get("status", "")).lower() in {"approved", "active"} else str(partner.get("status", ""))
+                text = (
+                    "🔗 THÔNG TIN AFFILIATE\n\n"
+                    "Mã Affiliate:\n"
+                    f"{partner.get('partner_code', '')}\n\n"
+                    "Referral code:\n"
+                    f"{referral_code}\n\n"
+                    "Trạng thái:\n"
+                    f"{status_text}\n\n"
+                    "Hoa hồng Affiliate:\n"
+                    f"{int(DTKD_AFFILIATE_COMMISSION_RATE * 100)}% sau đối soát {DTKD_COMMISSION_RECONCILE_DELAY_HOURS} giờ\n\n"
+                    "Doanh số tháng:\n"
+                    f"{_format_vnd(int(metrics['month_revenue']))}đ\n\n"
+                    "Chiến dịch tháng:\n"
+                    f"{'Thỏa thuận thủ công' if metrics['monthly_bonus_manual'] else _format_vnd(int(metrics['monthly_bonus_vnd'])) + 'đ'}"
+                )
+                keyboard = InlineKeyboardMarkup(
+                    [
+                        [InlineKeyboardButton("🔗 Affiliate", callback_data="menu_partners")],
+                        [InlineKeyboardButton("🏠 Menu chính", callback_data="menu_main")],
+                    ]
+                )
+                await _show_navigation_screen(update, text, keyboard, edit=edit)
+                return
             text = (
-                "🎟 Mã ĐTKD / Mã giới thiệu\n\n"
-                f"Mã ĐTKD: {partner.get('partner_code', '')}\n"
-                f"Mã giới thiệu: {referral_code}\n"
-                f"Link giới thiệu: {referral_link}"
+                "🎟 Mã Affiliate\n\n"
+                f"Mã Affiliate: {partner.get('partner_code', '')}\n"
+                f"Referral code: {referral_code}\n"
+                f"Link Affiliate: {referral_link}"
             )
         elif action == "ref_link":
-            text = f"🔗 Link giới thiệu\n\n{referral_link}"
+            text = f"🔗 Link Affiliate\n\n{referral_link}"
         elif action == "sales":
             text = (
-                "📈 Doanh số\n\n"
+                "📈 Doanh số Affiliate\n\n"
                 f"Hôm nay: {_format_vnd(int(metrics['today_revenue']))}đ\n"
                 f"Tháng này: {_format_vnd(int(metrics['month_revenue']))}đ\n"
                 f"Tổng doanh số: {_format_vnd(int(metrics['revenue']))}đ\n"
@@ -2415,7 +2785,7 @@ async def _send_business_partner_screen(update: Update, context: ContextTypes.DE
         elif action == "orders":
             orders = metrics["orders"][-10:]
             if not orders:
-                text = "📦 Đơn hàng của ĐTKD\n\nChưa có đơn hàng nào từ mã giới thiệu của bạn."
+                text = "📦 Đơn hàng Affiliate\n\nChưa có đơn hàng nào từ mã/link Affiliate của bạn."
             else:
                 commission_by_order = {
                     str(item.get("order_id", "")).upper(): item
@@ -2423,28 +2793,38 @@ async def _send_business_partner_screen(update: Update, context: ContextTypes.DE
                     if str(item.get("partner_id", "") or "") == get_partner_id(partner)
                     or int(item.get("partner_telegram_user_id", 0) or 0) == telegram_user_id
                 }
-                lines = ["📦 Đơn hàng của ĐTKD", ""]
+                for item in _order_refs_for_partner(partner):
+                    order_key = str(item.get("order_id", "")).upper()
+                    if order_key and order_key not in commission_by_order:
+                        commission_by_order[order_key] = item
+                lines = ["📦 Đơn hàng Affiliate", ""]
                 for index, order in enumerate(orders, start=1):
                     total = _dtkd_order_total(order)
+                    payable_amount = _order_payable_amount(order)
                     commission = commission_by_order.get(str(order.get("order_id", "")).upper(), {})
+                    commission_amount = int(commission.get("commission_amount", commission.get("amount", 0)) or 0)
                     lines.append(
                         f"{index}. {order.get('order_id', '')}\n"
                         f"Sản phẩm: {order.get('product_name', '')}\n"
                         f"Giá bán: {_format_vnd(total)}đ\n"
+                        f"Cần thanh toán: {_format_vnd(payable_amount)}đ\n"
                         f"Trạng thái: {order.get('payment_status', '')}/{order.get('order_status', '')}\n"
                         f"Ngày mua: {order.get('created_at', '')}\n"
-                        f"Hoa hồng phát sinh: {_format_vnd(int(commission.get('amount', 0) or 0))}đ\n"
-                        f"Đối soát: {commission.get('status', 'chưa tạo')}"
+                        f"Hoa hồng phát sinh: {_format_vnd(commission_amount)}đ\n"
+                        f"Đối soát: {commission.get('status', commission.get('commission_status', 'chưa tạo'))}"
                     )
                 text = "\n\n".join(lines)
         elif action == "income":
             text = (
-                "💵 Thu nhập/Hoa hồng\n\n"
-                f"Hoa hồng tạm tính: {_format_vnd(int(metrics['commission']))}đ\n"
-                f"Hoa hồng chờ đối soát: {_format_vnd(int(metrics['pending_reconcile_commission']))}đ\n"
-                f"Hoa hồng đã duyệt: {_format_vnd(int(metrics['approved_commission']))}đ\n"
-                f"Hoa hồng đã thanh toán: {_format_vnd(int(metrics['paid_commission']))}đ\n"
-                f"Hoa hồng còn có thể rút: {_format_vnd(int(metrics['available_commission']))}đ\n"
+                "💵 Hoa hồng Affiliate\n\n"
+                f"Hoa hồng Affiliate tạm tính: {_format_vnd(int(metrics['commission']))}đ\n"
+                f"Hoa hồng Affiliate chờ đối soát: {_format_vnd(int(metrics['pending_reconcile_commission']))}đ\n"
+                f"Hoa hồng Affiliate được rút: {_format_vnd(int(metrics['approved_commission']))}đ\n"
+                f"Hoa hồng Affiliate đã thanh toán: {_format_vnd(int(metrics['paid_commission']))}đ\n"
+                f"Hoa hồng Affiliate còn có thể rút: {_format_vnd(int(metrics['available_commission']))}đ\n"
+                f"Doanh số Affiliate tháng: {_format_vnd(int(metrics['month_revenue']))}đ\n"
+                f"Chiến dịch tháng: {'Thỏa thuận thủ công' if metrics['monthly_bonus_manual'] else _format_vnd(int(metrics['monthly_bonus_vnd'])) + 'đ'}\n"
+                f"Trạng thái chiến dịch: {metrics['monthly_bonus_status'] or 'Chưa đạt'}\n"
                 f"Thưởng KPI: {_format_vnd(int(metrics['kpi_bonus']))}đ\n"
                 f"Tổng thu nhập: {_format_vnd(int(metrics['total_income']))}đ"
             )
@@ -2452,14 +2832,14 @@ async def _send_business_partner_screen(update: Update, context: ContextTypes.DE
             withdraw_min_vnd = _dtkd_withdraw_min_vnd(partner)
             if int(metrics["available_commission"]) < withdraw_min_vnd:
                 text = (
-                    "🏦 Rút tiền\n\n"
+                    "🏦 Rút hoa hồng\n\n"
                     f"Số dư có thể rút: {_format_vnd(int(metrics['available_commission']))}đ\n"
                     f"Số dư tối thiểu để rút: {_format_vnd(withdraw_min_vnd)}đ"
                 )
             else:
                 context.user_data["dtkd_withdraw"] = {"step": "amount"}
                 text = (
-                    "🏦 Rút tiền\n\n"
+                    "🏦 Rút hoa hồng\n\n"
                     f"Số dư có thể rút: {_format_vnd(int(metrics['available_commission']))}đ\n"
                     "Vui lòng nhập số tiền muốn rút:"
                 )
@@ -2493,19 +2873,19 @@ async def _send_business_partner_screen(update: Update, context: ContextTypes.DE
                 "Nội dung giới thiệu sản phẩm: ChatGPT, Gemini, Grok, CapCut Pro và các tài khoản AI phổ biến.\n"
                 "Link cộng đồng: https://t.me/Aidaily79\n"
                 "Bảng giá: Xem trực tiếp trong mục Sản phẩm của bot.\n\n"
-                f"Link giới thiệu của tôi: {referral_link}"
+                f"Link Affiliate của tôi: {referral_link}"
             )
         elif action == "kpi":
             month_revenue = int(metrics["month_revenue"])
             percent = int((month_revenue / DTKD_KPI_TARGET_VND) * 100) if DTKD_KPI_TARGET_VND else 0
             text = (
-                "🎯 KPI\n\n"
-                "3 tháng đầu không áp KPI, không phạt, không hạ cấp.\n"
-                "Cấu trúc KPI đã sẵn sàng cho giai đoạn sau.\n\n"
-                f"Chỉ tiêu tháng: {_format_vnd(DTKD_KPI_TARGET_VND)}đ\n"
+                "🎯 Chiến dịch tháng\n\n"
+                "Campaign tháng do admin cấu hình theo từng tháng, không hardcode tier.\n"
+                "Ngày 05 tháng kế tiếp bot hiển thị khoản thưởng để admin thanh toán thủ công.\n\n"
                 f"Doanh số đã đạt: {_format_vnd(month_revenue)}đ\n"
                 f"% hoàn thành: {percent}%\n"
-                f"Thưởng nếu đạt KPI: {_format_vnd(DTKD_KPI_BONUS_VND)}đ"
+                f"Thưởng chiến dịch: {'Thỏa thuận thủ công' if metrics['monthly_bonus_manual'] else _format_vnd(int(metrics['monthly_bonus_vnd'])) + 'đ'}\n"
+                f"Trạng thái: {metrics['monthly_bonus_status'] or 'Chưa đạt'}"
             )
         elif action == "rank":
             partners = [item for item in _load_business_partners().get("partners", []) if isinstance(item, dict)]
@@ -2524,7 +2904,7 @@ async def _send_business_partner_screen(update: Update, context: ContextTypes.DE
             else:
                 for index, item in enumerate(ranked[:10], start=1):
                     item_metrics = _partner_metrics(item)
-                    name = str(item.get("full_name") or item.get("username") or item.get("partner_code") or "ĐTKD")
+                    name = str(item.get("full_name") or item.get("username") or item.get("partner_code") or "Affiliate")
                     marker = " (Bạn)" if int(item.get("telegram_user_id", 0) or 0) == telegram_user_id else ""
                     lines.append(
                         f"{index}. {name}{marker} - "
@@ -2535,20 +2915,18 @@ async def _send_business_partner_screen(update: Update, context: ContextTypes.DE
             text = "\n".join(lines)
         elif action == "policy":
             text = (
-                "📌 Thông báo chính sách\n\n"
-                "Chính sách hoa hồng 3 tháng đầu theo doanh số tháng:\n"
-                "0-10 triệu: 20%\n"
-                "10-30 triệu: 22%\n"
-                "30-70 triệu: 24%\n"
-                "70-150 triệu: 26%\n"
-                "Trên 150 triệu: 28%\n"
-                f"Trần quỹ ĐTKD: {int(DTKD_PARTNER_FUND_CAP_RATE * 100)}%.\n"
+                "📌 Chính sách Affiliate\n\n"
+                f"Affiliate nhận {int(DTKD_AFFILIATE_COMMISSION_RATE * 100)}% giá trị đơn hàng sau khi đơn paid, delivered và qua {DTKD_COMMISSION_RECONCILE_DELAY_HOURS} giờ đối soát.\n"
+                "Khách mua theo giá niêm yết, QR luôn bằng giá niêm yết.\n"
+                "Mã/link Affiliate chỉ dùng để ghi nhận người giới thiệu, không tạo ưu đãi giá cho khách.\n"
+                "Không tính hoa hồng cho đơn tự mua bằng mã của chính mình.\n"
+                "Thưởng chiến dịch tháng sẽ được công bố riêng.\n"
                 "Quy định bán hàng: không spam, không cam kết sai chính sách sản phẩm, không tự ý nâng giá gây ảnh hưởng thương hiệu.\n"
                 "Chính sách bảo hành: theo chính sách bảo hành từng sản phẩm trong bot.\n"
-                "Chính sách thanh toán: hoa hồng chờ đối soát, chỉ hoa hồng đã duyệt mới được rút."
+                "Chính sách thanh toán: hoa hồng chờ đối soát, chỉ hoa hồng withdrawable/đã duyệt mới được rút."
             )
         else:
-            text = "Chức năng ĐTKD không hợp lệ."
+            text = "Chức năng Affiliate không hợp lệ."
     await _show_navigation_screen(update, text, _business_partner_back_keyboard(), edit=edit)
 
 
@@ -2687,6 +3065,16 @@ def _quantity_keyboard(product_name: str, package_name: str) -> InlineKeyboardMa
     return InlineKeyboardMarkup(rows)
 
 
+def _dtkd_order_ref_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Bo qua", callback_data="dtkd_order_ref_skip")],
+            [InlineKeyboardButton("Quay lại sản phẩm", callback_data="menu_products")],
+            [InlineKeyboardButton("Menu chính", callback_data="menu_main")],
+        ]
+    )
+
+
 def _payment_choice_keyboard(order_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -2761,6 +3149,12 @@ def _quantity_text(product_name: str, package_name: str) -> str:
 
 def _order_payment_text(order: dict[str, object]) -> str:
     balance = 0
+    gross_amount = int(order.get("gross_amount", _order_payable_amount(order)) or 0)
+    payable_amount = _order_payable_amount(order)
+    amount_lines = [
+        f"Giá bán: {_format_vnd(gross_amount)}đ",
+    ]
+    amount_lines.append(f"Cần thanh toán: {_format_vnd(payable_amount)}đ")
     return (
         "🧾 Đơn hàng"
         f"{_shop_separator()}"
@@ -2773,8 +3167,7 @@ def _order_payment_text(order: dict[str, object]) -> str:
         "📦 Số lượng\n"
         f"{order.get('quantity', '')}"
         f"{_shop_separator()}"
-        "💰 Thành tiền\n"
-        f"{_format_vnd(int(order.get('total', 0)))}đ"
+        f"💰 Thanh toán\n{'\n'.join(amount_lines)}"
         f"{_shop_separator()}"
         f"💰 Số dư\n{_format_vnd(balance)}đ"
         f"{_shop_separator()}"
@@ -2783,7 +3176,7 @@ def _order_payment_text(order: dict[str, object]) -> str:
 
 
 def _build_vietqr_url(order: dict[str, object], payment_service: PaymentService) -> str:
-    amount = int(order.get("total", 0))
+    amount = _order_payable_amount(order)
     order_id = str(order.get("order_id", ""))
     account_name = quote(payment_service.config.bank_account_name)
     add_info = quote(order_id)
@@ -2794,9 +3187,17 @@ def _build_vietqr_url(order: dict[str, object], payment_service: PaymentService)
 
 
 def _qr_caption(order: dict[str, object], payment_service: PaymentService) -> str:
+    gross_amount = int(order.get("gross_amount", _order_payable_amount(order)) or 0)
+    payable_amount = _order_payable_amount(order)
+    amount_lines = [
+        f"Giá bán: {_format_vnd(gross_amount)}đ",
+    ]
+    amount_lines.append(f"Cần thanh toán: {_format_vnd(payable_amount)}đ")
     return (
         "🏦 Chuyển khoản QR\n\n"
-        f"💰 Số tiền: {_format_vnd(int(order.get('total', 0)))}đ\n"
+        "💰 Thanh toán:\n"
+        + "\n".join(amount_lines)
+        + "\n"
         f"🏦 Ngân hàng: {payment_service.config.bank_name}\n"
         f"Tài khoản: {payment_service.config.bank_account_name}\n"
         f"STK: {payment_service.config.bank_account}\n"
@@ -2957,6 +3358,83 @@ async def _send_payment_choice(update: Update, order: dict[str, object], *, edit
         raise
 
 
+async def _send_dtkd_order_ref_prompt(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    product_code: str,
+    package_code: str,
+    quantity: int,
+    *,
+    edit: bool = False,
+) -> None:
+    if getattr(context, "user_data", None) is not None:
+        context.user_data["dtkd_order_ref"] = {
+            "product_code": str(product_code or "").strip().upper(),
+            "package_code": str(package_code or "").strip().upper(),
+            "quantity": int(quantity),
+        }
+    text = (
+        "Ban co ma Affiliate/referral code khong?\n\n"
+        "Neu co, hay nhap ma vao chat.\n"
+        "Neu khong co, bam Bo qua de tiep tuc tao don."
+    )
+    await _safe_edit_or_send(update, text, _dtkd_order_ref_keyboard(), edit=edit)
+
+
+async def _create_order_after_dtkd_ref(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    referral_code: str = "",
+    attach_existing_referral: bool = False,
+    edit: bool = False,
+) -> bool:
+    state = context.user_data.get("dtkd_order_ref") if getattr(context, "user_data", None) is not None else None
+    if not isinstance(state, dict):
+        return False
+    product_code = str(state.get("product_code", "") or "").strip().upper()
+    package_code = str(state.get("package_code", "") or "").strip().upper()
+    quantity = int(state.get("quantity", 0) or 0)
+    if not product_code or not package_code or quantity <= 0:
+        context.user_data.pop("dtkd_order_ref", None)
+        await _safe_edit_or_send(update, "Phien mua hang khong hop le. Vui long chon san pham lai.", _product_menu_keyboard(), edit=edit)
+        return True
+    try:
+        if update.effective_user:
+            _release_current_user_reservation(context, update.effective_user.id)
+        _release_expired_sqlite_reservations(context.application.bot_data.get("store_db_path"))
+        order = _create_sales_order(
+            update,
+            product_code,
+            package_code,
+            quantity,
+            referral_code=referral_code,
+            attach_existing_referral=attach_existing_referral,
+        )
+    except InventoryReservationError as exc:
+        context.user_data.pop("dtkd_order_ref", None)
+        await _safe_edit_or_send(update, str(exc), _product_menu_keyboard(), edit=edit)
+        return True
+    except Exception as exc:
+        logger.exception(
+            "EXCEPTION_CAUGHT stage=dtkd_ref_order_create user_id=%s product_code=%s package_code=%s quantity=%s exception_type=%s exception_message=%s",
+            getattr(getattr(update, "effective_user", None), "id", None),
+            product_code,
+            package_code,
+            quantity,
+            type(exc).__name__,
+            exc,
+        )
+        context.user_data.pop("dtkd_order_ref", None)
+        await _send_purchase_error(update, context, reason=str(exc), order_id="")
+        return True
+    context.user_data.pop("dtkd_order_ref", None)
+    if update.effective_user:
+        context.user_data["pending_order_id"] = str(order.get("order_id", ""))
+    await _send_payment_choice(update, order, edit=edit)
+    return True
+
+
 async def _send_purchase_error(update: Update, context: ContextTypes.DEFAULT_TYPE, *, reason: str, order_id: str = "") -> None:
     query = update.callback_query
     message = query.message if query and getattr(query, "message", None) else update.effective_message
@@ -3078,6 +3556,11 @@ async def _notify_admins_order_pending(context: ContextTypes.DEFAULT_TYPE, order
     admin_ids: set[int] = context.application.bot_data.get("admin_ids", set())
     if not admin_ids:
         return
+    order = _dtkd_enrich_order_accounting(order) or order
+    gross_amount = int(order.get("gross_amount", _order_payable_amount(order)) or 0)
+    payable_amount = _order_payable_amount(order)
+    amount_lines = [f"Giá bán: {_format_vnd(gross_amount)}đ"]
+    amount_lines.append(f"Cần thanh toán: {_format_vnd(payable_amount)}đ")
     text = (
         "Khách báo đã chuyển khoản.\n\n"
         f"Order ID: {order.get('order_id', '')}\n"
@@ -3085,7 +3568,8 @@ async def _notify_admins_order_pending(context: ContextTypes.DEFAULT_TYPE, order
         f"Sản phẩm: {order.get('product_name', '')}\n"
         f"Gói: {order.get('package_name', '')}\n"
         f"Số lượng: {order.get('quantity', '')}\n"
-        f"Tổng: {_format_vnd(int(order.get('total', 0)))}đ\n\n"
+        + "\n".join(amount_lines)
+        + "\n\n"
         f"Xác nhận: /paid {order.get('order_id', '')}"
     )
     for admin_id in admin_ids:
@@ -3128,6 +3612,11 @@ def _format_history_order(order: dict[str, object], index: int) -> str:
     buyer_label = str(order.get("username", "") or "").strip() or "Chưa lưu thông tin"
     buyer_id = int(order.get("telegram_user_id", 0) or 0)
     buyer_id_text = str(buyer_id) if buyer_id > 0 else "Chưa lưu ID"
+    order = _dtkd_enrich_order_accounting(order) or order
+    gross_amount = int(order.get("gross_amount", _order_payable_amount(order)) or 0)
+    payable_amount = _order_payable_amount(order)
+    amount_lines = [f"Giá bán: {_format_vnd(gross_amount)}đ"]
+    amount_lines.append(f"Cần thanh toán: {_format_vnd(payable_amount)}đ")
 
     return (
         f"{index}. {_field('order_id')}\n"
@@ -3136,7 +3625,8 @@ def _format_history_order(order: dict[str, object], index: int) -> str:
         f"Mã sản phẩm: {_field('product_code')}\n"
         f"Gói: {_field('package_name')}\n"
         f"Số lượng: {_field('quantity')}\n"
-        f"Tổng tiền: {_format_vnd(int(order.get('total', order.get('amount', 0)) or 0))}đ\n"
+        + "\n".join(amount_lines)
+        + "\n"
         f"Thanh toán: {_field('payment_status')}\n"
         f"Trạng thái: {_field('order_status')}\n"
         f"Ngày tạo: {_field('created_at')}\n"
@@ -3551,10 +4041,23 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if referral_code:
         partner = _find_business_partner_by_code(referral_code)
         if partner and str(partner.get("status", "")).lower() in {"approved", "active"}:
-            _save_customer_referral(user, partner, referral_code)
-            if getattr(context, "user_data", None) is not None:
-                context.user_data["referral_code"] = partner.get("referral_code", "")
-                context.user_data["partner_code"] = partner.get("partner_code", "")
+            if int(getattr(user, "id", 0) or 0) == int(partner.get("telegram_user_id", 0) or 0):
+                await update.effective_message.reply_text(
+                    "Không tính hoa hồng cho đơn tự giới thiệu.",
+                    reply_markup=_main_menu_keyboard(),
+                )
+                return
+            saved = _save_customer_referral(user, partner, referral_code)
+            if saved:
+                if getattr(context, "user_data", None) is not None:
+                    context.user_data["referral_code"] = partner.get("referral_code", "")
+                    context.user_data["partner_code"] = partner.get("partner_code", "")
+                affiliate_label = str(partner.get("full_name") or partner.get("username") or partner.get("partner_code") or "").strip()
+                await update.effective_message.reply_text(
+                    f"Bạn được giới thiệu bởi Affiliate: {affiliate_label}\n\nMời bạn chọn sản phẩm.",
+                    reply_markup=_product_menu_keyboard(),
+                )
+                return
 
     if machine_id:
         handled = await _maybe_issue_deeplink_license(update, context, machine_id)
@@ -3612,9 +4115,9 @@ async def _handle_dtkd_registration_text(update: Update, context: ContextTypes.D
         partner = _ensure_business_partner(user, profile)
         context.user_data.pop("dtkd_registration", None)
         await update.effective_message.reply_text(
-            "Đăng ký ĐTKD đã được gửi.\n\n"
-            f"Mã ĐTKD: {partner.get('partner_code', '')}\n"
-            f"Mã giới thiệu: {partner.get('referral_code', '')}\n"
+            "Đăng ký Affiliate đã được gửi.\n\n"
+            f"Mã Affiliate: {partner.get('partner_code', '')}\n"
+            f"Referral code: {partner.get('referral_code', '')}\n"
             "Trạng thái: Chờ duyệt",
             reply_markup=_business_partner_back_keyboard(),
         )
@@ -3636,7 +4139,7 @@ async def _handle_dtkd_withdraw_text(update: Update, context: ContextTypes.DEFAU
     partner = _find_business_partner(int(getattr(update.effective_user, "id", 0) or 0))
     if not partner:
         context.user_data.pop("dtkd_withdraw", None)
-        await update.effective_message.reply_text("Bạn chưa có hồ sơ ĐTKD.", reply_markup=_business_partner_back_keyboard())
+        await update.effective_message.reply_text("Bạn chưa có hồ sơ Affiliate.", reply_markup=_business_partner_back_keyboard())
         return True
     metrics = _partner_metrics(partner)
     available = int(metrics["available_commission"])
@@ -3667,7 +4170,7 @@ async def _handle_dtkd_withdraw_text(update: Update, context: ContextTypes.DEFAU
     update_partner_metrics_snapshot(get_partner_id(partner))
     context.user_data.pop("dtkd_withdraw", None)
     await update.effective_message.reply_text(
-        "Đã tạo yêu cầu rút tiền.\n\n"
+        "Đã tạo yêu cầu rút hoa hồng.\n\n"
         f"Mã yêu cầu: {withdrawal.get('withdrawal_id', '')}\n"
         f"Số tiền: {_format_vnd(amount)}đ\n"
         "Trạng thái: Chờ duyệt",
@@ -3677,11 +4180,37 @@ async def _handle_dtkd_withdraw_text(update: Update, context: ContextTypes.DEFAU
     return True
 
 
+async def _handle_dtkd_order_ref_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    state = context.user_data.get("dtkd_order_ref") if getattr(context, "user_data", None) is not None else None
+    if not isinstance(state, dict):
+        return False
+    raw_code = str(text or "").strip()
+    if _normalize_referral_code(raw_code) in {"BO QUA", "BỎ QUA", "SKIP", "KHONG", "KHÔNG", "NO"}:
+        return await _create_order_after_dtkd_ref(update, context, attach_existing_referral=False, edit=False)
+    partner = _find_business_partner_by_code(raw_code)
+    if not partner or str(partner.get("status", "")).lower() not in {"approved", "active"}:
+        await update.effective_message.reply_text(
+            "Ma Affiliate/referral code khong hop le. Vui long nhap lai hoac bam Bo qua.",
+            reply_markup=_dtkd_order_ref_keyboard(),
+        )
+        return True
+    _save_customer_referral(update.effective_user, partner, raw_code)
+    return await _create_order_after_dtkd_ref(
+        update,
+        context,
+        referral_code=raw_code,
+        attach_existing_referral=False,
+        edit=False,
+    )
+
+
 async def on_text_machine_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message or not message.text:
         return
     raw_text = message.text.strip()
+    if await _handle_dtkd_order_ref_text(update, context, raw_text):
+        return
     if await _handle_dtkd_registration_text(update, context, raw_text):
         return
     if await _handle_dtkd_withdraw_text(update, context, raw_text):
@@ -4291,9 +4820,9 @@ async def cmd_dtkd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     data = _load_business_partners()
     partners = _dtkd_list(data, "partners")
     if not partners:
-        await update.effective_message.reply_text("Chưa có ĐTKD nào.")
+        await update.effective_message.reply_text("Chưa có Affiliate nào.")
         return
-    lines = ["Danh sách ĐTKD:"]
+    lines = ["Danh sách Affiliate:"]
     for partner in partners[-50:]:
         lines.append(
             f"{partner.get('partner_code', '')} | {partner.get('full_name', '')} | "
@@ -4308,10 +4837,10 @@ async def cmd_dtkd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     args = context.args or []
     if not args:
-        await update.effective_message.reply_text("Dung: /dtkd_approve <ma_dtkd>")
+        await update.effective_message.reply_text("Dung: /dtkd_approve <ma_affiliate>")
         return
     partner = _set_partner_status(args[0], "approved")
-    await update.effective_message.reply_text(f"Đã duyệt {args[0]}." if partner else "Không tìm thấy ĐTKD.")
+    await update.effective_message.reply_text(f"Đã duyệt {args[0]}." if partner else "Không tìm thấy Affiliate.")
 
 
 async def cmd_dtkd_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4320,10 +4849,10 @@ async def cmd_dtkd_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     args = context.args or []
     if not args:
-        await update.effective_message.reply_text("Dung: /dtkd_reject <ma_dtkd>")
+        await update.effective_message.reply_text("Dung: /dtkd_reject <ma_affiliate>")
         return
     partner = _set_partner_status(args[0], "rejected")
-    await update.effective_message.reply_text(f"Đã từ chối {args[0]}." if partner else "Không tìm thấy ĐTKD.")
+    await update.effective_message.reply_text(f"Đã từ chối {args[0]}." if partner else "Không tìm thấy Affiliate.")
 
 
 async def cmd_dtkd_lock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4332,10 +4861,10 @@ async def cmd_dtkd_lock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     args = context.args or []
     if not args:
-        await update.effective_message.reply_text("Dung: /dtkd_lock <ma_dtkd>")
+        await update.effective_message.reply_text("Dung: /dtkd_lock <ma_affiliate>")
         return
     partner = _set_partner_status(args[0], "locked")
-    await update.effective_message.reply_text(f"Đã khóa {args[0]}." if partner else "Không tìm thấy ĐTKD.")
+    await update.effective_message.reply_text(f"Đã khóa {args[0]}." if partner else "Không tìm thấy Affiliate.")
 
 
 async def cmd_dtkd_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4344,10 +4873,10 @@ async def cmd_dtkd_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     args = context.args or []
     if not args:
-        await update.effective_message.reply_text("Dung: /dtkd_unlock <ma_dtkd>")
+        await update.effective_message.reply_text("Dung: /dtkd_unlock <ma_affiliate>")
         return
     partner = _set_partner_status(args[0], "approved")
-    await update.effective_message.reply_text(f"Đã mở khóa {args[0]}." if partner else "Không tìm thấy ĐTKD.")
+    await update.effective_message.reply_text(f"Đã mở khóa {args[0]}." if partner else "Không tìm thấy Affiliate.")
 
 
 async def cmd_dtkd_withdrawals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4358,7 +4887,7 @@ async def cmd_dtkd_withdrawals(update: Update, context: ContextTypes.DEFAULT_TYP
     if not withdrawals:
         await update.effective_message.reply_text("Chưa có yêu cầu rút tiền.")
         return
-    lines = ["Yêu cầu rút tiền ĐTKD:"]
+    lines = ["Yêu cầu rút hoa hồng Affiliate:"]
     for item in withdrawals[-50:]:
         lines.append(
             f"{item.get('withdrawal_id', '')} | {item.get('partner_code', '')} | "
@@ -4399,19 +4928,19 @@ async def cmd_dtkd_report(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     args = context.args or []
     if not args:
-        await update.effective_message.reply_text("Dung: /dtkd_report <ma_dtkd>")
+        await update.effective_message.reply_text("Dung: /dtkd_report <ma_affiliate>")
         return
     partner = _find_business_partner_by_code(args[0])
     if not partner:
-        await update.effective_message.reply_text("Không tìm thấy ĐTKD.")
+        await update.effective_message.reply_text("Không tìm thấy Affiliate.")
         return
     metrics = _partner_metrics(partner)
     await update.effective_message.reply_text(
-        "Báo cáo ĐTKD\n\n"
-        f"Mã ĐTKD: {partner.get('partner_code', '')}\n"
+        "Báo cáo Affiliate\n\n"
+        f"Mã Affiliate: {partner.get('partner_code', '')}\n"
         f"Họ tên: {partner.get('full_name', '')}\n"
         f"Trạng thái: {partner.get('status', '')}\n"
-        f"Doanh số tháng: {_format_vnd(int(metrics['month_revenue']))}đ\n"
+        f"Doanh số Affiliate tháng: {_format_vnd(int(metrics['month_revenue']))}đ\n"
         f"Tổng doanh số: {_format_vnd(int(metrics['revenue']))}đ\n"
         f"Đơn thành công: {len(metrics['paid_orders'])}\n"
         f"Thu nhập: {_format_vnd(int(metrics['total_income']))}đ\n"
@@ -4456,8 +4985,10 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await query.answer()
     data = query.data or ""
     if data == "menu_main":
+        _clear_pending_dtkd_order_ref(context)
         await _show_navigation_screen(update, _start_help_text(), _main_menu_keyboard(), edit=True)
     elif data == "menu_products":
+        _clear_pending_dtkd_order_ref(context)
         logger.warning(
             "PRODUCT MENU CALLBACK file=%s function=_on_menu_impl callback_data=%s user_id=%s",
             __file__,
@@ -4466,23 +4997,32 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         await _render_product_menu(update, edit=True)
     elif data == "menu_tools":
+        _clear_pending_dtkd_order_ref(context)
         # Tool is the original license/download branch, separate from account catalog products.
         await _show_navigation_screen(update, _ai_daily_text(), _ai_daily_keyboard(), edit=True)
     elif data == "menu_partners":
+        _clear_pending_dtkd_order_ref(context)
         await _send_business_partner_home(update, context, edit=True)
+    elif data == "dtkd_order_ref_skip":
+        await _create_order_after_dtkd_ref(update, context, attach_existing_referral=False, edit=True)
     elif data.startswith("dtkd_admin_"):
         await _handle_dtkd_admin_callback(update, context, data)
     elif data.startswith("dtkd_"):
         await _send_business_partner_screen(update, context, data.removeprefix("dtkd_"), edit=True)
     elif data == "menu_orders":
+        _clear_pending_dtkd_order_ref(context)
         await _send_orders(update, context, edit=True)
     elif data == "menu_history":
+        _clear_pending_dtkd_order_ref(context)
         await _send_purchase_history(update, context, edit=True)
     elif data == "menu_payment":
+        _clear_pending_dtkd_order_ref(context)
         await _send_payment(update, context, edit=True)
     elif data == "menu_ai_daily":
+        _clear_pending_dtkd_order_ref(context)
         await _show_navigation_screen(update, _ai_daily_text(), _ai_daily_keyboard(), edit=True)
     elif data == "product_ai_daily":
+        _clear_pending_dtkd_order_ref(context)
         await _show_navigation_screen(update, _ai_daily_text(), _ai_daily_keyboard(), edit=True)
     elif data.startswith("pkg:"):
         parts = data.split(":")
@@ -4570,104 +5110,21 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         if not package:
             await _safe_edit_or_send(update, "Gói không hợp lệ.", _product_menu_keyboard(), edit=True)
             return
-        try:
-            if update.effective_user:
-                _release_current_user_reservation(context, update.effective_user.id)
-            _release_expired_sqlite_reservations(context.application.bot_data.get("store_db_path"))
-            logger.debug(
-                "ORDER_CREATE_START callback_data=%s user_id=%s database_path=%s price_source=%s product_code=%s package_code=%s quantity=%s available_by_menu_query=%s available_by_package_page_query=%s available_by_reserve_query=%s",
-                data,
-                getattr(getattr(update, "effective_user", None), "id", None),
-                _resolve_store_db_path(context.application.bot_data.get("store_db_path")),
-                _price_source_label(package),
-                product_code,
-                package_code,
-                requested_quantity,
-                menu_available,
-                package_available,
-                package_available,
-            )
-            order = _create_sales_order(update, product_code, package_code, requested_quantity)
-            logger.debug(
-                "ORDER_CREATED callback_data=%s user_id=%s database_path=%s price_source=%s order_id=%s product_code=%s package_code=%s amount_vnd=%s",
-                data,
-                getattr(getattr(update, "effective_user", None), "id", None),
-                _resolve_store_db_path(context.application.bot_data.get("store_db_path")),
-                _price_source_label(package),
-                order.get("order_id", ""),
-                order.get("product_code", ""),
-                order.get("package_code", ""),
-                order.get("total", 0),
-            )
-        except InventoryReservationError as exc:
-            logger.debug(
-                "CALLBACK qty failed callback_data=%s user_id=%s product_code=%s package_code=%s quantity=%s reason=%s",
-                data,
-                getattr(getattr(update, "effective_user", None), "id", None),
-                product_code,
-                package_code,
-                raw_qty,
-                exc,
-            )
-            await _safe_edit_or_send(update, str(exc), _product_menu_keyboard(), edit=True)
+        if package_available < requested_quantity:
+            await _safe_edit_or_send(update, "Sản phẩm hiện đã hết hàng, vui lòng quay lại sau.", _product_menu_keyboard(), edit=True)
             return
-        except Exception as exc:
-            logger.exception(
-                "EXCEPTION_CAUGHT callback_data=%s user_id=%s product_code=%s package_code=%s quantity=%s exception_type=%s exception_message=%s",
-                data,
-                getattr(getattr(update, "effective_user", None), "id", None),
-                product_code,
-                package_code,
-                raw_qty,
-                type(exc).__name__,
-                exc,
-            )
-            await _send_purchase_error(update, context, reason=str(exc), order_id="")
+        existing_referral = _customer_referral(int(getattr(getattr(update, "effective_user", None), "id", 0) or 0))
+        existing_partner = _find_business_partner_by_code(str((existing_referral or {}).get("partner_code", "")))
+        if existing_referral and existing_partner and str(existing_partner.get("status", "")).lower() in {"approved", "active"}:
+            if getattr(context, "user_data", None) is not None:
+                context.user_data["dtkd_order_ref"] = {
+                    "product_code": str(product_code or "").strip().upper(),
+                    "package_code": str(package_code or "").strip().upper(),
+                    "quantity": int(requested_quantity),
+                }
+            await _create_order_after_dtkd_ref(update, context, attach_existing_referral=True, edit=True)
             return
-        log_sales_state(
-            "RESERVE_OK",
-            str(order.get("product_code") or product_code),
-            order_id=str(order.get("order_id", "")),
-            callback_data=data,
-            package_id=str(order.get("package_code", package_code)),
-            quantity=int(order.get("quantity", requested_quantity)),
-            database_path=context.application.bot_data.get("store_db_path"),
-        )
-        if update.effective_user and getattr(context, "user_data", None) is not None:
-            context.user_data["pending_order_id"] = str(order.get("order_id", ""))
-        try:
-            logger.debug(
-                "PAYMENT_BUILD_START callback_data=%s user_id=%s chat_id=%s message_id=%s database_path=%s price_source=%s order_id=%s product_code=%s package_code=%s quantity=%s amount_vnd=%s bank_account=%s",
-                data,
-                getattr(getattr(update, "effective_user", None), "id", None),
-                getattr(getattr(getattr(update, "effective_message", None), "chat", None), "id", None),
-                getattr(getattr(update, "callback_query", None), "message", None).message_id if getattr(getattr(update, "callback_query", None), "message", None) else None,
-                _resolve_store_db_path(context.application.bot_data.get("store_db_path")),
-                _price_source_label(package),
-                str(order.get("order_id", "")),
-                str(order.get("product_code", order.get("product_id", "")) or ""),
-                str(order.get("package_code", "")),
-                int(order.get("quantity", 0) or 0),
-                int(order.get("total", 0) or 0),
-                "",
-            )
-            await _send_payment_choice(update, order, edit=True)
-            logger.debug(
-                "TELEGRAM_SEND_OK callback_data=%s order_id=%s branch=payment_choice",
-                data,
-                str(order.get("order_id", "")),
-            )
-        except Exception as exc:
-            logger.exception(
-                "PAYMENT_BUILD_FAIL callback_data=%s user_id=%s order_id=%s exception_type=%s exception_message=%s",
-                data,
-                getattr(getattr(update, "effective_user", None), "id", None),
-                str(order.get("order_id", "")),
-                type(exc).__name__,
-                exc,
-            )
-            await _send_purchase_error(update, context, reason=str(exc), order_id=str(order.get("order_id", "")))
-            return
+        await _send_dtkd_order_ref_prompt(update, context, product_code, package_code, requested_quantity, edit=True)
     elif data.startswith("pay_acb:"):
         parts = data.split(":", 1)
         if len(parts) != 2 or not parts[1].strip():
@@ -4713,6 +5170,7 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         order_id = parts[1].strip()
         _release_order_reservation(order_id, store_db_path=context.application.bot_data.get("store_db_path"))
         _update_order(order_id, payment_status="cancelled", order_status="cancelled")
+        _clear_pending_dtkd_order_ref(context)
         await _safe_edit_or_send(update, "Giao dịch đã hủy.", _main_menu_keyboard(), edit=True)
     elif data.startswith("product:"):
         parts = data.split(":", 1)
@@ -4729,6 +5187,7 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         if update.effective_user:
             _release_current_user_reservation(context, update.effective_user.id)
+        _clear_pending_dtkd_order_ref(context)
         await _send_product_detail(update, context, product_code, edit=True)
     elif data.startswith("buy:"):
         parts = data.split(":", 1)
@@ -4894,6 +5353,12 @@ def build_application() -> Application:
             interval=60,
             first=60,
             name="sqlite_reservation_cleanup",
+        )
+        app.job_queue.run_repeating(
+            dtkd_monthly_bonus_notification_job,
+            interval=3600,
+            first=60,
+            name="dtkd_monthly_bonus_notification",
         )
     return app
 

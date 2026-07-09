@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import os
@@ -19,6 +19,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from payment_service import PaymentConfig, PaymentService
 from repository.store_repository import StoreRepository
 from scripts.import_inventory import REQUIRED_COLUMNS, import_inventory
+import sepay_webhook
 import telegram_license_bot as bot
 
 
@@ -86,6 +87,11 @@ class FakeUpdate:
         self.documents.append((filename or "", None))
 
 
+class FakeLicenseService:
+    def touch_user(self, *args, **kwargs) -> None:
+        return None
+
+
 class TelegramCallbackFlowTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -104,16 +110,25 @@ class TelegramCallbackFlowTest(unittest.TestCase):
         workbook.close()
         import_inventory(workbook_path, self.db_path, mode="replace")
         self.previous_store_db_path = os.environ.get("STORE_DB_PATH")
+        self.previous_business_partners_path = bot.BUSINESS_PARTNERS_PATH
+        self.previous_sepay_processed_path = sepay_webhook.PROCESSED_TRANSACTIONS_PATH
+        self.previous_sepay_unmatched_path = sepay_webhook.UNMATCHED_TRANSACTIONS_PATH
         os.environ["STORE_DB_PATH"] = str(self.db_path)
+        bot.BUSINESS_PARTNERS_PATH = Path(self.temp_dir.name) / "business_partners.json"
+        sepay_webhook.PROCESSED_TRANSACTIONS_PATH = Path(self.temp_dir.name) / "processed_transactions.json"
+        sepay_webhook.UNMATCHED_TRANSACTIONS_PATH = Path(self.temp_dir.name) / "unmatched_transactions.json"
         self.context = SimpleNamespace(
             application=SimpleNamespace(
                 bot_data={
                     "store_db_path": self.db_path,
+                    "bot_username": "AIDailyBot",
+                    "license_service": FakeLicenseService(),
                     "payment_service": PaymentService(
                         PaymentConfig(bank_name="ACB", bank_account="123456789", bank_account_name="AI STORE", qr_url="")
                     ),
                 }
             ),
+            args=[],
             user_data={},
         )
 
@@ -122,6 +137,9 @@ class TelegramCallbackFlowTest(unittest.TestCase):
             os.environ.pop("STORE_DB_PATH", None)
         else:
             os.environ["STORE_DB_PATH"] = self.previous_store_db_path
+        bot.BUSINESS_PARTNERS_PATH = self.previous_business_partners_path
+        sepay_webhook.PROCESSED_TRANSACTIONS_PATH = self.previous_sepay_processed_path
+        sepay_webhook.UNMATCHED_TRANSACTIONS_PATH = self.previous_sepay_unmatched_path
         self.temp_dir.cleanup()
 
     def test_menu_navigation_callbacks_are_stateless(self) -> None:
@@ -305,6 +323,12 @@ class TelegramCallbackFlowTest(unittest.TestCase):
 
         update = FakeUpdate("qty:GEMINI:GEMINI:1")
         asyncio.run(bot._on_menu_impl(update, self.context))
+        ref_prompt = update.callback_query.edits[-1][0]
+        self.assertIn("Affiliate", ref_prompt)
+        self.assertEqual(self._gemini_stock_counts(), (8, 0))
+
+        update = FakeUpdate("dtkd_order_ref_skip")
+        asyncio.run(bot._on_menu_impl(update, self.context))
         final_text = update.callback_query.edits[-1][0]
         self.assertIn("thanh toán", final_text.lower())
         self.assertNotIn("hết hàng", final_text.lower())
@@ -354,6 +378,11 @@ class TelegramCallbackFlowTest(unittest.TestCase):
     def test_quantity_flow_reaches_qr_payment_branch(self) -> None:
         update = FakeUpdate("qty:GEMINI:GEMINI:1")
         asyncio.run(bot._on_menu_impl(update, self.context))
+        ref_prompt = update.callback_query.edits[-1][0]
+        self.assertIn("Affiliate", ref_prompt)
+
+        update = FakeUpdate("dtkd_order_ref_skip")
+        asyncio.run(bot._on_menu_impl(update, self.context))
         final_text = update.callback_query.edits[-1][0]
         self.assertIn("thanh toán", final_text.lower())
         self.assertNotIn("hết hàng", final_text.lower())
@@ -372,6 +401,320 @@ class TelegramCallbackFlowTest(unittest.TestCase):
         asyncio.run(bot._send_acb_qr(qr_update, self.context, order_id))
         self.assertTrue(qr_update.effective_message.photos)
         self.assertFalse(any("lỗi tạo thanh toán" in text.lower() for text, _ in qr_update.replies))
+
+    def test_dtkd_referral_code_can_be_entered_before_order_creation(self) -> None:
+        bot.BUSINESS_PARTNERS_PATH.write_text(
+            """
+{
+  "partners": [
+    {
+      "telegram_user_id": 111,
+      "partner_id": "PTR0000000111",
+      "partner_code": "DTKD000111",
+      "referral_code": "AIDAILY111",
+      "short_code": "AIDAILY111",
+      "status": "approved",
+      "approved_at": "2026-07-01T00:00:00+00:00",
+      "commission_policy_id": "DTKD_TRIAL_3M_REVENUE_TIERS"
+    }
+  ],
+  "referrals": [],
+  "order_refs": [],
+  "commissions": [],
+  "withdrawals": []
+}
+""".strip(),
+            encoding="utf-8",
+        )
+
+        update = FakeUpdate("qty:GEMINI:GEMINI:1")
+        asyncio.run(bot._on_menu_impl(update, self.context))
+        self.assertEqual(self._gemini_stock_counts(), (8, 0))
+
+        invalid_update = FakeUpdate("unused")
+        invalid_update.effective_message.text = "SAI-MA"
+        asyncio.run(bot.on_text_machine_id(invalid_update, self.context))
+        self.assertTrue(invalid_update.replies)
+        self.assertEqual(self._gemini_stock_counts(), (8, 0))
+
+        valid_update = FakeUpdate("unused")
+        valid_update.effective_message.text = "AIDAILY111"
+        asyncio.run(bot.on_text_machine_id(valid_update, self.context))
+        final_text = valid_update.replies[-1][0]
+        self.assertIn("Gemini AI Pro", final_text)
+
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            order_id = connection.execute(
+                "SELECT order_id FROM orders WHERE product_code = 'GEMINI' ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()[0]
+        data = bot._load_business_partners()
+        order_ref = next(item for item in data["order_refs"] if item["order_id"] == order_id)
+        self.assertEqual(order_ref["partner_code"], "DTKD000111")
+        self.assertEqual(order_ref["gross_amount"], 70000)
+        self.assertEqual(order_ref["total_amount"], 70000)
+        self.assertEqual(order_ref["commission_amount"], 7000)
+        self.assertEqual(order_ref["payable_amount"], 70000)
+        self.assertEqual(order_ref["net_revenue"], 70000)
+        self.assertEqual(order_ref["commission_status"], "pending_reconcile")
+
+        order = StoreRepository(self.db_path).find_order(order_id)
+        assert order is not None
+        self.assertEqual(order["total"], 70000)
+        qr_url = bot._build_vietqr_url(
+            bot._dtkd_enrich_order_accounting(dict(order)) or dict(order),
+            self.context.application.bot_data["payment_service"],
+        )
+        self.assertIn("amount=70000", qr_url)
+
+        async def fulfill_stub(matched_order_id: str):
+            return {"ok": True, "order_id": matched_order_id}
+
+        webhook_result = asyncio.run(
+            sepay_webhook.process_sepay_payload(
+                {"id": "TX-DTKD-70000", "amount": 70000, "content": order_id},
+                fulfill_stub,
+            )
+        )
+        self.assertTrue(webhook_result["ok"])
+        self.assertEqual(webhook_result["order_id"], order_id)
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            tx_count = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM payment_transactions AS tx
+                JOIN orders AS o ON o.id = tx.order_id
+                WHERE o.order_id = ?
+                """,
+                (order_id,),
+            ).fetchone()[0]
+        self.assertEqual(tx_count, 1)
+
+        duplicate_result = asyncio.run(
+            sepay_webhook.process_sepay_payload(
+                {"id": "TX-DTKD-56000-REPLAY", "amount": 70000, "content": order_id},
+                fulfill_stub,
+            )
+        )
+        self.assertFalse(duplicate_result["ok"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            tx_count = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM payment_transactions AS tx
+                JOIN orders AS o ON o.id = tx.order_id
+                WHERE o.order_id = ?
+                """,
+                (order_id,),
+            ).fetchone()[0]
+        self.assertEqual(tx_count, 1)
+
+        order = StoreRepository(self.db_path).find_order(order_id)
+        assert order is not None
+        self.assertEqual(order["payment_status"], "paid")
+        order["payment_status"] = "paid"
+        order["order_status"] = "delivered"
+        order["paid_at"] = "2000-01-01T00:00:00+00:00"
+        order["delivered_at"] = "2000-01-01T00:00:00+00:00"
+        bot._record_partner_commission(order)
+        data = bot._load_business_partners()
+        commission = next(item for item in data["commissions"] if item["order_id"] == order_id)
+        self.assertEqual(commission["partner_code"], "DTKD000111")
+        self.assertEqual(commission["status"], "withdrawable")
+        self.assertEqual(commission["commission_amount"], 7000)
+        self.assertEqual(commission["net_revenue"], 70000)
+        self.assertEqual(commission["amount"], 7000)
+        bot._record_partner_commission(order)
+        data = bot._load_business_partners()
+        self.assertEqual(len([item for item in data["commissions"] if item["order_id"] == order_id]), 1)
+
+    def test_affiliate_deep_link_saves_referral_and_auto_attaches_order(self) -> None:
+        bot.BUSINESS_PARTNERS_PATH.write_text(
+            """
+{
+  "partners": [
+    {
+      "telegram_user_id": 111,
+      "partner_id": "PTR0000000111",
+      "partner_code": "DTKD000111",
+      "referral_code": "AIDAILY111",
+      "short_code": "AIDAILY111",
+      "full_name": "Affiliate One",
+      "status": "approved",
+      "approved_at": "2026-07-01T00:00:00+00:00",
+      "commission_policy_id": "DTKD_AFFILIATE_10PCT"
+    }
+  ],
+  "referrals": [],
+  "order_refs": [],
+  "commissions": [],
+  "withdrawals": []
+}
+""".strip(),
+            encoding="utf-8",
+        )
+        partner = bot._load_business_partners()["partners"][0]
+        self.assertEqual(
+            bot._partner_referral_link(self.context, str(partner["referral_code"])),
+            "https://t.me/AIDailyBot?start=AIDAILY111",
+        )
+
+        self.context.args = ["AIDAILY111"]
+        start_update = FakeUpdate("unused", user_id=222)
+        asyncio.run(bot.cmd_start(start_update, self.context))
+        self.assertIn("Bạn được giới thiệu bởi Affiliate: Affiliate One", start_update.replies[-1][0])
+        data = bot._load_business_partners()
+        referral = next(item for item in data["referrals"] if item["customer_telegram_user_id"] == 222)
+        self.assertEqual(referral["partner_code"], "DTKD000111")
+
+        qty_update = FakeUpdate("qty:GEMINI:GEMINI:1", user_id=222)
+        asyncio.run(bot._on_menu_impl(qty_update, self.context))
+        bill_text = qty_update.callback_query.edits[-1][0]
+        self.assertNotIn("Affiliate/referral code", bill_text)
+        self.assertIn("70.000", bill_text)
+
+        order_id = self.context.user_data["pending_order_id"]
+        order = bot._dtkd_enrich_order_accounting(StoreRepository(self.db_path).find_order(order_id))
+        assert order is not None
+        self.assertEqual(order["total"], 70000)
+        self.assertEqual(order["partner_code"], "DTKD000111")
+        self.assertEqual(order["commission_amount"], 7000)
+        self.assertIn(
+            "amount=70000",
+            bot._build_vietqr_url(order, self.context.application.bot_data["payment_service"]),
+        )
+
+        order["payment_status"] = "paid"
+        order["order_status"] = "delivered"
+        order["paid_at"] = "2000-01-01T00:00:00+00:00"
+        order["delivered_at"] = "2000-01-01T00:00:00+00:00"
+        bot._record_partner_commission(order)
+        data = bot._load_business_partners()
+        commission = next(item for item in data["commissions"] if item["order_id"] == order_id)
+        self.assertEqual(commission["commission_amount"], 7000)
+        self.assertEqual(commission["amount"], 7000)
+        self.assertEqual(commission["status"], "withdrawable")
+
+    def test_approved_dtkd_self_referral_does_not_discount_or_create_commission(self) -> None:
+        bot.BUSINESS_PARTNERS_PATH.write_text(
+            """
+{
+  "partners": [
+    {
+      "telegram_user_id": 42,
+      "partner_id": "PTR0000000042",
+      "partner_code": "DTKD000042",
+      "referral_code": "AIDAILY42",
+      "short_code": "AIDAILY42",
+      "status": "approved",
+      "approved_at": "2026-07-01T00:00:00+00:00",
+      "commission_policy_id": "DTKD_AFFILIATE_10PCT"
+    }
+  ],
+  "referrals": [],
+  "order_refs": [],
+  "commissions": [],
+  "withdrawals": []
+}
+""".strip(),
+            encoding="utf-8",
+        )
+
+        self.context.args = ["AIDAILY42"]
+        start_update = FakeUpdate("unused", user_id=42)
+        asyncio.run(bot.cmd_start(start_update, self.context))
+        self.assertIn("Không tính hoa hồng cho đơn tự giới thiệu.", start_update.replies[-1][0])
+        self.assertEqual(bot._load_business_partners()["referrals"], [])
+        self.context.args = []
+
+        qty_update = FakeUpdate("qty:GEMINI:GEMINI:1")
+        asyncio.run(bot._on_menu_impl(qty_update, self.context))
+        prompt_text = qty_update.callback_query.edits[-1][0]
+        self.assertIn("Affiliate", prompt_text)
+        self.assertNotIn("pending_order_id", self.context.user_data)
+
+        code_update = FakeUpdate("unused")
+        code_update.effective_message.text = "AIDAILY42"
+        asyncio.run(bot.on_text_machine_id(code_update, self.context))
+        bill_text = code_update.replies[-1][0]
+        self.assertNotIn("Chi", bill_text)
+        self.assertIn("70.000", bill_text)
+
+        order_id = self.context.user_data["pending_order_id"]
+        order = bot._dtkd_enrich_order_accounting(StoreRepository(self.db_path).find_order(order_id))
+        assert order is not None
+        self.assertEqual(order["total"], 70000)
+        self.assertEqual(order["gross_amount"], 70000)
+        self.assertEqual(order["commission_amount"], 7000)
+        self.assertEqual(order["payable_amount"], 70000)
+        self.assertIn(
+            "amount=70000",
+            bot._build_vietqr_url(order, self.context.application.bot_data["payment_service"]),
+        )
+
+        async def fulfill_stub(matched_order_id: str):
+            return {"ok": True, "order_id": matched_order_id}
+
+        webhook_result = asyncio.run(
+            sepay_webhook.process_sepay_payload(
+                {"id": "TX-DTKD-SELF-70000", "amount": 70000, "content": order_id},
+                fulfill_stub,
+            )
+        )
+        self.assertTrue(webhook_result["ok"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            tx_count = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM payment_transactions AS tx
+                JOIN orders AS o ON o.id = tx.order_id
+                WHERE o.order_id = ?
+                """,
+                (order_id,),
+            ).fetchone()[0]
+        self.assertEqual(tx_count, 1)
+
+        order["payment_status"] = "paid"
+        order["order_status"] = "delivered"
+        order["paid_at"] = "2000-01-01T00:00:00+00:00"
+        order["delivered_at"] = "2000-01-01T00:00:00+00:00"
+        bot._record_partner_commission(order)
+        data = bot._load_business_partners()
+        order_ref = next(item for item in data["order_refs"] if item["order_id"] == order_id)
+        self.assertEqual(order_ref["partner_code"], "DTKD000042")
+        self.assertTrue(order_ref["self_referral"])
+        self.assertEqual(order_ref["commission_status"], "rejected_self_referral")
+        self.assertFalse([item for item in data["commissions"] if item["order_id"] == order_id])
+
+    def test_locked_dtkd_code_is_not_auto_applied(self) -> None:
+        bot.BUSINESS_PARTNERS_PATH.write_text(
+            """
+{
+  "partners": [
+    {
+      "telegram_user_id": 42,
+      "partner_id": "PTR0000000042",
+      "partner_code": "DTKD000042",
+      "referral_code": "AIDAILY42",
+      "short_code": "AIDAILY42",
+      "status": "locked",
+      "approved_at": "2026-07-01T00:00:00+00:00",
+      "commission_policy_id": "DTKD_AFFILIATE_10PCT"
+    }
+  ],
+  "referrals": [],
+  "order_refs": [],
+  "commissions": [],
+  "withdrawals": []
+}
+""".strip(),
+            encoding="utf-8",
+        )
+        qty_update = FakeUpdate("qty:GEMINI:GEMINI:1")
+        asyncio.run(bot._on_menu_impl(qty_update, self.context))
+        prompt_text = qty_update.callback_query.edits[-1][0]
+        self.assertIn("Affiliate", prompt_text)
+        self.assertNotIn("pending_order_id", self.context.user_data)
+        self.assertEqual(self._gemini_stock_counts(), (8, 0))
 
 
 if __name__ == "__main__":

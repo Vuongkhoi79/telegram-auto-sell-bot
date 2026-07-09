@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import threading
+import sqlite3
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -108,6 +109,27 @@ def append_unmatched(payload: dict[str, Any], reason: str) -> None:
     save_json_list(UNMATCHED_TRANSACTIONS_PATH, items)
 
 
+def mark_order_paid(order_id: str, transaction_id: str) -> bool:
+    repository = bank_checker._orders_repository()
+    if repository:
+        try:
+            return repository.mark_order_paid(order_id, transaction_id)
+        except (OSError, RuntimeError, sqlite3.Error) as exc:
+            logger.error("SQLite mark paid failed for %s; SePay fail closed: %s", order_id, exc)
+            return False
+    paid_at = utc_now_iso()
+    return bool(
+        bank_checker.update_order(
+            order_id,
+            payment_status="paid",
+            order_status="paid",
+            paid_at=paid_at,
+            payment_method="SEPAY",
+            transaction_id=transaction_id,
+        )
+    )
+
+
 async def process_sepay_payload(payload: dict[str, Any], fulfill_order: FulfillOrder) -> dict[str, Any]:
     print("[SEPAY] received transaction", flush=True)
     amount = extract_amount(payload)
@@ -129,15 +151,10 @@ async def process_sepay_payload(payload: dict[str, Any], fulfill_order: FulfillO
 
     print(f"[SEPAY] matched order_id={order.get('order_id', '')}", flush=True)
     order_id = str(order.get("order_id", ""))
-    paid_at = utc_now_iso()
-    bank_checker.update_order(
-        order_id,
-        payment_status="paid",
-        order_status="paid",
-        paid_at=paid_at,
-        payment_method="SEPAY",
-        transaction_id=transaction_id,
-    )
+    if not mark_order_paid(order_id, transaction_id):
+        print("[SEPAY] mark paid failed", flush=True)
+        append_unmatched(payload, "Matched order but failed to mark paid")
+        return {"ok": False, "status": "mark_paid_failed", "transaction_id": transaction_id, "order_id": order_id}
     print(f"[SEPAY] marked paid order_id={order_id}", flush=True)
     print(f"[SEPAY] delivery start order_id={order_id}", flush=True)
     fulfillment = await fulfill_order(order_id)
