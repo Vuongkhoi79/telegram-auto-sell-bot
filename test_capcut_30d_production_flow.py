@@ -158,6 +158,16 @@ class CapCut30DProductionFlowTest(unittest.TestCase):
 
         update = FakeUpdate("qty:CAPCUT:CAPCUT_30D:1")
         asyncio.run(bot._on_menu_impl(update, self.context))
+        ref_prompt = update.callback_query.edits[-1][0]
+        self.assertIn("Affiliate", ref_prompt)
+        after_prompt = self._capcut_counts()
+        self.assertEqual(after_prompt["CAPCUT_30D"]["available"], 10)
+        self.assertNotIn("reserved", after_prompt["CAPCUT_30D"])
+
+        skip_update = FakeUpdate("dtkd_order_ref_skip")
+        asyncio.run(bot._on_menu_impl(skip_update, self.context))
+        payment_text = skip_update.callback_query.edits[-1][0]
+        self.assertIn("thanh", payment_text.lower())
 
         with closing(sqlite3.connect(self.db_path)) as connection:
             order = connection.execute(
@@ -215,7 +225,7 @@ class CapCut30DProductionFlowTest(unittest.TestCase):
                 """,
                 (order_id,),
             ).fetchone()[0]
-        self.assertEqual(final_order[0:6], ("CAPCUT_30D", 45000, 45000, "SEPAY", "paid", "paid"))
+        self.assertEqual(final_order[0:6], ("CAPCUT_30D", 45000, 45000, "SEPAY", "paid", "delivered"))
         self.assertTrue(final_order[6])
         self.assertTrue(final_order[7])
         self.assertEqual(delivered_count, 1)
