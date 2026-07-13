@@ -6,7 +6,9 @@ import os
 import re
 import shutil
 import sqlite3
+import tempfile
 import uuid
+import csv
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -43,7 +45,7 @@ from license_service import (
 )
 from payment_service import PaymentConfig, PaymentService
 from repository.store_repository import StoreRepository
-from scripts.import_inventory import import_inventory
+from scripts.import_inventory import IMPORT_COLUMNS, credential_from_row, import_inventory, normalize_import_product_code, read_rows
 from scripts.sales_flow_state import log_sales_state
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -78,6 +80,7 @@ DTKD_COMMISSION_RECONCILE_DELAY_HOURS = int(os.environ.get("DTKD_COMMISSION_RECO
 DTKD_KPI_TARGET_VND = int(os.environ.get("DTKD_KPI_TARGET_VND", "0") or "0")
 DTKD_KPI_BONUS_VND = int(os.environ.get("DTKD_KPI_BONUS_VND", "0") or "0")
 DTKD_WITHDRAW_MIN_VND = int(os.environ.get("DTKD_WITHDRAW_MIN_VND", "100000") or "100000")
+IMPORT_EXCEL_MAX_BYTES = 10 * 1024 * 1024
 PRODUCT_PACKAGES = {
     "7D": 99000,
     "30D": 199000,
@@ -4719,7 +4722,10 @@ async def cmd_importexcel(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     args = context.args or []
     if len(args) != 1:
-        await update.effective_message.reply_text("Cú pháp đúng: /importexcel <tên_file.xlsx hoặc tên_file.csv trong thư mục imports>")
+        await update.effective_message.reply_text(
+            "Cú pháp đúng: /importexcel <tên_file.xlsx hoặc tên_file.csv trong thư mục imports>\n\n"
+            "Hoặc gửi trực tiếp file .xlsx/.csv vào bot bằng tài khoản admin để import vào kho."
+        )
         return
     candidate = (IMPORTS_DIR / args[0]).resolve()
     if not candidate.is_relative_to(IMPORTS_DIR.resolve()) or not candidate.is_file():
@@ -4731,14 +4737,157 @@ async def cmd_importexcel(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         logger.exception("Excel import failed")
         await update.effective_message.reply_text(f"Import SQLite thất bại: {exc}")
         return
-    await update.effective_message.reply_text(
+    await update.effective_message.reply_text(_format_import_report(report, context.application.bot_data["store_db_path"]))
+
+
+def _safe_import_error_message(exc: Exception) -> str:
+    message = str(exc).strip()
+    if not message:
+        return "Không thể đọc hoặc import file. Vui lòng kiểm tra định dạng file."
+    if "|" in message or "password" in message.lower() or "credential" in message.lower():
+        return "File import không hợp lệ. Vui lòng kiểm tra cột product_code, email/password hoặc credential_text."
+    return message[:500]
+
+
+def _stock_count_for_code(store_db_path: Path | str, product_code: str) -> int:
+    try:
+        return StoreRepository(store_db_path).get_stock_count(product_code)
+    except (OSError, RuntimeError, sqlite3.Error):
+        return 0
+
+
+def _format_import_report(
+    report: dict[str, object],
+    store_db_path: Path | str,
+    *,
+    stock_before: dict[str, int] | None = None,
+) -> str:
+    stock_by_code = report.get("stock") if isinstance(report.get("stock"), dict) else {}
+    product_codes = sorted(set((stock_before or {}).keys()) | {str(code) for code in stock_by_code.keys()})
+    lines = [
         "Import SQLite hoàn tất.\n"
-        f"Product đã tạo: {report['products_created']}\n"
-        f"Product đã cập nhật: {report['products_updated']}\n"
-        f"Account đã thêm: {report['credentials_added']}\n"
-        f"Trùng, đã bỏ qua: {report['credentials_duplicate']}\n"
-        f"Dòng lỗi: {report['row_errors']}"
-    )
+        f"Số dòng đọc được: {int(report.get('rows_read') or 0)}\n"
+        f"Số dòng hợp lệ: {int(report.get('valid_rows') or 0)}\n"
+        f"Product đã tạo: {int(report.get('products_created') or 0)}\n"
+        f"Product đã cập nhật: {int(report.get('products_updated') or 0)}\n"
+        f"Account đã thêm: {int(report.get('credentials_added') or 0)}\n"
+        f"Trùng, đã bỏ qua: {int(report.get('credentials_duplicate') or 0)}\n"
+        f"Dòng lỗi: {int(report.get('row_errors') or 0)}"
+    ]
+    if product_codes:
+        lines.append("\nChi tiết tồn kho:")
+        for product_code in product_codes:
+            before = int((stock_before or {}).get(product_code, 0))
+            after = _stock_count_for_code(store_db_path, product_code)
+            lines.append(
+                f"- Product code: {product_code}\n"
+                f"  Stock trước import: {before}\n"
+                f"  Thêm mới: {int(report.get('credentials_added') or 0) if len(product_codes) == 1 else 'xem tổng ở trên'}\n"
+                f"  Trùng: {int(report.get('credentials_duplicate') or 0) if len(product_codes) == 1 else 'xem tổng ở trên'}\n"
+                f"  Stock sau import: {after}"
+            )
+    lines.append(f"\nTồn kho CAPCUT_7D sau import: {_stock_count_for_code(store_db_path, 'CAPCUT_7D')}")
+    return "\n".join(lines)
+
+
+def _product_row_by_code(connection: sqlite3.Connection, product_code: str) -> sqlite3.Row | None:
+    return connection.execute(
+        "SELECT id FROM products WHERE UPPER(code) = ? AND active = 1",
+        (product_code.upper(),),
+    ).fetchone()
+
+
+def _credential_exists(connection: sqlite3.Connection, product_code: str, credential: str) -> bool:
+    row = _product_row_by_code(connection, product_code)
+    if not row:
+        return False
+    duplicate = connection.execute(
+        "SELECT 1 FROM inventory_items WHERE product_id = ? AND secret_value = ? LIMIT 1",
+        (row["id"], credential),
+    ).fetchone()
+    return bool(duplicate)
+
+
+def _prepare_import_upload_file(input_path: Path, output_path: Path, store_db_path: Path | str) -> tuple[dict[str, int], int, int, int]:
+    rows = list(read_rows(input_path))
+    if not rows:
+        raise ValueError("File import không có dòng dữ liệu.")
+    stock_before: dict[str, int] = {}
+    duplicate_count = 0
+    valid_input_rows = 0
+    seen_credentials: set[tuple[str, str]] = set()
+    filtered_rows: list[dict[str, object]] = []
+    with closing(sqlite3.connect(store_db_path)) as connection:
+        connection.row_factory = sqlite3.Row
+        for _row_number, row in rows:
+            product_code = normalize_import_product_code(str(row.get("product_code") or ""), row)
+            row["product_code"] = product_code
+            if product_code and product_code not in stock_before:
+                stock_before[product_code] = _stock_count_for_code(store_db_path, product_code)
+            credential = credential_from_row(row)
+            key = (product_code, credential)
+            if key in seen_credentials or _credential_exists(connection, product_code, credential):
+                duplicate_count += 1
+                continue
+            seen_credentials.add(key)
+            valid_input_rows += 1
+            filtered_rows.append({column: row.get(column, "") for column in IMPORT_COLUMNS})
+    with output_path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(IMPORT_COLUMNS))
+        writer.writeheader()
+        writer.writerows(filtered_rows)
+    return stock_before, len(rows), valid_input_rows, duplicate_count
+
+
+async def on_import_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_message or not getattr(update.effective_message, "document", None):
+        return
+    if not update.effective_user or not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
+        return
+
+    document = update.effective_message.document
+    filename = str(getattr(document, "file_name", "") or "").strip()
+    suffix = Path(filename).suffix.lower()
+    if suffix not in {".xlsx", ".csv"}:
+        await update.effective_message.reply_text("File import phải có định dạng .xlsx hoặc .csv.")
+        return
+    file_size = int(getattr(document, "file_size", 0) or 0)
+    if file_size <= 0:
+        await update.effective_message.reply_text("File import đang rỗng hoặc không có dữ liệu.")
+        return
+    if file_size > IMPORT_EXCEL_MAX_BYTES:
+        await update.effective_message.reply_text("File import vượt quá giới hạn 10 MB.")
+        return
+    if context.application.bot_data.get("inventory_import_running"):
+        await update.effective_message.reply_text("Đang có phiên import khác chạy. Vui lòng thử lại sau.")
+        return
+
+    store_db_path = context.application.bot_data["store_db_path"]
+    context.application.bot_data["inventory_import_running"] = True
+    try:
+        with tempfile.TemporaryDirectory(prefix="telegram_import_") as directory:
+            temp_path = Path(directory) / f"upload{suffix}"
+            filtered_path = Path(directory) / "filtered_import.csv"
+            telegram_file = await document.get_file()
+            await telegram_file.download_to_drive(custom_path=str(temp_path))
+            if not temp_path.is_file() or temp_path.stat().st_size <= 0:
+                raise ValueError("File import đang rỗng hoặc không có dữ liệu.")
+            if temp_path.stat().st_size > IMPORT_EXCEL_MAX_BYTES:
+                raise ValueError("File import vượt quá giới hạn 10 MB.")
+            stock_before, rows_read, valid_rows, duplicate_count = _prepare_import_upload_file(temp_path, filtered_path, store_db_path)
+            report = import_inventory(filtered_path, store_db_path, mode="append")
+            report["rows_read"] = rows_read
+            report["valid_rows"] = valid_rows
+            report["credentials_duplicate"] = int(report.get("credentials_duplicate") or 0) + duplicate_count
+    except Exception as exc:
+        logger.warning("Telegram inventory import failed: %s", type(exc).__name__)
+        await update.effective_message.reply_text(f"Import SQLite thất bại: {_safe_import_error_message(exc)}")
+        return
+    finally:
+        context.application.bot_data["inventory_import_running"] = False
+
+    await update.effective_message.reply_text(_format_import_report(report, store_db_path, stock_before=stock_before))
 
 
 async def run_bank_check(context: ContextTypes.DEFAULT_TYPE) -> list[dict[str, object]]:
@@ -5352,6 +5501,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("dtkd_approve_commission", cmd_dtkd_approve_commission))
     app.add_handler(CommandHandler("dtkd_report", cmd_dtkd_report))
     app.add_handler(CommandHandler("find", cmd_find))
+    app.add_handler(MessageHandler(filters.Document.ALL, on_import_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text_machine_id))
     logger.warning("CALLBACK HANDLER ORDER: 1 handler=on_menu pattern=None")
     app.add_handler(CallbackQueryHandler(on_menu))
