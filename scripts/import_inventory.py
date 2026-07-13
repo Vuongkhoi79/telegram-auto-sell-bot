@@ -39,12 +39,14 @@ IMPORT_COLUMNS = tuple(dict.fromkeys((*REQUIRED_COLUMNS, *OPTIONAL_COLUMNS)))
 SKIPPED_SHEET_NAMES = {"README", "HƯỚNG DẪN", "HUONG DAN", "TEMPLATE"}
 DEFAULT_PRODUCT_DISPLAY_NAMES = {
     "CAPCUT": "CAPCUT PRO 12M",
+    "CAPCUT_7D": "CAPCUT PRO 7 ngay",
     "CAPCUT_12M": "CAPCUT PRO 12M",
     "CAPCUT_30D": "CAPCUT PRO 30D",
     "GEMINI": "Gemini AI Pro",
 }
 EXPECTED_PRODUCT_TERMS = {
     "CAPCUT": {"price_vnd": 400000, "warranty_days": 365},
+    "CAPCUT_7D": {"price_vnd": 8000, "warranty_days": 7},
     "CAPCUT_12M": {"price_vnd": 400000, "warranty_days": 365},
     "CAPCUT_30D": {"price_vnd": 45000, "warranty_days": 30},
 }
@@ -53,6 +55,7 @@ ALLOWED_PRODUCT_CODES = {
     "GEMINI",
     "GROK",
     "CAPCUT",
+    "CAPCUT_7D",
     "CAPCUT_12M",
     "CAPCUT_30D",
     "CLAUDE",
@@ -128,6 +131,16 @@ def validate_product_terms(product_code: str, row: dict[str, Any]) -> None:
         )
 
 
+def normalize_import_product_code(product_code: str, row: dict[str, Any]) -> str:
+    normalized = text(product_code).upper()
+    duration = text(row.get("duration")).upper().replace(" ", "")
+    price_vnd = parse_int(row.get("price_vnd"), 0)
+    warranty_days = parse_int(row.get("warranty_days"), 0)
+    if normalized == "CAPCUT" and duration in {"7D", "7DAY", "7DAYS", "7NGAY", "7NGÀY"} and price_vnd == 8000 and warranty_days == 7:
+        return "CAPCUT_7D"
+    return normalized
+
+
 def canonical_product_code(product_code: str) -> str:
     normalized = text(product_code).upper()
     if normalized in ALLOWED_PRODUCT_CODES:
@@ -139,7 +152,7 @@ def canonical_product_code(product_code: str) -> str:
 
 
 def product_code_candidates(product_code: str) -> list[str]:
-    if product_code in {"CAPCUT_12M", "CAPCUT_30D"}:
+    if product_code in {"CAPCUT_12M", "CAPCUT_30D", "CAPCUT_7D"}:
         return [product_code]
     candidates = [product_code]
     for alias in ACCOUNT_PRODUCT_CODE_ALIASES.get(product_code, ()):
@@ -380,12 +393,14 @@ def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE, m
     report: dict[str, Any] = {
         "products_created": 0, "products_updated": 0, "credentials_added": 0,
         "credentials_duplicate": 0, "credentials_disabled": 0, "row_errors": 0, "invalid_rows": 0,
-        "errors": [], "stock": {},
+        "rows_read": 0, "valid_rows": 0, "errors": [], "stock": {},
     }
     rows = list(read_rows(input_path))
+    report["rows_read"] = len(rows)
     product_seed_rows: dict[str, dict[str, Any]] = {}
     for _, row in rows:
-        product_code = text(row.get("product_code")).upper()
+        product_code = normalize_import_product_code(text(row.get("product_code")), row)
+        row["product_code"] = product_code
         if product_code and product_code not in product_seed_rows:
             product_seed_rows[product_code] = row
 
@@ -443,7 +458,8 @@ def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE, m
             savepoint = f"inventory_row_{row_index}"
             connection.execute(f"SAVEPOINT {savepoint}")
             try:
-                product_code = text(row["product_code"]).upper()
+                product_code = normalize_import_product_code(text(row["product_code"]), row)
+                row["product_code"] = product_code
                 if not product_code:
                     raise ValueError("product_code is required")
                 validate_product_code(product_code)
@@ -475,6 +491,7 @@ def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE, m
                 )
                 connection.execute(f"RELEASE SAVEPOINT {savepoint}")
                 report["credentials_added"] += 1
+                report["valid_rows"] += 1
                 add_imported_code(product_code)
             except Exception as exc:
                 connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
@@ -492,6 +509,8 @@ def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE, m
 def print_report(report: dict[str, Any]) -> None:
     print(f"Products created: {report['products_created']}")
     print(f"Products updated: {report['products_updated']}")
+    print(f"Rows read: {report['rows_read']}")
+    print(f"Valid rows: {report['valid_rows']}")
     print(f"Credentials added: {report['credentials_added']}")
     print(f"Credentials duplicate: {report['credentials_duplicate']}")
     print(f"Rows with errors: {report['row_errors']}")

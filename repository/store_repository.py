@@ -36,6 +36,7 @@ CATALOG_COLUMNS = {
 
 CANONICAL_CATALOG_PRODUCTS = {
     "CAPCUT": {"name": "CAPCUT PRO 365 ngay", "price_vnd": 400000},
+    "CAPCUT_7D": {"name": "CAPCUT PRO 7 ngay", "price_vnd": 8000},
     "CAPCUT_365D": {"name": "CAPCUT PRO 365 ngay", "price_vnd": 400000},
     "CAPCUT_12M": {"name": "CAPCUT PRO 365 ngay", "price_vnd": 400000},
     "CAPCUT_30D": {"name": "CAPCUT PRO 30 ngay", "price_vnd": 45000},
@@ -58,8 +59,10 @@ ACCOUNT_PRODUCT_CODE_ALIASES: dict[str, tuple[str, ...]] = {
     "ARTLIST": ("ARTLIST-1M-PRIVATE",),
     "CANVA": ("CANVA-PRO-1M-PRIVATE",),
     "CANVA PRO": ("CANVA-PRO-1M-PRIVATE",),
-    "CAPCUT": ("CAPCUT_365D", "CAPCUT_12M", "CAPCUT_60D", "CAPCUT_30D", "CAPCUT-PRO-1M-PRIVATE", "CAPCUT-PRO-12M-PRIVATE", "CAPCUT-PRO-60D-PRIVATE", "CAPCUT-PRO-30D-PRIVATE"),
-    "CAPCUT PRO": ("CAPCUT_365D", "CAPCUT_12M", "CAPCUT_60D", "CAPCUT_30D", "CAPCUT-PRO-1M-PRIVATE", "CAPCUT-PRO-12M-PRIVATE", "CAPCUT-PRO-60D-PRIVATE", "CAPCUT-PRO-30D-PRIVATE"),
+    "CAPCUT": ("CAPCUT_365D", "CAPCUT_12M", "CAPCUT_60D", "CAPCUT_30D", "CAPCUT_7D", "CAPCUT-PRO-1M-PRIVATE", "CAPCUT-PRO-12M-PRIVATE", "CAPCUT-PRO-60D-PRIVATE", "CAPCUT-PRO-30D-PRIVATE", "CAPCUT-PRO-7D-PRIVATE"),
+    "CAPCUT PRO": ("CAPCUT_365D", "CAPCUT_12M", "CAPCUT_60D", "CAPCUT_30D", "CAPCUT_7D", "CAPCUT-PRO-1M-PRIVATE", "CAPCUT-PRO-12M-PRIVATE", "CAPCUT-PRO-60D-PRIVATE", "CAPCUT-PRO-30D-PRIVATE", "CAPCUT-PRO-7D-PRIVATE"),
+    "CAPCUT_7D": ("CAPCUT-PRO-7D-PRIVATE", "CAPCUT PRO 7 ngay", "CAPCUT PRO 7D"),
+    "CAPCUT PRO 7 ngay": ("CAPCUT_7D", "CAPCUT-PRO-7D-PRIVATE"),
     "CAPCUT_365D": ("CAPCUT", "CAPCUT_12M", "CAPCUT-PRO-1M-PRIVATE", "CAPCUT-PRO-12M-PRIVATE", "CAPCUT PRO 365 ngay", "CAPCUT PRO 365D"),
     "CAPCUT PRO 365 ngay": ("CAPCUT_365D", "CAPCUT", "CAPCUT_12M", "CAPCUT-PRO-1M-PRIVATE", "CAPCUT-PRO-12M-PRIVATE"),
     "CAPCUT_12M": ("CAPCUT_365D", "CAPCUT", "CAPCUT-PRO-1M-PRIVATE", "CAPCUT-PRO-12M-PRIVATE", "CAPCUT PRO 12M"),
@@ -483,7 +486,7 @@ class StoreRepository:
                                 THEN 'CHATGPT'
                             WHEN UPPER(p.code) = 'GEM-AIPRO-1M-PRIVATE'
                                 THEN 'GEMINI'
-                            WHEN UPPER(p.code) IN ('CAPCUT', 'CAPCUT_12M', 'CAPCUT_365D', 'CAPCUT_60D', 'CAPCUT_30D', 'CAPCUT-PRO-1M-PRIVATE', 'CAPCUT-PRO-12M-PRIVATE', 'CAPCUT-PRO-60D-PRIVATE', 'CAPCUT-PRO-30D-PRIVATE')
+                            WHEN UPPER(p.code) IN ('CAPCUT', 'CAPCUT_12M', 'CAPCUT_365D', 'CAPCUT_60D', 'CAPCUT_30D', 'CAPCUT_7D', 'CAPCUT-PRO-1M-PRIVATE', 'CAPCUT-PRO-12M-PRIVATE', 'CAPCUT-PRO-60D-PRIVATE', 'CAPCUT-PRO-30D-PRIVATE', 'CAPCUT-PRO-7D-PRIVATE')
                                 THEN 'CAPCUT'
                             WHEN UPPER(p.code) = 'GROK-SUPER-1M-PRIVATE'
                                 THEN 'GROK'
@@ -581,12 +584,16 @@ class StoreRepository:
                                 THEN 'CAPCUT'
                             WHEN ? = 'CAPCUT' AND UPPER(p.code) IN ('CAPCUT_30D', 'CAPCUT-PRO-30D-PRIVATE')
                                 THEN 'CAPCUT'
+                            WHEN ? = 'CAPCUT' AND UPPER(p.code) IN ('CAPCUT_7D', 'CAPCUT-PRO-7D-PRIVATE')
+                                THEN 'CAPCUT'
                             WHEN UPPER(p.code) IN ('CAPCUT', 'CAPCUT_365D', 'CAPCUT_12M', 'CAPCUT-PRO-1M-PRIVATE', 'CAPCUT-PRO-12M-PRIVATE')
                                 THEN 'CAPCUT_365D'
                             WHEN UPPER(p.code) IN ('CAPCUT_60D', 'CAPCUT-PRO-60D-PRIVATE')
                                 THEN 'CAPCUT_60D'
                             WHEN UPPER(p.code) IN ('CAPCUT_30D', 'CAPCUT-PRO-30D-PRIVATE')
                                 THEN 'CAPCUT_30D'
+                            WHEN UPPER(p.code) IN ('CAPCUT_7D', 'CAPCUT-PRO-7D-PRIVATE')
+                                THEN 'CAPCUT_7D'
                             WHEN UPPER(p.code) = 'GROK-SUPER-1M-PRIVATE'
                                 THEN 'GROK'
                             ELSE UPPER(COALESCE(NULLIF(p.category_key, ''), NULLIF(p.category, ''), p.code))
@@ -598,6 +605,8 @@ class StoreRepository:
                                 THEN 'CAPCUT_60D'
                             WHEN UPPER(p.code) IN ('CAPCUT_30D', 'CAPCUT-PRO-30D-PRIVATE')
                                 THEN 'CAPCUT_30D'
+                            WHEN UPPER(p.code) IN ('CAPCUT_7D', 'CAPCUT-PRO-7D-PRIVATE')
+                                THEN 'CAPCUT_7D'
                             ELSE UPPER(p.code)
                         END AS package_code
                     FROM products AS p
@@ -614,7 +623,7 @@ class StoreRepository:
                 HAVING available_count > 0 OR p.price_vnd > 0
                 ORDER BY p.menu_order, p.name COLLATE NOCASE, p.code
                 """,
-                (category_key.upper(), category_key.upper(), category_key.upper(), product_group, category_key.upper()),
+                (category_key.upper(), category_key.upper(), category_key.upper(), category_key.upper(), product_group, category_key.upper()),
             ).fetchall()
         return [{**dict(row), "available_count": int(row["available_count"] or 0)} for row in rows]
 

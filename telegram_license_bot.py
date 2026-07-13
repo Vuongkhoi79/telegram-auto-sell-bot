@@ -106,11 +106,13 @@ TOOL_LICENSE_PRODUCTS = {
 pending_license_product_by_user: dict[int, str] = {}
 QUANTITY_OPTIONS = [1, 2, 3, 5, 10]
 CAPCUT_PACKAGE_ORDER = (
+    ("CAPCUT_7D", "CAPCUT PRO 7 ngày"),
     ("CAPCUT_30D", "CAPCUT PRO 30 ngày"),
     ("CAPCUT_60D", "CAPCUT PRO 60 ngày"),
     ("CAPCUT_365D", "CAPCUT PRO 365 ngày"),
 )
 CAPCUT_PACKAGE_FALLBACK_PRICES = {
+    "CAPCUT_7D": 8000,
     "CAPCUT_30D": 45000,
     "CAPCUT_60D": 90000,
     "CAPCUT_365D": 420000,
@@ -138,6 +140,7 @@ PRODUCT_ORDER = [
 ]
 CATALOG_DISPLAY_NAMES = {
     "CAPCUT": "CAPCUT PRO",
+    "CAPCUT_7D": "CAPCUT PRO 7 ngay",
     "CAPCUT_365D": "CAPCUT PRO 365 ngay",
     "CAPCUT_12M": "CAPCUT PRO 365 ngay",
     "CAPCUT_60D": "CAPCUT PRO 60 ngay",
@@ -153,6 +156,10 @@ TELEGRAM_PRODUCT_CODE_MAP = {
     "CANVA PRO": "CANVA-PRO-1M-PRIVATE",
     "CAPCUT": "CAPCUT",
     "CAPCUT PRO": "CAPCUT",
+    "CAPCUT_7D": "CAPCUT_7D",
+    "CAPCUT PRO 7D": "CAPCUT_7D",
+    "CAPCUT PRO 7 NGAY": "CAPCUT_7D",
+    "CAPCUT PRO 7 NGÀY": "CAPCUT_7D",
     "CAPCUT_365D": "CAPCUT_365D",
     "CAPCUT PRO 365D": "CAPCUT_365D",
     "CAPCUT PRO 365 NGAY": "CAPCUT_365D",
@@ -693,6 +700,8 @@ def _menu_stock_product_code(product_key: str) -> str | None:
         return "GEMINI"
     if normalized_key.startswith("GROK"):
         return "GROK"
+    if normalized_key.startswith("CAPCUT_7D") or "CAPCUT PRO 7D" in normalized_key or "CAPCUT PRO 7 NGAY" in normalized_key or "CAPCUT PRO 7 NGÀY" in normalized_key:
+        return "CAPCUT_7D"
     if normalized_key.startswith("CAPCUT_30D") or "CAPCUT PRO 30D" in normalized_key or "CAPCUT PRO 30 NGAY" in normalized_key or "CAPCUT PRO 30 NGÀY" in normalized_key:
         return "CAPCUT_30D"
     if normalized_key.startswith("CAPCUT_60D") or "CAPCUT PRO 60D" in normalized_key or "CAPCUT PRO 60 NGAY" in normalized_key or "CAPCUT PRO 60 NGÀY" in normalized_key:
