@@ -151,7 +151,7 @@ async def main() -> None:
     dtkd_update = type("FakeUpdate", (), {"effective_user": admin_user, "effective_message": dtkd_message})()
     await bot.cmd_dtkd(dtkd_update, context)
     dtkd_text, _ = dtkd_message.replies[-1]
-    assert "/dtkd_approve <ma_affiliate>" in dtkd_text
+    assert "/dtkd_approve <mã_affiliate>" in dtkd_text
     assert "/dtkd_approve_commission <commission_id_or_order_id>" in dtkd_text
     print("TOOL_MENU_TEST=PASS")
 

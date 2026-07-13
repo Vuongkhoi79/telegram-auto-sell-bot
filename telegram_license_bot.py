@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import logging
@@ -412,7 +412,7 @@ def _user_label(user) -> str:
 
 def _format_license_record(record: dict | None) -> str:
     if not record:
-        return "Khong tim thay license."
+        return "Không tìm thấy license."
     return "\n".join(
         [
             f"telegram_user_id: {record.get('telegram_user_id', '')}",
@@ -1362,14 +1362,14 @@ def _dtkd_admin_help_text() -> str:
     return (
         "🔗 Quản trị Affiliate\n\n"
         "/dtkd_list\n"
-        "/dtkd_approve <ma_affiliate>\n"
-        "/dtkd_reject <ma_affiliate>\n"
-        "/dtkd_lock <ma_affiliate>\n"
-        "/dtkd_unlock <ma_affiliate>\n"
+        "/dtkd_approve <mã_affiliate>\n"
+        "/dtkd_reject <mã_affiliate>\n"
+        "/dtkd_lock <mã_affiliate>\n"
+        "/dtkd_unlock <mã_affiliate>\n"
         "/dtkd_withdrawals\n"
         "/dtkd_pay <withdrawal_id>\n"
         "/dtkd_approve_commission <commission_id_or_order_id>\n"
-        "/dtkd_report <ma_affiliate>"
+        "/dtkd_report <mã_affiliate>"
     )
 
 
@@ -3068,7 +3068,7 @@ def _quantity_keyboard(product_name: str, package_name: str) -> InlineKeyboardMa
 def _dtkd_order_ref_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("Bo qua", callback_data="dtkd_order_ref_skip")],
+            [InlineKeyboardButton("Bỏ qua", callback_data="dtkd_order_ref_skip")],
             [InlineKeyboardButton("Quay lại sản phẩm", callback_data="menu_products")],
             [InlineKeyboardButton("Menu chính", callback_data="menu_main")],
         ]
@@ -3099,9 +3099,9 @@ def _qr_payment_keyboard(order_id: str) -> InlineKeyboardMarkup:
 
 def _payment_info_text(context: ContextTypes.DEFAULT_TYPE, product_name: str = "") -> str:
     payment_service: PaymentService = context.application.bot_data["payment_service"]
-    bank_name = payment_service.config.bank_name or "Chua cau hinh"
-    bank_account = payment_service.config.bank_account or "Chua cau hinh"
-    bank_account_name = payment_service.config.bank_account_name or "Chua cau hinh"
+    bank_name = payment_service.config.bank_name or "Chưa cấu hình"
+    bank_account = payment_service.config.bank_account or "Chưa cấu hình"
+    bank_account_name = payment_service.config.bank_account_name or "Chưa cấu hình"
     note = payment_service.build_transfer_note("ORDER", product_name.replace(" ", "")[:8] or "PAY")
     return (
         "🏦 Thanh toán"
@@ -3214,7 +3214,7 @@ async def _send_license_file(update: Update, license_path: str | None) -> None:
     path = Path(license_path)
     if not path.exists():
         logger.error("send_license_file skipped: file not found path=%s", license_path)
-        await update.effective_message.reply_text(f"Khong tim thay file license: {license_path}")
+        await update.effective_message.reply_text(f"Không tìm thấy file license: {license_path}")
         return
     try:
         with open(path, "rb") as handle:
@@ -3374,9 +3374,9 @@ async def _send_dtkd_order_ref_prompt(
             "quantity": int(quantity),
         }
     text = (
-        "Ban co ma Affiliate/referral code khong?\n\n"
-        "Neu co, hay nhap ma vao chat.\n"
-        "Neu khong co, bam Bo qua de tiep tuc tao don."
+        "Bạn có mã Affiliate hoặc mã giới thiệu không?\n\n"
+        "Nếu có, vui lòng nhập mã vào khung chat.\n\n"
+        "Nếu không có, hãy bấm \"Bỏ qua\" để tiếp tục tạo đơn hàng."
     )
     await _safe_edit_or_send(update, text, _dtkd_order_ref_keyboard(), edit=edit)
 
@@ -3397,7 +3397,7 @@ async def _create_order_after_dtkd_ref(
     quantity = int(state.get("quantity", 0) or 0)
     if not product_code or not package_code or quantity <= 0:
         context.user_data.pop("dtkd_order_ref", None)
-        await _safe_edit_or_send(update, "Phien mua hang khong hop le. Vui long chon san pham lai.", _product_menu_keyboard(), edit=edit)
+        await _safe_edit_or_send(update, "Phiên mua hàng không hợp lệ. Vui lòng chọn lại sản phẩm.", _product_menu_keyboard(), edit=edit)
         return True
     try:
         if update.effective_user:
@@ -3931,7 +3931,7 @@ async def _create_upgrade_order(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def _send_support(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
     support_username = context.application.bot_data.get("support_username", "@Aidaily79")
-    text = f"Telegram:\n{support_username}\n\nhoac username ho tro cau hinh trong .env"
+    text = f"Telegram:\n{support_username}\n\nHoặc username hỗ trợ được cấu hình trong file .env"
     await _show_navigation_screen(update, text, _main_menu_keyboard(), edit=edit)
 
 
@@ -4071,7 +4071,7 @@ async def cmd_license(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     args = context.args or []
     machine_id = _machine_arg(args)
     if not machine_id:
-        await update.effective_message.reply_text("Dung: /license MACHINE_ID_CUA_BAN")
+        await update.effective_message.reply_text("Cú pháp đúng: /license MACHINE_ID_CỦA_BẠN")
         return
 
     user = update.effective_user
@@ -4190,7 +4190,7 @@ async def _handle_dtkd_order_ref_text(update: Update, context: ContextTypes.DEFA
     partner = _find_business_partner_by_code(raw_code)
     if not partner or str(partner.get("status", "")).lower() not in {"approved", "active"}:
         await update.effective_message.reply_text(
-            "Ma Affiliate/referral code khong hop le. Vui long nhap lai hoac bam Bo qua.",
+            "Mã Affiliate hoặc mã giới thiệu không hợp lệ. Vui lòng nhập lại hoặc bấm \"Bỏ qua\".",
             reply_markup=_dtkd_order_ref_keyboard(),
         )
         return True
@@ -4246,18 +4246,18 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     record = license_service.find(machine_id) if machine_id else license_service.db.latest_license_by_user(update.effective_user.id)
 
     if not record:
-        await update.effective_message.reply_text("Khong tim thay license nao cua ban.", reply_markup=_main_menu_keyboard())
+        await update.effective_message.reply_text("Không tìm thấy license nào của bạn.", reply_markup=_main_menu_keyboard())
         return
     await update.effective_message.reply_text(_format_license_record(record), reply_markup=_main_menu_keyboard())
 
 
 async def cmd_grant_free(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     args = context.args or []
     if len(args) < 2:
-        await update.effective_message.reply_text("Dung: /grant_free <telegram_user_id> <machine_id>")
+        await update.effective_message.reply_text("Cú pháp đúng: /grant_free <telegram_user_id> <machine_id>")
         return
     telegram_user_id = int(args[0])
     machine_id = args[1].strip().upper()
@@ -4268,7 +4268,7 @@ async def cmd_grant_free(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     license_service.update_user_from_license(result.record or {}, source="admin_grant_free")
     await update.effective_message.reply_text(
-        "Thanh cong. Da cap trial 10 ngay.\n"
+        "Thành công. Đã cấp trial 10 ngày.\n"
         f"Machine ID: {machine_id}\n"
         f"Expire date: {result.record.get('expire_date', '') if result.record else ''}"
     )
@@ -4277,11 +4277,11 @@ async def cmd_grant_free(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def cmd_grant_permanent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     args = context.args or []
     if len(args) < 2:
-        await update.effective_message.reply_text("Dung: /grant_permanent <telegram_user_id> <machine_id>")
+        await update.effective_message.reply_text("Cú pháp đúng: /grant_permanent <telegram_user_id> <machine_id>")
         return
     telegram_user_id = int(args[0])
     machine_id = args[1].strip().upper()
@@ -4292,7 +4292,7 @@ async def cmd_grant_permanent(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     license_service.update_user_from_license(result.record or {}, source="admin_grant_permanent")
     await update.effective_message.reply_text(
-        "Thanh cong. Da cap license vinh vien.\n"
+        "Thành công. Đã cấp license vĩnh viễn.\n"
         f"Machine ID: {machine_id}\n"
         f"Expire date: {result.record.get('expire_date', '') if result.record else ''}"
     )
@@ -4491,11 +4491,11 @@ async def _notify_admins_paid_without_delivery(
 
 async def cmd_paid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     args = context.args or []
     if len(args) < 1:
-        await update.effective_message.reply_text("Dung: /paid <order_id>")
+        await update.effective_message.reply_text("Cú pháp đúng: /paid <order_id>")
         return
     order_id = args[0].strip()
     sales_order = _find_order(order_id)
@@ -4517,11 +4517,11 @@ async def cmd_paid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_revoke(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     args = context.args or []
     if len(args) < 1:
-        await update.effective_message.reply_text("Dung: /revoke <machine_id>")
+        await update.effective_message.reply_text("Cú pháp đúng: /revoke <machine_id>")
         return
     machine_id = args[0].strip().upper()
     license_service: LicenseService = context.application.bot_data["license_service"]
@@ -4539,11 +4539,11 @@ async def cmd_revoke(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def cmd_cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     args = context.args or []
     if len(args) < 1:
-        await update.effective_message.reply_text("Dung: /cancel_order <order_id>")
+        await update.effective_message.reply_text("Cú pháp đúng: /cancel_order <order_id>")
         return
     order_id = args[0].strip()
     _release_order_reservation(order_id, store_db_path=context.application.bot_data.get("store_db_path"))
@@ -4556,11 +4556,11 @@ async def cmd_cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def cmd_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     args = context.args or []
     if len(args) < 1:
-        await update.effective_message.reply_text("Dung: /order <order_id>")
+        await update.effective_message.reply_text("Cú pháp đúng: /order <order_id>")
         return
     order = _find_order(args[0].strip())
     if not order:
@@ -4571,7 +4571,7 @@ async def cmd_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_pending_orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     pending = [order for order in _load_orders() if order.get("payment_status") == "pending"]
     if not pending:
@@ -4594,26 +4594,26 @@ async def cmd_dbstock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         update.effective_user.id, context.application.bot_data["admin_ids"]
     ):
         await update.effective_message.reply_text(
-            f"Khong co quyen. Telegram ID cua ban: {telegram_user_id}"
+            f"Bạn không có quyền thực hiện thao tác này. Telegram ID của bạn: {telegram_user_id}"
         )
         return
     store_db_path: Path = context.application.bot_data["store_db_path"]
     if not store_db_path.is_file():
         await update.effective_message.reply_text(
-            f"Khong tim thay store.db: {store_db_path}"
+            f"Không tìm thấy store.db: {store_db_path}"
         )
         return
     try:
         rows = StoreRepository(store_db_path).get_stock_summary()
     except (OSError, RuntimeError, sqlite3.Error) as exc:
         logger.exception("dbstock read failed")
-        await update.effective_message.reply_text(f"Khong the doc store.db: {exc}")
+        await update.effective_message.reply_text(f"Không thể đọc store.db: {exc}")
         return
 
     if not rows:
-        await update.effective_message.reply_text("store.db chua co san pham nao.")
+        await update.effective_message.reply_text("store.db chưa có sản phẩm nào.")
         return
-    lines = ["TON KHO SQLITE"]
+    lines = ["TỒN KHO SQLITE"]
     for row in rows:
         active_label = "active" if row["active"] else "inactive"
         lines.append(
@@ -4630,47 +4630,47 @@ def _admin_store_repository(context: ContextTypes.DEFAULT_TYPE) -> StoreReposito
 
 async def cmd_addstock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     args = context.args or []
     if len(args) not in {3, 4}:
-        await update.effective_message.reply_text("Dung: /addstock <product_code> <email> <password> [2fa]")
+        await update.effective_message.reply_text("Cú pháp đúng: /addstock <product_code> <email> <password> [2fa]")
         return
     product_code, email, password, *optional_2fa = args
     credential = "|".join([email, password, *optional_2fa])
     try:
         item_id = _admin_store_repository(context).add_inventory_item(product_code, credential)
     except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
-        await update.effective_message.reply_text(f"Khong the them kho SQLite: {exc}")
+        await update.effective_message.reply_text(f"Không thể thêm kho SQLite: {exc}")
         return
     await update.effective_message.reply_text(
-        f"Da them 1 account vao kho SQLite {product_code.upper()}. Item ID: {item_id}"
+        f"Đã thêm 1 account vào kho SQLite {product_code.upper()}. Item ID: {item_id}"
     )
 
 
 async def cmd_removestock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     args = context.args or []
     if len(args) != 1:
-        await update.effective_message.reply_text("Dung: /removestock <item_id>")
+        await update.effective_message.reply_text("Cú pháp đúng: /removestock <item_id>")
         return
     try:
         _admin_store_repository(context).set_inventory_item_disabled(args[0], True)
     except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
-        await update.effective_message.reply_text(f"Khong the xoa an toan item SQLite: {exc}")
+        await update.effective_message.reply_text(f"Không thể xóa an toàn item SQLite: {exc}")
         return
-    await update.effective_message.reply_text(f"Da disable item SQLite: {args[0]}")
+    await update.effective_message.reply_text(f"Đã vô hiệu hóa item SQLite: {args[0]}")
 
 
 async def cmd_disable(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     args = context.args or []
     if len(args) != 2 or args[0].lower() not in {"product", "item"}:
-        await update.effective_message.reply_text("Dung: /disable product <product_code> hoac /disable item <item_id>")
+        await update.effective_message.reply_text("Cú pháp đúng: /disable product <product_code> hoặc /disable item <item_id>")
         return
     try:
         repository = _admin_store_repository(context)
@@ -4679,18 +4679,18 @@ async def cmd_disable(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         else:
             repository.set_inventory_item_disabled(args[1], True)
     except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
-        await update.effective_message.reply_text(f"Khong the disable SQLite: {exc}")
+        await update.effective_message.reply_text(f"Không thể vô hiệu hóa SQLite: {exc}")
         return
-    await update.effective_message.reply_text(f"Da disable {args[0].lower()} SQLite: {args[1]}")
+    await update.effective_message.reply_text(f"Đã vô hiệu hóa {args[0].lower()} SQLite: {args[1]}")
 
 
 async def cmd_enable(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     args = context.args or []
     if len(args) != 2 or args[0].lower() not in {"product", "item"}:
-        await update.effective_message.reply_text("Dung: /enable product <product_code> hoac /enable item <item_id>")
+        await update.effective_message.reply_text("Cú pháp đúng: /enable product <product_code> hoặc /enable item <item_id>")
         return
     try:
         repository = _admin_store_repository(context)
@@ -4699,36 +4699,36 @@ async def cmd_enable(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         else:
             repository.set_inventory_item_disabled(args[1], False)
     except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
-        await update.effective_message.reply_text(f"Khong the enable SQLite: {exc}")
+        await update.effective_message.reply_text(f"Không thể bật SQLite: {exc}")
         return
-    await update.effective_message.reply_text(f"Da enable {args[0].lower()} SQLite: {args[1]}")
+    await update.effective_message.reply_text(f"Đã bật {args[0].lower()} SQLite: {args[1]}")
 
 
 async def cmd_importexcel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     args = context.args or []
     if len(args) != 1:
-        await update.effective_message.reply_text("Dung: /importexcel <ten_file.xlsx hoac ten_file.csv trong thu muc imports>")
+        await update.effective_message.reply_text("Cú pháp đúng: /importexcel <tên_file.xlsx hoặc tên_file.csv trong thư mục imports>")
         return
     candidate = (IMPORTS_DIR / args[0]).resolve()
     if not candidate.is_relative_to(IMPORTS_DIR.resolve()) or not candidate.is_file():
-        await update.effective_message.reply_text("Khong tim thay file import trong thu muc imports.")
+        await update.effective_message.reply_text("Không tìm thấy file import trong thư mục imports.")
         return
     try:
         report = import_inventory(candidate, context.application.bot_data["store_db_path"])
     except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
         logger.exception("Excel import failed")
-        await update.effective_message.reply_text(f"Import SQLite that bai: {exc}")
+        await update.effective_message.reply_text(f"Import SQLite thất bại: {exc}")
         return
     await update.effective_message.reply_text(
-        "Import SQLite xong.\n"
-        f"Product tao: {report['products_created']}\n"
-        f"Product cap nhat: {report['products_updated']}\n"
-        f"Account them: {report['credentials_added']}\n"
-        f"Trung bo qua: {report['credentials_duplicate']}\n"
-        f"Dong loi: {report['row_errors']}"
+        "Import SQLite hoàn tất.\n"
+        f"Product đã tạo: {report['products_created']}\n"
+        f"Product đã cập nhật: {report['products_updated']}\n"
+        f"Account đã thêm: {report['credentials_added']}\n"
+        f"Trùng, đã bỏ qua: {report['credentials_duplicate']}\n"
+        f"Dòng lỗi: {report['row_errors']}"
     )
 
 
@@ -4749,7 +4749,7 @@ async def bank_checker_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_check_bank(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     results = await run_bank_check(context)
     if not results:
@@ -4767,7 +4767,7 @@ async def cmd_check_bank(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def cmd_transactions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     items = _load_processed_transactions()
     if not items:
@@ -4784,12 +4784,12 @@ async def cmd_transactions(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def cmd_list_licenses(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     license_service: LicenseService = context.application.bot_data["license_service"]
     items = license_service.list_licenses()
     if not items:
-        await update.effective_message.reply_text("Chua co license nao.")
+        await update.effective_message.reply_text("Chưa có license nào.")
         return
     lines = []
     for item in items[-30:]:
@@ -4808,14 +4808,14 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_dtkd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     await update.effective_message.reply_text(_dtkd_admin_help_text())
 
 
 async def cmd_dtkd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     data = _load_business_partners()
     partners = _dtkd_list(data, "partners")
@@ -4833,11 +4833,11 @@ async def cmd_dtkd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def cmd_dtkd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     args = context.args or []
     if not args:
-        await update.effective_message.reply_text("Dung: /dtkd_approve <ma_affiliate>")
+        await update.effective_message.reply_text("Cú pháp đúng: /dtkd_approve <mã_affiliate>")
         return
     partner = _set_partner_status(args[0], "approved")
     await update.effective_message.reply_text(f"Đã duyệt {args[0]}." if partner else "Không tìm thấy Affiliate.")
@@ -4845,11 +4845,11 @@ async def cmd_dtkd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def cmd_dtkd_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     args = context.args or []
     if not args:
-        await update.effective_message.reply_text("Dung: /dtkd_reject <ma_affiliate>")
+        await update.effective_message.reply_text("Cú pháp đúng: /dtkd_reject <mã_affiliate>")
         return
     partner = _set_partner_status(args[0], "rejected")
     await update.effective_message.reply_text(f"Đã từ chối {args[0]}." if partner else "Không tìm thấy Affiliate.")
@@ -4857,11 +4857,11 @@ async def cmd_dtkd_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def cmd_dtkd_lock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     args = context.args or []
     if not args:
-        await update.effective_message.reply_text("Dung: /dtkd_lock <ma_affiliate>")
+        await update.effective_message.reply_text("Cú pháp đúng: /dtkd_lock <mã_affiliate>")
         return
     partner = _set_partner_status(args[0], "locked")
     await update.effective_message.reply_text(f"Đã khóa {args[0]}." if partner else "Không tìm thấy Affiliate.")
@@ -4869,11 +4869,11 @@ async def cmd_dtkd_lock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def cmd_dtkd_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     args = context.args or []
     if not args:
-        await update.effective_message.reply_text("Dung: /dtkd_unlock <ma_affiliate>")
+        await update.effective_message.reply_text("Cú pháp đúng: /dtkd_unlock <mã_affiliate>")
         return
     partner = _set_partner_status(args[0], "approved")
     await update.effective_message.reply_text(f"Đã mở khóa {args[0]}." if partner else "Không tìm thấy Affiliate.")
@@ -4881,7 +4881,7 @@ async def cmd_dtkd_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def cmd_dtkd_withdrawals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     withdrawals = _dtkd_list(_load_business_partners(), "withdrawals")
     if not withdrawals:
@@ -4898,11 +4898,11 @@ async def cmd_dtkd_withdrawals(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def cmd_dtkd_pay(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     args = context.args or []
     if not args:
-        await update.effective_message.reply_text("Dung: /dtkd_pay <withdrawal_id>")
+        await update.effective_message.reply_text("Cú pháp đúng: /dtkd_pay <withdrawal_id>")
         return
     withdrawal = _set_withdrawal_status(args[0], "paid")
     await update.effective_message.reply_text(f"Đã thanh toán {args[0]}." if withdrawal else "Không tìm thấy yêu cầu rút tiền.")
@@ -4910,11 +4910,11 @@ async def cmd_dtkd_pay(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def cmd_dtkd_approve_commission(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     args = context.args or []
     if not args:
-        await update.effective_message.reply_text("Dung: /dtkd_approve_commission <commission_id_or_order_id>")
+        await update.effective_message.reply_text("Cú pháp đúng: /dtkd_approve_commission <commission_id_or_order_id>")
         return
     commission = _set_commission_status(args[0], "approved")
     await update.effective_message.reply_text(
@@ -4924,11 +4924,11 @@ async def cmd_dtkd_approve_commission(update: Update, context: ContextTypes.DEFA
 
 async def cmd_dtkd_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     args = context.args or []
     if not args:
-        await update.effective_message.reply_text("Dung: /dtkd_report <ma_affiliate>")
+        await update.effective_message.reply_text("Cú pháp đúng: /dtkd_report <mã_affiliate>")
         return
     partner = _find_business_partner_by_code(args[0])
     if not partner:
@@ -4950,17 +4950,17 @@ async def cmd_dtkd_report(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def cmd_find(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_admin(update.effective_user.id, context.application.bot_data["admin_ids"]):
-        await update.effective_message.reply_text("Khong co quyen.")
+        await update.effective_message.reply_text("Bạn không có quyền thực hiện thao tác này.")
         return
     args = context.args or []
     if len(args) < 1:
-        await update.effective_message.reply_text("Dung: /find <machine_id>")
+        await update.effective_message.reply_text("Cú pháp đúng: /find <machine_id>")
         return
     machine_id = args[0].strip().upper()
     license_service: LicenseService = context.application.bot_data["license_service"]
     record = license_service.find(machine_id)
     if not record:
-        await update.effective_message.reply_text("Khong tim thay.")
+        await update.effective_message.reply_text("Không tìm thấy.")
         return
     await update.effective_message.reply_text(json.dumps(record, indent=2, ensure_ascii=False))
 
