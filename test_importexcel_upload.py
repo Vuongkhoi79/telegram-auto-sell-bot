@@ -77,6 +77,25 @@ class ImportExcelUploadTest(unittest.TestCase):
         ])
         workbook.save(path)
 
+    def _write_capcut_30d_workbook(self, path: Path) -> None:
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "CAPCUT"
+        sheet.append(list(REQUIRED_COLUMNS))
+        sheet.append([
+            "CAPCUT",
+            "AI",
+            "CAPCUT PRO",
+            "personal",
+            "30D",
+            45000,
+            30,
+            "upload-capcut30d-one@example.com|secret-pass",
+            "",
+            1,
+        ])
+        workbook.save(path)
+
     def _context(self, *, running: bool = False):
         return SimpleNamespace(
             application=SimpleNamespace(
@@ -124,6 +143,33 @@ class ImportExcelUploadTest(unittest.TestCase):
                 """
             ).fetchone()
         self.assertEqual(row, ("CAPCUT_7D", "available", 1))
+
+    def test_admin_document_upload_maps_capcut_30d_terms_to_capcut_30d_sku(self) -> None:
+        workbook_path = self.root / "capcut_30d_upload.xlsx"
+        self._write_capcut_30d_workbook(workbook_path)
+        document = FakeDocument(workbook_path, "capcut_30d_upload.xlsx")
+        update, message = self._update(document)
+
+        asyncio.run(bot.on_import_document(update, self._context()))
+
+        self.assertEqual(len(message.replies), 1)
+        reply = message.replies[0]
+        self.assertIn("Product code: CAPCUT_30D", reply)
+        self.assertIn("CAPCUT_30D sau import: 1", reply)
+        self.assertNotIn("CAPCUT requires price_vnd=400000", reply)
+        self.assertNotIn("secret-pass", reply)
+
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            row = connection.execute(
+                """
+                SELECT p.code, i.status, COUNT(*)
+                FROM inventory_items AS i
+                JOIN products AS p ON p.id = i.product_id
+                WHERE p.code = 'CAPCUT_30D'
+                GROUP BY p.code, i.status
+                """
+            ).fetchone()
+        self.assertEqual(row, ("CAPCUT_30D", "available", 1))
 
     def test_non_admin_document_upload_is_rejected(self) -> None:
         document = FakeDocument(self.workbook_path, "capcut_7d_upload.xlsx")

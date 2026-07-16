@@ -4786,7 +4786,13 @@ def _format_import_report(
                 f"  Trùng: {int(report.get('credentials_duplicate') or 0) if len(product_codes) == 1 else 'xem tổng ở trên'}\n"
                 f"  Stock sau import: {after}"
             )
-    lines.append(f"\nTồn kho CAPCUT_7D sau import: {_stock_count_for_code(store_db_path, 'CAPCUT_7D')}")
+    if len(product_codes) == 1:
+        product_code = product_codes[0]
+        lines.append(f"\nTồn kho {product_code} sau import: {_stock_count_for_code(store_db_path, product_code)}")
+    elif product_codes:
+        lines.append("\nTồn kho sau import:")
+        for product_code in product_codes:
+            lines.append(f"- {product_code}: {_stock_count_for_code(store_db_path, product_code)}")
     return "\n".join(lines)
 
 

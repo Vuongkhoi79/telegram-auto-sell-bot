@@ -138,6 +138,8 @@ def normalize_import_product_code(product_code: str, row: dict[str, Any]) -> str
     warranty_days = parse_int(row.get("warranty_days"), 0)
     if normalized == "CAPCUT" and duration in {"7D", "7DAY", "7DAYS", "7NGAY", "7NGÀY"} and price_vnd == 8000 and warranty_days == 7:
         return "CAPCUT_7D"
+    if normalized == "CAPCUT" and duration in {"30D", "30DAY", "30DAYS", "30NGAY", "30NGÃ€Y"} and price_vnd == 45000 and warranty_days == 30:
+        return "CAPCUT_30D"
     return normalized
 
 
