@@ -210,6 +210,45 @@ def fetch_other_order_item_link_count(connection: sqlite3.Connection, inventory_
     return int(row["count"] if row else 0)
 
 
+def validator_snapshot(
+    connection: sqlite3.Connection,
+    order: sqlite3.Row,
+    item: sqlite3.Row,
+    txs: list[sqlite3.Row],
+) -> str:
+    order_row_id = str(order["id"])
+    order_external_id = str(order["order_id"])
+    link_count = fetch_order_item_link_count(connection, TARGET_INVENTORY_ITEM_ID, order_row_id)
+    other_link_count = fetch_other_order_item_link_count(connection, TARGET_INVENTORY_ITEM_ID, order_row_id)
+    matching_txs = [tx for tx in txs if int(tx["amount_vnd"] or 0) == TARGET_PAYMENT_AMOUNT_VND]
+    lines = [
+        "VALIDATOR_SNAPSHOT:",
+        f"  repr(item['status'])={repr(item['status'])}",
+        f"  repr(item['delivered_order_id'])={repr(item['delivered_order_id'])}",
+        f"  repr(item['reserved_order_id'])={repr(item['reserved_order_id'])}",
+        f"  repr(item['delivered_at'])={repr(item['delivered_at'])}",
+        f"  repr(item['reserved_at'])={repr(item['reserved_at'])}",
+        f"  repr(order['order_id'])={repr(order_external_id)}",
+        f"  repr(order['id'])={repr(order_row_id)}",
+        f"  repr(order['payment_status'])={repr(order['payment_status'])}",
+        f"  repr(order['order_status'])={repr(order['order_status'])}",
+        f"  link_count={link_count}",
+        f"  other_link_count={other_link_count}",
+        f"  order_inventory_items_state={repr(item['state'])}",
+        f"  order_inventory_items_link_created_at={repr(item['link_created_at'])}",
+        f"  order_inventory_items_link_delivered_at={repr(item['link_delivered_at'])}",
+        f"  order_inventory_items_link_released_at={repr(item['link_released_at'])}",
+        f"  payment_rows={len(txs)}",
+        f"  payment_matching_amount_rows={len(matching_txs)}",
+        f"  payment_statuses={[repr(tx['status']) for tx in matching_txs]}",
+    ]
+    delivered_matches_external = str(item["delivered_order_id"] or "") == order_external_id
+    delivered_matches_internal = str(item["delivered_order_id"] or "") == order_row_id
+    lines.append(f"  delivered_matches_external_order_id={delivered_matches_external}")
+    lines.append(f"  delivered_matches_internal_row_id={delivered_matches_internal}")
+    return "\n".join(lines)
+
+
 def product_counts(connection: sqlite3.Connection, product_code: str) -> dict[str, int]:
     rows = connection.execute(
         """
@@ -310,8 +349,11 @@ def validate_targets(
         raise RuntimeError(f"Unexpected linked item product_code: {item['product_code']}")
     if str(item["status"]).lower() != "delivered":
         raise RuntimeError(f"Linked item is not delivered: {item['status']}")
-    if str(item["delivered_order_id"] or "") != str(order["id"]):
-        raise RuntimeError("Linked item was not delivered by this order")
+    if str(item["delivered_order_id"] or "") != str(order["order_id"]):
+        raise RuntimeError(
+            "Linked item was not delivered by this order\n"
+            f"{validator_snapshot(connection, order, item, txs)}"
+        )
     if fetch_order_item_link_count(connection, TARGET_INVENTORY_ITEM_ID, str(order["id"])) != 1:
         raise RuntimeError("Expected exactly one order_inventory_items link for this order")
     if fetch_other_order_item_link_count(connection, TARGET_INVENTORY_ITEM_ID, str(order["id"])) != 0:
