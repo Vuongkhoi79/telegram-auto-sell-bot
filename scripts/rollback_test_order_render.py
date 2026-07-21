@@ -1,4 +1,4 @@
-"""Safely rollback one test order on Render production SQLite.
+"""Safely rollback one known test order on Render production SQLite.
 
 Dry-run first:
     python scripts/rollback_test_order_render.py --database /var/data/store.db --order-id ORD-... 
@@ -8,7 +8,8 @@ Commit:
 
 This script:
 - inspects the target order, linked inventory item(s), and payment transaction(s)
-- verifies the item belongs to CHATGPT_SHARED
+- only supports the known bad test order ORD-20260721093007-CHATGPT-246F7BE7
+- verifies the delivered item is the expected CHATGPT private inventory row
 - backs up the database before any write
 - restores the delivered inventory item(s) to available
 - invalidates any order_inventory_items link by marking it released
@@ -35,8 +36,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 DEFAULT_DATABASE = Path("/var/data/store.db")
-TARGET_PRODUCT_CODE = "CHATGPT_SHARED"
 TARGET_ORDER_ID = "ORD-20260721093007-CHATGPT-246F7BE7"
+TARGET_ORDER_PRODUCT_CODE = "CHATGPT"
+TARGET_INVENTORY_ITEM_ID = "565a3e52-4ce2-4062-ab50-4ca49350658d"
+TARGET_PAYMENT_AMOUNT_VND = 160000
+TARGET_PAYMENT_STATUS = "processed"
+AUDIT_SOURCE = "rollback_test"
+TARGET_COUNTS_PRODUCT_CODES = ("CHATGPT", "CHATGPT_SHARED")
 
 
 def utc_now_iso() -> str:
@@ -180,6 +186,30 @@ def fetch_payment_transactions(connection: sqlite3.Connection, order_row_id: str
     ).fetchall()
 
 
+def fetch_order_item_link_count(connection: sqlite3.Connection, inventory_item_id: str, order_row_id: str) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM order_inventory_items
+        WHERE inventory_item_id = ? AND order_id = ?
+        """,
+        (inventory_item_id, order_row_id),
+    ).fetchone()
+    return int(row["count"] if row else 0)
+
+
+def fetch_other_order_item_link_count(connection: sqlite3.Connection, inventory_item_id: str, order_row_id: str) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM order_inventory_items
+        WHERE inventory_item_id = ? AND order_id <> ?
+        """,
+        (inventory_item_id, order_row_id),
+    ).fetchone()
+    return int(row["count"] if row else 0)
+
+
 def product_counts(connection: sqlite3.Connection, product_code: str) -> dict[str, int]:
     rows = connection.execute(
         """
@@ -192,6 +222,13 @@ def product_counts(connection: sqlite3.Connection, product_code: str) -> dict[st
         (product_code.upper(),),
     ).fetchall()
     return {str(row["status"]): int(row["count"] or 0) for row in rows}
+
+
+def multi_product_counts(connection: sqlite3.Connection) -> dict[str, dict[str, int]]:
+    result: dict[str, dict[str, int]] = {}
+    for code in TARGET_COUNTS_PRODUCT_CODES:
+        result[code] = product_counts(connection, code)
+    return result
 
 
 def all_counts(connection: sqlite3.Connection) -> dict[str, dict[str, int]]:
@@ -248,18 +285,44 @@ def print_order_summary(order: sqlite3.Row | None, items: list[sqlite3.Row], txs
         )
 
 
-def validate_targets(order: sqlite3.Row | None, items: list[sqlite3.Row], txs: list[sqlite3.Row]) -> None:
+def validate_targets(
+    connection: sqlite3.Connection,
+    order: sqlite3.Row | None,
+    items: list[sqlite3.Row],
+    txs: list[sqlite3.Row],
+) -> None:
     if not order:
         raise RuntimeError(f"Order not found: {TARGET_ORDER_ID}")
-    if str(order["product_code"]).upper() != TARGET_PRODUCT_CODE:
+    if str(order["order_id"]) != TARGET_ORDER_ID:
+        raise RuntimeError(f"Unexpected order_id: {order['order_id']}")
+    if str(order["product_code"]).upper() != TARGET_ORDER_PRODUCT_CODE:
         raise RuntimeError(f"Unexpected order product_code: {order['product_code']}")
+    if int(order["total_vnd"] or 0) != TARGET_PAYMENT_AMOUNT_VND:
+        raise RuntimeError(f"Unexpected order total_vnd: {order['total_vnd']}")
     if not items:
         raise RuntimeError("No linked inventory items found for this order")
-    product_codes = {str(item["product_code"]).upper() for item in items}
-    if product_codes != {TARGET_PRODUCT_CODE}:
-        raise RuntimeError(f"Linked items are not exclusively {TARGET_PRODUCT_CODE}: {sorted(product_codes)}")
+    if len(items) != 1:
+        raise RuntimeError(f"Expected exactly 1 linked item, found {len(items)}")
+    item = items[0]
+    if str(item["inventory_item_id"]) != TARGET_INVENTORY_ITEM_ID:
+        raise RuntimeError(f"Unexpected inventory_item_id: {item['inventory_item_id']}")
+    if str(item["product_code"]).upper() != TARGET_ORDER_PRODUCT_CODE:
+        raise RuntimeError(f"Unexpected linked item product_code: {item['product_code']}")
+    if str(item["status"]).lower() != "delivered":
+        raise RuntimeError(f"Linked item is not delivered: {item['status']}")
+    if str(item["delivered_order_id"] or "") != str(order["id"]):
+        raise RuntimeError("Linked item was not delivered by this order")
+    if fetch_order_item_link_count(connection, TARGET_INVENTORY_ITEM_ID, str(order["id"])) != 1:
+        raise RuntimeError("Expected exactly one order_inventory_items link for this order")
+    if fetch_other_order_item_link_count(connection, TARGET_INVENTORY_ITEM_ID, str(order["id"])) != 0:
+        raise RuntimeError("Inventory item is linked to another order")
     if not txs:
         raise RuntimeError("No payment transaction linked to this order")
+    matching_txs = [tx for tx in txs if int(tx["amount_vnd"] or 0) == TARGET_PAYMENT_AMOUNT_VND]
+    if not matching_txs:
+        raise RuntimeError(f"No payment transaction for {TARGET_PAYMENT_AMOUNT_VND}")
+    if not any(str(tx["status"]).lower() == TARGET_PAYMENT_STATUS for tx in matching_txs):
+        raise RuntimeError(f"Payment transaction not in {TARGET_PAYMENT_STATUS} state")
 
 
 def dry_run(connection: sqlite3.Connection, order_id: str) -> None:
@@ -267,9 +330,9 @@ def dry_run(connection: sqlite3.Connection, order_id: str) -> None:
     items = fetch_linked_items(connection, str(order["id"]) if order else "", order_id)
     txs = fetch_payment_transactions(connection, str(order["id"]) if order else "")
     print_order_summary(order, items, txs)
-    validate_targets(order, items, txs)
-    before = product_counts(connection, TARGET_PRODUCT_CODE)
-    print(f"CHATGPT_SHARED_COUNTS_BEFORE: {before}")
+    validate_targets(connection, order, items, txs)
+    before = multi_product_counts(connection)
+    print(f"TARGET_COUNTS_BEFORE: {before}")
     print("DRY_RUN_OK: no changes written")
 
 
@@ -278,9 +341,9 @@ def apply_rollback(connection: sqlite3.Connection, order_id: str) -> dict[str, A
     items = fetch_linked_items(connection, str(order["id"]) if order else "", order_id)
     txs = fetch_payment_transactions(connection, str(order["id"]) if order else "")
     print_order_summary(order, items, txs)
-    validate_targets(order, items, txs)
+    validate_targets(connection, order, items, txs)
     before_all = all_counts(connection)
-    before_target = product_counts(connection, TARGET_PRODUCT_CODE)
+    before_target = multi_product_counts(connection)
     now = utc_now_iso()
     payment_status, order_status = schema_order_status_choices(connection)
 
@@ -289,41 +352,41 @@ def apply_rollback(connection: sqlite3.Connection, order_id: str) -> dict[str, A
 
     connection.execute("BEGIN IMMEDIATE")
     try:
-        for item in items:
-            if str(item["product_code"]).upper() != TARGET_PRODUCT_CODE:
-                raise RuntimeError(f"Unexpected linked product_code: {item['product_code']}")
-            if str(item["status"]).lower() not in {"delivered", "reserved"}:
-                raise RuntimeError(f"Inventory item is not deliverable/reservable: {item['status']}")
-            connection.execute(
-                """
-                UPDATE inventory_items
-                SET status = 'available',
-                    reserved_order_id = NULL,
-                    reserved_at = NULL,
-                    delivered_order_id = NULL,
-                    delivered_at = NULL,
-                    disabled_at = NULL
-                WHERE id = ?
-                """,
-                (item["inventory_item_id"],),
-            )
-            connection.execute(
-                """
-                UPDATE order_inventory_items
-                SET state = 'released',
-                    released_at = ?
-                WHERE order_id = ? AND inventory_item_id = ?
-                """,
-                (now, order_row_id, item["inventory_item_id"]),
-            )
-            connection.execute(
-                """
-                INSERT INTO inventory_movements
-                    (id, inventory_item_id, action, order_id, source, created_at)
-                VALUES (?, ?, 'release', ?, 'render_test_order_rollback', ?)
-                """,
-                (str(uuid.uuid4()), item["inventory_item_id"], order_row_id, now),
-            )
+        item = items[0]
+        if str(item["product_code"]).upper() != TARGET_ORDER_PRODUCT_CODE:
+            raise RuntimeError(f"Unexpected linked product_code: {item['product_code']}")
+        if str(item["status"]).lower() != "delivered":
+            raise RuntimeError(f"Inventory item is not delivered: {item['status']}")
+        connection.execute(
+            """
+            UPDATE inventory_items
+            SET status = 'available',
+                reserved_order_id = NULL,
+                reserved_at = NULL,
+                delivered_order_id = NULL,
+                delivered_at = NULL,
+                disabled_at = NULL
+            WHERE id = ?
+            """,
+            (item["inventory_item_id"],),
+        )
+        connection.execute(
+            """
+            UPDATE order_inventory_items
+            SET state = 'released',
+                released_at = ?
+            WHERE order_id = ? AND inventory_item_id = ?
+            """,
+            (now, order_row_id, item["inventory_item_id"]),
+        )
+        connection.execute(
+            """
+            INSERT INTO inventory_movements
+                (id, inventory_item_id, action, order_id, source, created_at)
+            VALUES (?, ?, 'release', ?, ?, ?)
+            """,
+            (str(uuid.uuid4()), item["inventory_item_id"], order_row_id, AUDIT_SOURCE, now),
+        )
         connection.execute(
             """
             UPDATE orders
@@ -334,16 +397,18 @@ def apply_rollback(connection: sqlite3.Connection, order_id: str) -> dict[str, A
         )
 
         after_all = all_counts(connection)
-        after_target = product_counts(connection, TARGET_PRODUCT_CODE)
+        after_target = multi_product_counts(connection)
         for code, counts in before_all.items():
-            if code == TARGET_PRODUCT_CODE:
+            if code in TARGET_COUNTS_PRODUCT_CODES:
                 continue
             if after_all.get(code, {}) != counts:
                 raise RuntimeError(f"Non-target product changed unexpectedly: {code}")
-        if after_target.get("available", 0) != before_target.get("available", 0) + len(items):
-            raise RuntimeError("Target available count did not restore as expected")
-        if after_target.get("delivered", 0) != 0:
-            raise RuntimeError("Target delivered count still nonzero after rollback")
+        if after_target.get("CHATGPT", {}).get("available", 0) != before_target.get("CHATGPT", {}).get("available", 0) + 1:
+            raise RuntimeError("CHATGPT available count did not restore as expected")
+        if after_target.get("CHATGPT", {}).get("delivered", 0) != 0:
+            raise RuntimeError("CHATGPT delivered count still nonzero after rollback")
+        if after_target.get("CHATGPT_SHARED", {}) != before_target.get("CHATGPT_SHARED", {}):
+            raise RuntimeError("CHATGPT_SHARED counts changed unexpectedly")
         connection.commit()
         return {
             "before_target": before_target,
@@ -383,7 +448,7 @@ def main() -> int:
     print("TEST ORDER ROLLBACK SCRIPT")
     print(f"DATABASE: {database_path}")
     print(f"ORDER_ID: {order_id}")
-    print(f"TARGET_PRODUCT: {TARGET_PRODUCT_CODE}")
+    print(f"TARGET_PRODUCT: {TARGET_ORDER_PRODUCT_CODE}")
     print("NO FULL CREDENTIALS WILL BE PRINTED")
 
     if not args.yes:
@@ -399,8 +464,8 @@ def main() -> int:
     print(f"ORDER_STATUS_SET_TO: {result['order_status']}")
     print(f"PAYMENT_STATUS_SET_TO: {result['payment_status']}")
     print(f"LINKED_ITEM_IDS: {', '.join(result['linked_item_ids'])}")
-    print(f"CHATGPT_SHARED_COUNTS_BEFORE: {result['before_target']}")
-    print(f"CHATGPT_SHARED_COUNTS_AFTER: {result['after_target']}")
+    print(f"TARGET_COUNTS_BEFORE: {result['before_target']}")
+    print(f"TARGET_COUNTS_AFTER: {result['after_target']}")
     print("ROLLBACK_OK")
     return 0
 

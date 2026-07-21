@@ -29,14 +29,36 @@ class RollbackTestOrderRenderScriptTest(unittest.TestCase):
                     """
                     INSERT OR REPLACE INTO products
                         (id, code, name, active, delivery_type, created_at, updated_at, category, account_type, duration, price_vnd, warranty_days, note, category_key, product_group, menu_order, show_in_menu)
+                    VALUES (?, 'CHATGPT', 'ChatGPT Plus', 1, 'account', ?, ?, 'account', 'private', '30D', 160000, 7, '', 'CHATGPT', 'account', 100, 1)
+                    """,
+                    ("chatgpt-private", now, now),
+                )
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO products
+                        (id, code, name, active, delivery_type, created_at, updated_at, category, account_type, duration, price_vnd, warranty_days, note, category_key, product_group, menu_order, show_in_menu)
                     VALUES (?, 'CHATGPT_SHARED', 'ChatGPT Plus dùng chung', 1, 'account', ?, ?, 'account', 'shared', '30D', 45000, 7, '', 'CHATGPT_SHARED', 'account', 100, 1)
                     """,
                     ("chatgpt-shared", now, now),
                 )
-                connection.execute("DELETE FROM inventory_items WHERE product_id = ?", ("chatgpt-shared",))
+                connection.execute("DELETE FROM inventory_items WHERE product_id IN (?, ?)", ("chatgpt-private", "chatgpt-shared"))
                 connection.execute("DELETE FROM order_inventory_items WHERE order_id IN (SELECT id FROM orders WHERE order_id = ?)", (self.order_id,))
                 connection.execute("DELETE FROM orders WHERE order_id = ?", (self.order_id,))
                 connection.execute("DELETE FROM payment_transactions WHERE provider_transaction_id = 'TEST-TX-ROLLBACK-1'")
+                order_row_id = "order-row-chatgpt-shared-1"
+                connection.execute(
+                    """
+                    INSERT INTO inventory_items
+                        (id, product_id, secret_value, status, reserved_order_id, delivered_order_id, created_at, reserved_at, delivered_at, disabled_at)
+                    VALUES (?, ?, ?, 'available', NULL, NULL, ?, NULL, NULL, NULL)
+                    """,
+                    (
+                        "chatgpt-shared-item-1",
+                        "chatgpt-shared",
+                        "shared@example.com|password|SLOT-01",
+                        now,
+                    ),
+                )
                 connection.execute(
                     """
                     INSERT INTO inventory_items
@@ -44,17 +66,16 @@ class RollbackTestOrderRenderScriptTest(unittest.TestCase):
                     VALUES (?, ?, ?, 'delivered', ?, ?, ?, ?, ?, NULL)
                     """,
                     (
-                        "chatgpt-shared-item-1",
-                        "chatgpt-shared",
-                        "shared@example.com|password|SLOT-01",
-                        self.order_id,
-                        self.order_id,
+                        "565a3e52-4ce2-4062-ab50-4ca49350658d",
+                        "chatgpt-private",
+                        "shared@example.com|password",
+                        order_row_id,
+                        order_row_id,
                         now,
                         now,
                         now,
                     ),
                 )
-                order_row_id = "order-row-chatgpt-shared-1"
                 connection.execute(
                     """
                     INSERT INTO orders
@@ -62,23 +83,23 @@ class RollbackTestOrderRenderScriptTest(unittest.TestCase):
                          package_name, quantity, unit_price_vnd, total_vnd, delivery_type, machine_id,
                          plan, payment_method, payment_status, order_status, transaction_id, created_at,
                          paid_at, delivered_at, delivery_ref)
-                    VALUES (?, ?, 1, 'tester', ?, 'CHATGPT_SHARED', 'ChatGPT Plus dùng chung', '30D', 1, 45000, 45000,
+                    VALUES (?, ?, 1, 'tester', ?, 'CHATGPT', 'ChatGPT Plus', 'Plus - 1 THÁNG', 1, 160000, 160000,
                             'account', '', '', 'SEPAY', 'paid', 'delivered', 'TEST-TX-ROLLBACK-1', ?, ?, ?, 'shared@example.com|password')
                     """,
-                    (order_row_id, self.order_id, "chatgpt-shared", now, now, now),
+                    (order_row_id, self.order_id, "chatgpt-private", now, now, now),
                 )
                 connection.execute(
                     """
                     INSERT INTO order_inventory_items (order_id, inventory_item_id, state, created_at, delivered_at, released_at)
                     VALUES (?, ?, 'delivered', ?, ?, NULL)
                     """,
-                    (order_row_id, "chatgpt-shared-item-1", now, now),
+                    (order_row_id, "565a3e52-4ce2-4062-ab50-4ca49350658d", now, now),
                 )
                 connection.execute(
                     """
                     INSERT INTO payment_transactions
                         (id, provider, provider_transaction_id, order_id, amount_vnd, description, raw_payload_json, status, received_at, processed_at)
-                    VALUES (?, 'SEPAY', 'TEST-TX-ROLLBACK-1', ?, 45000, 'test payment', '{}', 'processed', ?, ?)
+                    VALUES (?, 'SEPAY', 'TEST-TX-ROLLBACK-1', ?, 160000, 'test payment', '{}', 'processed', ?, ?)
                     """,
                     ("payment-tx-1", order_row_id, now, now),
                 )
@@ -101,7 +122,7 @@ class RollbackTestOrderRenderScriptTest(unittest.TestCase):
         self.assertIn("DRY_RUN_OK", dry.stdout)
         with closing(sqlite3.connect(self.db_path)) as connection:
             before = connection.execute(
-                "SELECT status FROM inventory_items WHERE id = 'chatgpt-shared-item-1'"
+                "SELECT status FROM inventory_items WHERE id = '565a3e52-4ce2-4062-ab50-4ca49350658d'"
             ).fetchone()[0]
         self.assertEqual(before, "delivered")
 
