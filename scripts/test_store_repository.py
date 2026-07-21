@@ -458,6 +458,90 @@ class StoreRepositoryTest(unittest.TestCase):
             capcut = connection.execute("SELECT code, name, category, delivery_type, price_vnd FROM products WHERE code = 'CAPCUT'").fetchone()
         self.assertEqual(capcut, ("CAPCUT", "CAPCUT PRO 365 ngay", "account", "account", 400000))
 
+    def test_chatgpt_shared_imports_slots_and_delivers_login_only(self) -> None:
+        workbook_path = Path(self.temp_dir.name) / "chatgpt-shared.xlsx"
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "CHATGPT"
+        sheet.append(REQUIRED_COLUMNS)
+        for slot in range(1, 11):
+            sheet.append([
+                "CHATGPT_SHARED",
+                "AI",
+                "ChatGPT Plus dùng chung",
+                "shared",
+                "30D",
+                45000,
+                7,
+                f"shared@example.com|shared-pass|SLOT-{slot:02d}",
+                "",
+                1,
+            ])
+        workbook.save(workbook_path)
+        workbook.close()
+
+        report = import_inventory(workbook_path, self.db_path, mode="append")
+
+        self.assertEqual((report["rows_read"], report["valid_rows"], report["credentials_added"], report["row_errors"]), (10, 10, 10, 0))
+        self.assertEqual(report["stock"], {"CHATGPT_SHARED": 10})
+        self.assertEqual(self.store.get_stock_count("CHATGPT_SHARED"), 10)
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            product = connection.execute(
+                """
+                SELECT code, name, category, account_type, duration, price_vnd, warranty_days, active
+                FROM products
+                WHERE code = 'CHATGPT_SHARED'
+                """
+            ).fetchone()
+        self.assertEqual(product, ("CHATGPT_SHARED", "ChatGPT Plus dùng chung", "account", "shared", "30D", 45000, 7, 1))
+
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        reserved = self.store.create_pending_account_order_and_reserve(
+            order_id="ORD-CHATGPT-SHARED-1",
+            telegram_user_id=42,
+            username="Shared Buyer",
+            product_code="CHATGPT_SHARED",
+            product_name="ChatGPT Plus dùng chung",
+            package_name="30D",
+            quantity=1,
+            unit_price_vnd=45000,
+            total_vnd=45000,
+            created_at=now,
+            expire_at=(datetime.now(timezone.utc).replace(microsecond=0) + timedelta(minutes=5)).isoformat(),
+        )
+        self.assertEqual(len(reserved), 1)
+        self.assertEqual(self.store.get_stock_count("CHATGPT_SHARED"), 9)
+
+        self.assertTrue(self.store.mark_account_order_paid_for_fulfillment("ORD-CHATGPT-SHARED-1"))
+        delivered = self.store.deliver_reserved_items("ORD-CHATGPT-SHARED-1")
+        self.assertEqual(delivered, ["shared@example.com|shared-pass"])
+        self.assertNotIn("SLOT-", delivered[0])
+        self.assertEqual(self.store.get_stock_count("CHATGPT_SHARED"), 9)
+        previous_store_db_path = os.environ.get("STORE_DB_PATH")
+        os.environ["STORE_DB_PATH"] = str(self.db_path)
+        try:
+            self.assertEqual(bot._menu_available_count("CHATGPT_SHARED"), 9)
+            self.assertNotEqual(bot._menu_available_count("CHATGPT_SHARED"), bot._menu_available_count("CHATGPT"))
+        finally:
+            if previous_store_db_path is None:
+                os.environ.pop("STORE_DB_PATH", None)
+            else:
+                os.environ["STORE_DB_PATH"] = previous_store_db_path
+
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            states = dict(
+                connection.execute(
+                    """
+                    SELECT status, COUNT(*)
+                    FROM inventory_items
+                    WHERE product_id = (SELECT id FROM products WHERE code = 'CHATGPT_SHARED')
+                    GROUP BY status
+                    """
+                ).fetchall()
+            )
+        self.assertEqual(states.get("delivered"), 1)
+        self.assertEqual(states.get("available"), 9)
+
     def test_replace_preserves_reserved_and_delivered_inventory(self) -> None:
         workbook_path = Path(self.temp_dir.name) / "replace.xlsx"
         workbook = Workbook()

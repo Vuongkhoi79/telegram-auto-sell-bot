@@ -697,6 +697,8 @@ def _catalog_lookup_key(product_name: str) -> str:
 
 def _menu_stock_product_code(product_key: str) -> str | None:
     normalized_key = product_key.upper()
+    if normalized_key == "CHATGPT_SHARED" or normalized_key.startswith("CHATGPT SHARED"):
+        return "CHATGPT_SHARED"
     if normalized_key.startswith("CHATGPT"):
         return "CHATGPT"
     if normalized_key.startswith("GEMINI"):

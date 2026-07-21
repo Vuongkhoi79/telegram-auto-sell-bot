@@ -43,15 +43,18 @@ DEFAULT_PRODUCT_DISPLAY_NAMES = {
     "CAPCUT_12M": "CAPCUT PRO 12M",
     "CAPCUT_30D": "CAPCUT PRO 30D",
     "GEMINI": "Gemini AI Pro",
+    "CHATGPT_SHARED": "ChatGPT Plus dùng chung",
 }
 EXPECTED_PRODUCT_TERMS = {
     "CAPCUT": {"price_vnd": 400000, "warranty_days": 365},
     "CAPCUT_7D": {"price_vnd": 8000, "warranty_days": 7},
     "CAPCUT_12M": {"price_vnd": 400000, "warranty_days": 365},
     "CAPCUT_30D": {"price_vnd": 45000, "warranty_days": 30},
+    "CHATGPT_SHARED": {"price_vnd": 45000, "warranty_days": 7},
 }
 ALLOWED_PRODUCT_CODES = {
     "CHATGPT",
+    "CHATGPT_SHARED",
     "GEMINI",
     "GROK",
     "CAPCUT",
@@ -384,7 +387,7 @@ def available_stock_for_code(connection: sqlite3.Connection, product_code: str) 
 
 
 def should_use_canonical_product(product_code: str, row: dict[str, Any]) -> bool:
-    return product_code.startswith("CAPCUT") or bool(row.get("__sheet_product"))
+    return product_code.startswith("CAPCUT") or product_code == "CHATGPT_SHARED" or bool(row.get("__sheet_product"))
 
 
 def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE, mode: str = "replace") -> dict[str, Any]:

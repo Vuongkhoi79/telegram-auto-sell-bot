@@ -101,6 +101,17 @@ ACCOUNT_PRODUCT_CODE_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 
+def public_delivery_credential(product_code: str, credential_text: str) -> str:
+    """Return the customer-facing credential for a reserved inventory item."""
+    credential_text = str(credential_text or "").strip()
+    if str(product_code or "").strip().upper() != "CHATGPT_SHARED":
+        return credential_text
+    parts = [part.strip() for part in credential_text.split("|")]
+    if len(parts) >= 2 and parts[0] and parts[1]:
+        return "|".join(parts[:2])
+    return credential_text
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(microsecond=0)
 
@@ -1244,9 +1255,10 @@ class StoreRepository:
                 raise ValueError(f"Order is not paid: {order_id}")
             items = connection.execute(
                 """
-                SELECT item.id, item.secret_value
+                SELECT item.id, item.secret_value, product.code AS product_code
                 FROM order_inventory_items AS oi
                 JOIN inventory_items AS item ON item.id = oi.inventory_item_id
+                JOIN products AS product ON product.id = item.product_id
                 WHERE oi.order_id = ? AND oi.state = 'reserved'
                 ORDER BY oi.created_at, item.id
                 """,
@@ -1255,9 +1267,10 @@ class StoreRepository:
             if not items:
                 delivered_items = connection.execute(
                     """
-                    SELECT item.id, item.secret_value, oi.state
+                    SELECT item.id, item.secret_value, product.code AS product_code, oi.state
                     FROM order_inventory_items AS oi
                     JOIN inventory_items AS item ON item.id = oi.inventory_item_id
+                    JOIN products AS product ON product.id = item.product_id
                     WHERE oi.order_id = ? AND oi.state = 'delivered'
                     ORDER BY oi.created_at, item.id
                     """,
@@ -1270,7 +1283,10 @@ class StoreRepository:
                     [str(item["id"]) for item in delivered_items],
                     [str(item["state"]) for item in delivered_items],
                 )
-                return [str(item["secret_value"]) for item in delivered_items]
+                return [
+                    public_delivery_credential(str(item["product_code"]), str(item["secret_value"]))
+                    for item in delivered_items
+                ]
             logger.warning(
                 "DELIVERY SELECT INVENTORY order_id=%s inventory_item_ids=%s",
                 order_id,
@@ -1293,4 +1309,7 @@ class StoreRepository:
                 "UPDATE orders SET order_status = 'delivered', delivered_at = ? WHERE id = ?",
                 (now, order["id"]),
             )
-        return [str(item["secret_value"]) for item in items]
+        return [
+            public_delivery_credential(str(item["product_code"]), str(item["secret_value"]))
+            for item in items
+        ]
