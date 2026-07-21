@@ -458,55 +458,6 @@ class StoreRepositoryTest(unittest.TestCase):
             capcut = connection.execute("SELECT code, name, category, delivery_type, price_vnd FROM products WHERE code = 'CAPCUT'").fetchone()
         self.assertEqual(capcut, ("CAPCUT", "CAPCUT PRO 365 ngay", "account", "account", 400000))
 
-    def test_chatgpt_shared_appears_as_separate_menu_item(self) -> None:
-        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        with closing(sqlite3.connect(self.db_path)) as connection:
-            with connection:
-                connection.execute(
-                    """
-                    INSERT OR REPLACE INTO products
-                        (id, code, name, active, delivery_type, created_at, updated_at,
-                         category, account_type, duration, price_vnd, warranty_days, note,
-                         category_key, product_group, menu_order, show_in_menu)
-                    VALUES (?, ?, ?, 1, 'account', ?, ?, 'account', 'shared', '30D', 45000, 7, '', ?, 'account', 100, 1)
-                    """,
-                    ("chatgpt-shared", "CHATGPT_SHARED", "ChatGPT Plus dùng chung", now, now, "CHATGPT_SHARED"),
-                )
-                connection.execute(
-                    "DELETE FROM inventory_items WHERE product_id = ?",
-                    ("chatgpt-shared",),
-                )
-                for index in range(10):
-                    connection.execute(
-                        """
-                        INSERT INTO inventory_items (id, product_id, secret_value, status, created_at)
-                        VALUES (?, ?, ?, 'available', ?)
-                        """,
-                        (
-                            f"chatgpt-shared-item-{index}",
-                            "chatgpt-shared",
-                            f"shared{index}@example.com|pass|SLOT-{index + 1:02d}",
-                            now,
-                        ),
-                    )
-        previous_store_db_path = os.environ.get("STORE_DB_PATH")
-        os.environ["STORE_DB_PATH"] = str(self.db_path)
-        try:
-            self.assertEqual(bot._menu_available_count("CHATGPT_SHARED"), 10)
-            menu_callbacks = {
-                button.callback_data for row in bot._product_menu_keyboard().inline_keyboard for button in row
-            }
-            menu_labels = [button.text for row in bot._product_menu_keyboard().inline_keyboard for button in row]
-            self.assertIn("product:CHATGPT", menu_callbacks)
-            self.assertIn("product:CHATGPT_SHARED", menu_callbacks)
-            self.assertTrue(any("CHATGPT (" in label for label in menu_labels))
-            self.assertTrue(any("ChatGPT Plus dùng chung" in label and "(10)" in label for label in menu_labels))
-        finally:
-            if previous_store_db_path is None:
-                os.environ.pop("STORE_DB_PATH", None)
-            else:
-                os.environ["STORE_DB_PATH"] = previous_store_db_path
-
     def test_chatgpt_shared_imports_slots_and_delivers_login_only(self) -> None:
         workbook_path = Path(self.temp_dir.name) / "chatgpt-shared.xlsx"
         workbook = Workbook()
@@ -571,6 +522,18 @@ class StoreRepositoryTest(unittest.TestCase):
         try:
             self.assertEqual(bot._menu_available_count("CHATGPT_SHARED"), 9)
             self.assertNotEqual(bot._menu_available_count("CHATGPT_SHARED"), bot._menu_available_count("CHATGPT"))
+            self.assertEqual(bot._catalog_lookup_key("ChatGPT Plus dùng chung"), "CHATGPT_SHARED")
+            self.assertEqual(bot._catalog_lookup_key("ChatGPT Plus dung chung"), "CHATGPT_SHARED")
+            self.assertEqual(bot._menu_stock_product_code("ChatGPT Plus dùng chung"), "CHATGPT_SHARED")
+            self.assertEqual(bot._reservation_product_code("ChatGPT Plus dùng chung"), "CHATGPT_SHARED")
+            menu_callbacks = {
+                button.callback_data for row in bot._product_menu_keyboard().inline_keyboard for button in row
+            }
+            menu_labels = [button.text for row in bot._product_menu_keyboard().inline_keyboard for button in row]
+            self.assertIn("product:CHATGPT", menu_callbacks)
+            self.assertIn("product:CHATGPT_SHARED", menu_callbacks)
+            self.assertTrue(any("CHATGPT (" in label for label in menu_labels))
+            self.assertTrue(any("ChatGPT Plus" in label and "(9)" in label for label in menu_labels))
         finally:
             if previous_store_db_path is None:
                 os.environ.pop("STORE_DB_PATH", None)

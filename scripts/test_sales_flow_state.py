@@ -105,6 +105,25 @@ class SalesFlowStateTest(unittest.TestCase):
             else:
                 os.environ["STORE_DB_PATH"] = previous_store_db_path
 
+    def _create_sales_order(self, product_name: str, package_name: str, quantity: int, *, order_id: str) -> dict[str, object]:
+        previous_store_db_path = os.environ.get("STORE_DB_PATH")
+        previous_make_order_id = bot._make_order_id
+        try:
+            os.environ["STORE_DB_PATH"] = str(self.db_path)
+            bot._make_order_id = lambda _product_name: order_id
+            fake_update = type(
+                "FakeOrderUpdate",
+                (),
+                {"effective_user": type("FakeUser", (), {"id": 42, "full_name": "Test User", "username": ""})()},
+            )()
+            return bot._create_sales_order(fake_update, product_name, package_name, quantity)
+        finally:
+            bot._make_order_id = previous_make_order_id
+            if previous_store_db_path is None:
+                os.environ.pop("STORE_DB_PATH", None)
+            else:
+                os.environ["STORE_DB_PATH"] = previous_store_db_path
+
     def test_import_gemini_8_and_duplicate_credentials_keep_slots(self) -> None:
         report = self._import_workbook("GEMINI", ["gem1@example.com|pass", "gem2@example.com|pass", "gem2@example.com|pass", "gem4@example.com|pass", "gem5@example.com|pass", "gem6@example.com|pass", "gem7@example.com|pass", "gem8@example.com|pass"])
         self.assertEqual(report["stock"], {"GEMINI": 8})
@@ -123,10 +142,18 @@ class SalesFlowStateTest(unittest.TestCase):
             price_vnd=70000,
             warranty_days=7,
         )
-        package = bot._get_package_info("GEMINI AI", "GEMINI")
-        self.assertIsNotNone(package)
-        self.assertEqual(canonical_product_code(str(package["product_code"])), "GEMINI")
-        self.assertEqual(int(package["available_count"]), 8)
+        previous_store_db_path = os.environ.get("STORE_DB_PATH")
+        try:
+            os.environ["STORE_DB_PATH"] = str(self.db_path)
+            package = bot._get_package_info("GEMINI AI", "GEMINI")
+            self.assertIsNotNone(package)
+            self.assertEqual(canonical_product_code(str(package["product_code"])), "GEMINI")
+            self.assertEqual(int(package["available_count"]), 8)
+        finally:
+            if previous_store_db_path is None:
+                os.environ.pop("STORE_DB_PATH", None)
+            else:
+                os.environ["STORE_DB_PATH"] = previous_store_db_path
 
         before = snapshot_sales_state(self.db_path, "GEMINI", callback_data="qty:GEMINI AI:GEMINI:1", package_id="GEMINI", quantity=1)
         self.assertTrue(before.can_reserve)
@@ -265,6 +292,67 @@ class SalesFlowStateTest(unittest.TestCase):
         self.assertEqual(payload["available_count"], 2)
         self.assertTrue(payload["can_reserve"])
         self.assertEqual(payload["expected_available_after"], 1)
+
+    def test_chatgpt_shared_purchase_flow_stays_shared(self) -> None:
+        self._clear_inventory_for_codes("CHATGPT", "CHATGPT_SHARED")
+        self._import_workbook("CHATGPT", ["private@example.com|private-pass"], price_vnd=160000, warranty_days=7)
+        self._import_workbook(
+            "CHATGPT_SHARED",
+            [f"shared{i}@example.com|shared-pass|SLOT-{i:02d}" for i in range(1, 11)],
+            price_vnd=45000,
+            warranty_days=7,
+            mode="append",
+        )
+        self.assertEqual(bot._catalog_lookup_key("ChatGPT Plus dùng chung"), "CHATGPT_SHARED")
+
+        repo = StoreRepository(self.db_path)
+        self.assertEqual(repo.get_stock_count("CHATGPT_SHARED"), 10)
+        self.assertEqual(repo.get_stock_count("CHATGPT"), 1)
+
+        shared_order = self._create_sales_order("CHATGPT_SHARED", "CHATGPT_SHARED", 1, order_id="ORD-SHARED-1")
+        self.assertEqual(shared_order["product_code"], "CHATGPT_SHARED")
+        self.assertEqual(shared_order["unit_price"], 45000)
+        self.assertEqual(shared_order["total"], 45000)
+        self.assertEqual(repo.get_stock_count("CHATGPT_SHARED"), 9)
+        self.assertEqual(repo.get_stock_count("CHATGPT"), 1)
+        previous_store_db_path = os.environ.get("STORE_DB_PATH")
+        try:
+            os.environ["STORE_DB_PATH"] = str(self.db_path)
+            self.assertEqual(bot._menu_available_count("CHATGPT_SHARED"), 9)
+            self.assertEqual(bot._menu_available_count("CHATGPT"), 1)
+        finally:
+            if previous_store_db_path is None:
+                os.environ.pop("STORE_DB_PATH", None)
+            else:
+                os.environ["STORE_DB_PATH"] = previous_store_db_path
+
+        self.assertTrue(repo.mark_order_paid("ORD-SHARED-1", "SEPAY-SHARED-1"))
+        delivered = repo.deliver_reserved_items("ORD-SHARED-1")
+        self.assertEqual(len(delivered), 1)
+        self.assertTrue(delivered[0].endswith("|shared-pass"))
+        self.assertNotIn("SLOT-", delivered[0])
+        self.assertEqual(repo.get_stock_count("CHATGPT_SHARED"), 9)
+
+        repo.create_pending_account_order_and_reserve(
+            order_id="ORD-PRIVATE-1",
+            telegram_user_id=42,
+            username="Test User",
+            product_code="CHATGPT",
+            product_name="ChatGPT Plus",
+            package_name="GPT-PLUS-1M-PRIVATE",
+            quantity=1,
+            unit_price_vnd=160000,
+            total_vnd=160000,
+            created_at=datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            expire_at=(datetime.now(timezone.utc).replace(microsecond=0) + timedelta(minutes=5)).isoformat(),
+        )
+        private_order = repo.find_order("ORD-PRIVATE-1")
+        self.assertIsNotNone(private_order)
+        self.assertEqual(private_order["product_code"], "CHATGPT")
+        self.assertEqual(private_order["unit_price_vnd"], 160000)
+        self.assertEqual(private_order["total_vnd"], 160000)
+        self.assertEqual(repo.get_stock_count("CHATGPT"), 0)
+        self.assertEqual(repo.get_stock_count("CHATGPT_SHARED"), 9)
 
 
 if __name__ == "__main__":

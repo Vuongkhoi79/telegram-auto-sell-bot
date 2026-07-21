@@ -44,6 +44,13 @@ from license_service import (
     LicenseService,
 )
 from payment_service import PaymentConfig, PaymentService
+from create_video_pro_license import (
+    PLAN_1M as CVP_PLAN_1M,
+    PLAN_3M as CVP_PLAN_3M,
+    PLANS as CVP_LICENSE_PLANS,
+    PRODUCT_CODE as CVP_PRODUCT_CODE,
+    CreateVideoProLicenseService,
+)
 from repository.store_repository import StoreRepository
 from scripts.import_inventory import IMPORT_COLUMNS, credential_from_row, import_inventory, normalize_import_product_code, read_rows
 from scripts.sales_flow_state import log_sales_state
@@ -107,7 +114,9 @@ TOOL_LICENSE_PRODUCTS = {
     },
 }
 pending_license_product_by_user: dict[int, str] = {}
+pending_cvp_activation_by_user: set[int] = set()
 QUANTITY_OPTIONS = [1, 2, 3, 5, 10]
+WAIT_CUSTOM_QTY = "WAIT_CUSTOM_QTY"
 CAPCUT_PACKAGE_ORDER = (
     ("CAPCUT_7D", "CAPCUT PRO 7 ngày"),
     ("CAPCUT_30D", "CAPCUT PRO 30 ngày"),
@@ -456,6 +465,11 @@ def _clear_pending_dtkd_order_ref(context: ContextTypes.DEFAULT_TYPE) -> None:
         context.user_data.pop("dtkd_order_ref", None)
 
 
+def _clear_pending_custom_quantity(context: ContextTypes.DEFAULT_TYPE) -> None:
+    if getattr(context, "user_data", None) is not None:
+        context.user_data.pop("custom_quantity", None)
+
+
 async def _safe_edit_or_send(update: Update, text: str, reply_markup: InlineKeyboardMarkup | None = None, *, edit: bool = False) -> None:
     query = getattr(update, "callback_query", None)
     if edit and query:
@@ -513,6 +527,54 @@ def _post_delivery_navigation_keyboard() -> InlineKeyboardMarkup:
         ]
     )
 
+
+
+def _cvp_plan_label(plan_code: str) -> str:
+    plan = CVP_LICENSE_PLANS[plan_code]
+    return f"{plan['name']} - {_format_vnd(int(plan['price_vnd']))}d"
+
+
+def _create_video_pro_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Free Trial / Download Info", callback_data="cvp_download")],
+            [InlineKeyboardButton("Buy License", callback_data="cvp_buy")],
+            [InlineKeyboardButton("My License", callback_data="cvp_my_license")],
+            [InlineKeyboardButton("Activate Device", callback_data="cvp_activate")],
+            [InlineKeyboardButton("Quay lai Tool", callback_data="menu_tools")],
+        ]
+    )
+
+
+def _cvp_plan_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("1 Month - 100.000d", callback_data=f"cvp_buy_plan:{CVP_PLAN_1M}")],
+            [InlineKeyboardButton("3 Months - 250.000d", callback_data=f"cvp_buy_plan:{CVP_PLAN_3M}")],
+            [InlineKeyboardButton("Quay lai", callback_data="menu_cvp")],
+        ]
+    )
+
+
+def _cvp_license_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Renew 1 Month - 100.000d", callback_data=f"cvp_buy_plan:{CVP_PLAN_1M}")],
+            [InlineKeyboardButton("Renew 3 Months - 250.000d", callback_data=f"cvp_buy_plan:{CVP_PLAN_3M}")],
+            [InlineKeyboardButton("Activate Device", callback_data="cvp_activate")],
+            [InlineKeyboardButton("Quay lai", callback_data="menu_cvp")],
+        ]
+    )
+
+
+def _tool_home_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("CREATE VIDEO PRO", callback_data="menu_cvp")],
+            [InlineKeyboardButton("AI Daily Video Creator", callback_data="menu_ai_daily")],
+            [InlineKeyboardButton("Quay lai", callback_data="menu_main")],
+        ]
+    )
 
 def _ai_daily_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -698,9 +760,23 @@ def _catalog_lookup_key(product_name: str) -> str:
     return _menu_stock_product_code(normalized_name) or normalized_name
 
 
+def _is_shared_chatgpt_label(normalized_key: str) -> bool:
+    return any(
+        token in normalized_key
+        for token in (
+            "CHATGPT_SHARED",
+            "CHATGPT PLUS DÙNG CHUNG",
+            "CHATGPT PLUS DUNG CHUNG",
+            "CHATGPT DÙNG CHUNG",
+            "CHATGPT DUNG CHUNG",
+            "SHARED",
+        )
+    )
+
+
 def _menu_stock_product_code(product_key: str) -> str | None:
     normalized_key = product_key.upper()
-    if normalized_key == "CHATGPT_SHARED" or normalized_key.startswith("CHATGPT SHARED"):
+    if _is_shared_chatgpt_label(normalized_key):
         return "CHATGPT_SHARED"
     if normalized_key.startswith("CHATGPT"):
         return "CHATGPT"
@@ -3082,6 +3158,18 @@ def _quantity_keyboard(product_name: str, package_name: str) -> InlineKeyboardMa
     return InlineKeyboardMarkup(rows)
 
 
+def _custom_quantity_keyboard(product_name: str, package_name: str) -> InlineKeyboardMarkup:
+    product_code = _catalog_lookup_key(product_name)
+    package_code = str(package_name or "").strip().upper()
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Quay lại chọn số lượng", callback_data=f"pkg:{product_code}:{package_code}")],
+            [InlineKeyboardButton("Hủy", callback_data="menu_products")],
+            [InlineKeyboardButton("Menu chính", callback_data="menu_main")],
+        ]
+    )
+
+
 def _dtkd_order_ref_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -3319,6 +3407,96 @@ async def _send_quantity_choice(update: Update, product_name: str, package_name:
         int(package.get("available_count") or 0) if package else 0,
     )
     await _safe_edit_or_send(update, text, keyboard, edit=edit)
+
+
+async def _send_custom_quantity_prompt(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    product_code: str,
+    package_code: str,
+    *,
+    edit: bool = False,
+) -> None:
+    package = _get_package_info(product_code, package_code)
+    if not package:
+        await _safe_edit_or_send(update, "Gói không hợp lệ.", _product_menu_keyboard(), edit=edit)
+        return
+    if getattr(context, "user_data", None) is not None:
+        context.user_data["custom_quantity"] = {
+            "state": WAIT_CUSTOM_QTY,
+            "product_code": str(product_code or "").strip().upper(),
+            "package_code": str(package_code or "").strip().upper(),
+        }
+    await _safe_edit_or_send(
+        update,
+        "Vui lòng nhập số lượng cần mua, ví dụ: 4.",
+        _custom_quantity_keyboard(product_code, package_code),
+        edit=edit,
+    )
+
+
+async def _handle_quantity_request(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    product_code: str,
+    package_code: str,
+    requested_quantity: int,
+    *,
+    edit: bool,
+) -> None:
+    package = _get_package_info(product_code, package_code)
+    menu_available = _menu_available_count(product_code)
+    package_available = int(package["available_count"]) if package else 0
+    callback_data = str(getattr(getattr(update, "callback_query", None), "data", "") or "")
+    logger.debug(
+        "CALLBACK qty resolution callback_data=%s user_id=%s database_path=%s price_source=%s product_code=%s product_id=%s package_id=%s package_code=%s package_name=%s quantity=%s available_by_menu_query=%s available_by_package_page_query=%s available_by_reserve_query=%s price_vnd=%s",
+        callback_data,
+        getattr(getattr(update, "effective_user", None), "id", None),
+        _resolve_store_db_path(context.application.bot_data.get("store_db_path")),
+        _price_source_label(package),
+        product_code,
+        package.get("product_id") if package else None,
+        package.get("product_id") if package else None,
+        package_code,
+        package.get("display_name") if package else None,
+        requested_quantity,
+        menu_available,
+        package_available,
+        package_available,
+        package.get("price_vnd") if package else None,
+    )
+    if not package:
+        await _safe_edit_or_send(update, "Gói không hợp lệ.", _product_menu_keyboard(), edit=edit)
+        return
+    if requested_quantity <= 0:
+        await _safe_edit_or_send(
+            update,
+            "Số lượng phải là số nguyên lớn hơn 0. Vui lòng nhập lại.",
+            _custom_quantity_keyboard(product_code, package_code),
+            edit=edit,
+        )
+        return
+    if package_available < requested_quantity:
+        await _safe_edit_or_send(
+            update,
+            f"Số lượng vượt tồn kho. Tồn kho hiện có: {package_available}.",
+            _custom_quantity_keyboard(product_code, package_code),
+            edit=edit,
+        )
+        return
+    _clear_pending_custom_quantity(context)
+    existing_referral = _customer_referral(int(getattr(getattr(update, "effective_user", None), "id", 0) or 0))
+    existing_partner = _find_business_partner_by_code(str((existing_referral or {}).get("partner_code", "")))
+    if existing_referral and existing_partner and str(existing_partner.get("status", "")).lower() in {"approved", "active"}:
+        if getattr(context, "user_data", None) is not None:
+            context.user_data["dtkd_order_ref"] = {
+                "product_code": str(product_code or "").strip().upper(),
+                "package_code": str(package_code or "").strip().upper(),
+                "quantity": int(requested_quantity),
+            }
+        await _create_order_after_dtkd_ref(update, context, attach_existing_referral=True, edit=edit)
+        return
+    await _send_dtkd_order_ref_prompt(update, context, product_code, package_code, requested_quantity, edit=edit)
 
 
 async def _send_payment_choice(update: Update, order: dict[str, object], *, edit: bool = False) -> None:
@@ -3906,6 +4084,161 @@ def _get_package_info(product_key: str, package_key: str) -> dict[str, object] |
     return None
 
 
+
+def _create_cvp_sales_order(update: Update, plan_code: str) -> dict[str, object]:
+    plan_code = str(plan_code or "").strip().upper()
+    if plan_code not in CVP_LICENSE_PLANS:
+        raise ValueError(f"Unknown CREATE VIDEO PRO plan: {plan_code}")
+    user = update.effective_user
+    plan = CVP_LICENSE_PLANS[plan_code]
+    now = _utc_now()
+    price = int(plan["price_vnd"])
+    order = {
+        "order_id": _make_order_id(plan_code),
+        "telegram_user_id": int(user.id) if user else 0,
+        "username": _user_label(user) if user else "",
+        "product_id": plan_code,
+        "product_code": plan_code,
+        "product_name": "CREATE VIDEO PRO",
+        "package_name": str(plan["name"]),
+        "quantity": 1,
+        "unit_price": price,
+        "total": price,
+        "amount": price,
+        "delivery_type": "license",
+        "machine_id": "",
+        "plan": plan_code,
+        "duration_days": int(plan["days"]),
+        "expire_date": "",
+        "lifetime": False,
+        "price_vnd": price,
+        "payment_method": "",
+        "status": "pending",
+        "payment_status": "pending",
+        "order_status": "pending",
+        "created_at": now.isoformat(),
+        "expire_at": (now + timedelta(minutes=ORDER_TTL_MINUTES)).isoformat(),
+        "paid_at": "",
+        "delivered_at": "",
+        "delivery": "",
+        "license_file": "",
+        "inventory_source": "software_license",
+    }
+    order = _attach_partner_to_order(order)
+    orders = _load_orders()
+    orders.append(order)
+    _save_orders(orders)
+    return order
+
+
+def _is_cvp_order(order: dict[str, object]) -> bool:
+    values = {
+        str(order.get("product_id", "") or "").strip().upper(),
+        str(order.get("product_code", "") or "").strip().upper(),
+        str(order.get("plan", "") or "").strip().upper(),
+        str(order.get("product_name", "") or "").strip().upper(),
+    }
+    return CVP_PRODUCT_CODE in values or bool(values.intersection(set(CVP_LICENSE_PLANS)))
+
+
+async def _send_create_video_pro_home(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
+    text = (
+        "CREATE VIDEO PRO\n\n"
+        "Status: Professional AI Video Editor\n\n"
+        "Trial: 15 days free in the desktop app.\n"
+        "Paid license:\n"
+        "- 1 Month: 100.000d\n"
+        "- 3 Months: 250.000d"
+    )
+    await _show_navigation_screen(update, text, _create_video_pro_keyboard(), edit=edit)
+
+
+async def _send_cvp_download(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
+    download_url = context.application.bot_data.get("tool_download_url", "")
+    text = (
+        "CREATE VIDEO PRO\n\n"
+        "Desktop app includes a 15-day free trial.\n"
+        "Open the app, copy the Installation ID, then return here to activate after purchase."
+    )
+    if download_url:
+        text += f"\n\nDownload: {download_url}"
+    await _show_navigation_screen(update, text, _create_video_pro_keyboard(), edit=edit)
+
+
+async def _send_cvp_buy(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
+    await _show_navigation_screen(update, "CREATE VIDEO PRO\n\nChoose license plan", _cvp_plan_keyboard(), edit=edit)
+
+
+async def _create_cvp_order(update: Update, context: ContextTypes.DEFAULT_TYPE, plan_code: str, *, edit: bool = False) -> None:
+    plan_code = str(plan_code or "").strip().upper()
+    if plan_code not in CVP_LICENSE_PLANS:
+        await _safe_edit_or_send(update, "Goi CREATE VIDEO PRO khong hop le.", _create_video_pro_keyboard(), edit=edit)
+        return
+    order = _create_cvp_sales_order(update, plan_code)
+    await _safe_edit_or_send(
+        update,
+        "Da tao don CREATE VIDEO PRO.\n"
+        f"Order ID: {order['order_id']}\n"
+        f"Goi: {order['package_name']}\n"
+        f"So tien: {_format_vnd(int(order['total']))}d\n\n"
+        "Sau khi thanh toan duoc xac nhan, license se duoc cap/gia han.",
+        _payment_choice_keyboard(str(order["order_id"])),
+        edit=edit,
+    )
+
+
+async def _send_cvp_my_license(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
+    service: CreateVideoProLicenseService = context.application.bot_data["cvp_license_service"]
+    record = service.latest_for_user(int(update.effective_user.id)) if update.effective_user else None
+    if not record:
+        await _show_navigation_screen(update, "CREATE VIDEO PRO\n\nBan chua co license tra phi.", _cvp_license_keyboard(), edit=edit)
+        return
+    status = str(record.get("status", ""))
+    expires = str(record.get("expires_at", ""))
+    installation = str(record.get("installation_id", "") or "Chua kich hoat")
+    text = (
+        "CREATE VIDEO PRO\n\n"
+        f"Plan: {record.get('plan_code', '')}\n"
+        f"Status: {status}\n"
+        f"Expires: {expires}\n"
+        f"Device: {installation}"
+    )
+    await _show_navigation_screen(update, text, _cvp_license_keyboard(), edit=edit)
+
+
+async def _send_cvp_activate_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
+    if update.effective_user:
+        pending_cvp_activation_by_user.add(int(update.effective_user.id))
+    await _safe_edit_or_send(
+        update,
+        "Gui Installation ID hien thi trong CREATE VIDEO PRO.\n\nVi du: CVP-7F4A-92D1-B831",
+        _create_video_pro_keyboard(),
+        edit=edit,
+    )
+
+
+async def _handle_cvp_activation_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    user = update.effective_user
+    if not user or int(user.id) not in pending_cvp_activation_by_user:
+        return False
+    pending_cvp_activation_by_user.discard(int(user.id))
+    service: CreateVideoProLicenseService = context.application.bot_data["cvp_license_service"]
+    result = service.activate(int(user.id), text)
+    if not result.ok:
+        await update.effective_message.reply_text(result.message, reply_markup=_create_video_pro_keyboard())
+        return True
+    record = result.record or {}
+    await update.effective_message.reply_text(
+        "CREATE VIDEO PRO activated.\n\n"
+        f"Plan: {record.get('plan_code', '')}\n"
+        f"Expires: {record.get('expires_at', '')}\n"
+        f"Installation ID: {record.get('installation_id', '')}\n\n"
+        "License key/token:\n"
+        f"{result.token}",
+        reply_markup=_cvp_license_keyboard(),
+    )
+    return True
+
 async def _create_paid_license_order(update: Update, context: ContextTypes.DEFAULT_TYPE, machine_id: str, product_id: str, *, edit: bool = False) -> None:
     user = update.effective_user
     license_service: LicenseService = context.application.bot_data["license_service"]
@@ -4221,11 +4554,39 @@ async def _handle_dtkd_order_ref_text(update: Update, context: ContextTypes.DEFA
     )
 
 
+async def _handle_custom_quantity_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+    state = context.user_data.get("custom_quantity") if getattr(context, "user_data", None) is not None else None
+    if not isinstance(state, dict) or state.get("state") != WAIT_CUSTOM_QTY:
+        return False
+    product_code = str(state.get("product_code", "") or "").strip().upper()
+    package_code = str(state.get("package_code", "") or "").strip().upper()
+    if not product_code or not package_code:
+        _clear_pending_custom_quantity(context)
+        await update.effective_message.reply_text(
+            "Phiên mua hàng không hợp lệ. Vui lòng chọn lại sản phẩm.",
+            reply_markup=_product_menu_keyboard(),
+        )
+        return True
+    raw_quantity = str(text or "").strip()
+    try:
+        requested_quantity = int(raw_quantity)
+    except (TypeError, ValueError):
+        await update.effective_message.reply_text(
+            "Số lượng phải là số nguyên lớn hơn 0. Vui lòng nhập lại.",
+            reply_markup=_custom_quantity_keyboard(product_code, package_code),
+        )
+        return True
+    await _handle_quantity_request(update, context, product_code, package_code, requested_quantity, edit=False)
+    return True
+
+
 async def on_text_machine_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
     if not message or not message.text:
         return
     raw_text = message.text.strip()
+    if await _handle_custom_quantity_text(update, context, raw_text):
+        return
     if await _handle_dtkd_order_ref_text(update, context, raw_text):
         return
     if await _handle_dtkd_registration_text(update, context, raw_text):
@@ -4233,6 +4594,8 @@ async def on_text_machine_id(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if await _handle_dtkd_withdraw_text(update, context, raw_text):
         return
     text = raw_text.upper()
+    if await _handle_cvp_activation_text(update, context, text):
+        return
     pending_product_id = pending_license_product_by_user.get(int(update.effective_user.id))
     if pending_product_id:
         logger.info(
@@ -4377,6 +4740,45 @@ async def fulfill_order(context: ContextTypes.DEFAULT_TYPE, order_id: str) -> di
     sales_order = _find_order(order_id)
     if sales_order:
         if str(sales_order.get("delivery_type", "account")) == "license":
+            if _is_cvp_order(sales_order):
+                cvp_service: CreateVideoProLicenseService = context.application.bot_data["cvp_license_service"]
+                result = cvp_service.issue_or_renew_from_order(sales_order)
+                if not result.ok:
+                    return {"ok": False, "type": "create_video_pro_license", "message": result.message, "order": sales_order}
+                now = _utc_now_iso()
+                updated_order = _update_order(
+                    order_id,
+                    payment_status="paid",
+                    order_status="delivered",
+                    paid_at=sales_order.get("paid_at") or now,
+                    delivered_at=now,
+                    delivery=str((result.record or {}).get("license_id", "")),
+                    license_file=str((result.record or {}).get("license_id", "")),
+                )
+                _record_partner_commission(updated_order or sales_order)
+                customer_id = sales_order.get("telegram_user_id")
+                if customer_id:
+                    record = result.record or {}
+                    await context.bot.send_message(
+                        chat_id=int(customer_id),
+                        text=(
+                            "Thanh toan thanh cong.\n\n"
+                            "CREATE VIDEO PRO license da duoc cap/gia han.\n"
+                            f"Plan: {record.get('plan_code', '')}\n"
+                            f"Expires: {record.get('expires_at', '')}\n\n"
+                            "Vao Tool > CREATE VIDEO PRO > Activate Device de nhap Installation ID."
+                        ),
+                        reply_markup=_cvp_license_keyboard(),
+                    )
+                return {
+                    "ok": True,
+                    "type": "create_video_pro_license",
+                    "delivery": str((result.record or {}).get("license_id", "")),
+                    "message": result.message,
+                    "record": result.record,
+                    "order": updated_order or sales_order,
+                }
+
             license_service: LicenseService = context.application.bot_data["license_service"]
             existing_file = str(sales_order.get("license_file", ""))
             if existing_file and Path(existing_file).exists():
@@ -5155,9 +5557,11 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     data = query.data or ""
     if data == "menu_main":
         _clear_pending_dtkd_order_ref(context)
+        _clear_pending_custom_quantity(context)
         await _show_navigation_screen(update, _start_help_text(), _main_menu_keyboard(), edit=True)
     elif data == "menu_products":
         _clear_pending_dtkd_order_ref(context)
+        _clear_pending_custom_quantity(context)
         logger.warning(
             "PRODUCT MENU CALLBACK file=%s function=_on_menu_impl callback_data=%s user_id=%s",
             __file__,
@@ -5167,10 +5571,12 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await _render_product_menu(update, edit=True)
     elif data == "menu_tools":
         _clear_pending_dtkd_order_ref(context)
-        # Tool is the original license/download branch, separate from account catalog products.
-        await _show_navigation_screen(update, _ai_daily_text(), _ai_daily_keyboard(), edit=True)
+        _clear_pending_custom_quantity(context)
+        # Tool menu keeps existing products intact and adds CREATE VIDEO PRO as an isolated tool branch.
+        await _show_navigation_screen(update, "Tool\n\nChon tool", _tool_home_keyboard(), edit=True)
     elif data == "menu_partners":
         _clear_pending_dtkd_order_ref(context)
+        _clear_pending_custom_quantity(context)
         await _send_business_partner_home(update, context, edit=True)
     elif data == "dtkd_order_ref_skip":
         await _create_order_after_dtkd_ref(update, context, attach_existing_referral=False, edit=True)
@@ -5180,16 +5586,38 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await _send_business_partner_screen(update, context, data.removeprefix("dtkd_"), edit=True)
     elif data == "menu_orders":
         _clear_pending_dtkd_order_ref(context)
+        _clear_pending_custom_quantity(context)
         await _send_orders(update, context, edit=True)
     elif data == "menu_history":
         _clear_pending_dtkd_order_ref(context)
+        _clear_pending_custom_quantity(context)
         await _send_purchase_history(update, context, edit=True)
     elif data == "menu_payment":
         _clear_pending_dtkd_order_ref(context)
+        _clear_pending_custom_quantity(context)
         await _send_payment(update, context, edit=True)
     elif data == "menu_ai_daily":
         _clear_pending_dtkd_order_ref(context)
+        _clear_pending_custom_quantity(context)
         await _show_navigation_screen(update, _ai_daily_text(), _ai_daily_keyboard(), edit=True)
+    elif data == "menu_cvp":
+        _clear_pending_dtkd_order_ref(context)
+        _clear_pending_custom_quantity(context)
+        await _send_create_video_pro_home(update, context, edit=True)
+    elif data == "cvp_download":
+        await _send_cvp_download(update, context, edit=True)
+    elif data == "cvp_buy":
+        await _send_cvp_buy(update, context, edit=True)
+    elif data == "cvp_my_license":
+        await _send_cvp_my_license(update, context, edit=True)
+    elif data == "cvp_activate":
+        await _send_cvp_activate_prompt(update, context, edit=True)
+    elif data.startswith("cvp_buy_plan:"):
+        parts = data.split(":", 1)
+        if len(parts) != 2 or not parts[1].strip():
+            await _send_invalid_callback(update)
+            return
+        await _create_cvp_order(update, context, parts[1], edit=True)
     elif data == "product_ai_daily":
         _clear_pending_dtkd_order_ref(context)
         await _show_navigation_screen(update, _ai_daily_text(), _ai_daily_keyboard(), edit=True)
@@ -5227,7 +5655,15 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             quantity=0,
             database_path=context.application.bot_data.get("store_db_path"),
         )
+        _clear_pending_custom_quantity(context)
         await _send_quantity_choice(update, product_code, package_code, edit=True)
+    elif data.startswith("manualqty:"):
+        parts = data.split(":")
+        if len(parts) != 3 or not parts[1].strip() or not parts[2].strip():
+            await _send_invalid_callback(update)
+            return
+        _, product_code, package_code = parts
+        await _send_custom_quantity_prompt(update, context, product_code, package_code, edit=True)
     elif data.startswith("qty:"):
         parts = data.split(":")
         if len(parts) != 4 or not parts[1].strip() or not parts[2].strip() or not parts[3].strip():
@@ -5419,7 +5855,10 @@ def _load_config() -> dict[str, str]:
     return {
         "BOT_TOKEN": os.environ.get("BOT_TOKEN", "").strip(),
         "ADMIN_IDS": os.environ.get("ADMIN_IDS", "").strip(),
-        "PRIVATE_KEY_PATH": os.environ.get("PRIVATE_KEY_PATH", "private_key.pem").strip(),
+        "PRIVATE_KEY_PATH": os.environ.get(
+            "PRIVATE_KEY_PATH",
+            str(Path(os.environ.get("LOCALAPPDATA", str(PROJECT_ROOT))) / "telegram-auto-sell-bot" / "secrets" / "create_video_pro_private_key.pem"),
+        ).strip(),
         "LICENSE_DB_PATH": os.environ.get("LICENSE_DB_PATH", "licenses_db.json").strip(),
         "LICENSE_OUTPUT_DIR": os.environ.get("LICENSE_OUTPUT_DIR", "issued_licenses").strip(),
         "STORE_DB_PATH": os.environ.get("STORE_DB_PATH", "database/store.db").strip(),
@@ -5469,6 +5908,7 @@ def build_application() -> Application:
     app = Application.builder().token(cfg["BOT_TOKEN"]).post_init(post_init).build()
     app.bot_data["admin_ids"] = admin_ids
     app.bot_data["license_service"] = license_service
+    app.bot_data["cvp_license_service"] = CreateVideoProLicenseService(store_db_path, private_key_path=Path(cfg["PRIVATE_KEY_PATH"]))
     app.bot_data["payment_service"] = payment_service
     app.bot_data["store_db_path"] = store_db_path
     app.bot_data["bank_provider"] = cfg["BANK_PROVIDER"]

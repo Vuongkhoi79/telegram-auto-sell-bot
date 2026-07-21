@@ -493,6 +493,8 @@ class StoreRepository:
                         CASE
                             WHEN UPPER(p.code) LIKE 'CATALOG-%'
                                 THEN SUBSTR(UPPER(p.code), LENGTH('CATALOG-') + 1)
+                            WHEN UPPER(p.code) = 'CHATGPT_SHARED'
+                                THEN 'CHATGPT_SHARED'
                             WHEN UPPER(p.code) = 'GPT-PLUS-1M-PRIVATE'
                                 THEN 'CHATGPT'
                             WHEN UPPER(p.code) = 'GEM-AIPRO-1M-PRIVATE'
@@ -585,6 +587,8 @@ class StoreRepository:
                         CASE
                             WHEN UPPER(p.code) LIKE 'CATALOG-%'
                                 THEN SUBSTR(UPPER(p.code), LENGTH('CATALOG-') + 1)
+                            WHEN UPPER(p.code) = 'CHATGPT_SHARED'
+                                THEN 'CHATGPT_SHARED'
                             WHEN UPPER(p.code) = 'GPT-PLUS-1M-PRIVATE'
                                 THEN 'CHATGPT'
                             WHEN UPPER(p.code) = 'GEM-AIPRO-1M-PRIVATE'
