@@ -210,17 +210,36 @@ def fetch_other_order_item_link_count(connection: sqlite3.Connection, inventory_
     return int(row["count"] if row else 0)
 
 
+def normalize_token(value: object) -> str:
+    return str(value or "").strip()
+
+
 def validator_snapshot(
     connection: sqlite3.Connection,
     order: sqlite3.Row,
     item: sqlite3.Row,
     txs: list[sqlite3.Row],
 ) -> str:
-    order_row_id = str(order["id"])
-    order_external_id = str(order["order_id"])
+    order_row_id = normalize_token(order["id"])
+    order_external_id = normalize_token(order["order_id"])
+    item_delivered_order_id = normalize_token(item["delivered_order_id"])
+    item_reserved_order_id = normalize_token(item["reserved_order_id"])
+    item_status = normalize_token(item["status"]).lower()
+    item_state = normalize_token(item["state"]).lower()
+    item_delivered_at = item["delivered_at"]
+    item_link_delivered_at = item["link_delivered_at"]
+    item_link_released_at = item["link_released_at"]
     link_count = fetch_order_item_link_count(connection, TARGET_INVENTORY_ITEM_ID, order_row_id)
     other_link_count = fetch_other_order_item_link_count(connection, TARGET_INVENTORY_ITEM_ID, order_row_id)
     matching_txs = [tx for tx in txs if int(tx["amount_vnd"] or 0) == TARGET_PAYMENT_AMOUNT_VND]
+    delivered_matches_external = item_delivered_order_id == order_external_id
+    delivered_matches_internal = item_delivered_order_id == order_row_id
+    status_is_delivered = item_status == "delivered"
+    state_is_delivered = item_state == "delivered"
+    link_count_matches = link_count == 1
+    other_link_count_clear = other_link_count == 0
+    payment_amount_matches = bool(matching_txs)
+    payment_state_matches = any(normalize_token(tx["status"]).lower() == TARGET_PAYMENT_STATUS for tx in matching_txs)
     lines = [
         "VALIDATOR_SNAPSHOT:",
         f"  repr(item['status'])={repr(item['status'])}",
@@ -241,11 +260,18 @@ def validator_snapshot(
         f"  payment_rows={len(txs)}",
         f"  payment_matching_amount_rows={len(matching_txs)}",
         f"  payment_statuses={[repr(tx['status']) for tx in matching_txs]}",
+        f"  delivered_matches_external_order_id={delivered_matches_external}",
+        f"  delivered_matches_internal_row_id={delivered_matches_internal}",
+        f"  status_is_delivered={status_is_delivered}",
+        f"  state_is_delivered={state_is_delivered}",
+        f"  link_count_matches={link_count_matches}",
+        f"  other_link_count_clear={other_link_count_clear}",
+        f"  payment_amount_matches={payment_amount_matches}",
+        f"  payment_state_matches={payment_state_matches}",
+        f"  delivered_at_present={item_delivered_at is not None}",
+        f"  link_delivered_at_present={item_link_delivered_at is not None}",
+        f"  link_released_at_present={item_link_released_at is not None}",
     ]
-    delivered_matches_external = str(item["delivered_order_id"] or "") == order_external_id
-    delivered_matches_internal = str(item["delivered_order_id"] or "") == order_row_id
-    lines.append(f"  delivered_matches_external_order_id={delivered_matches_external}")
-    lines.append(f"  delivered_matches_internal_row_id={delivered_matches_internal}")
     return "\n".join(lines)
 
 
@@ -347,9 +373,9 @@ def validate_targets(
         raise RuntimeError(f"Unexpected inventory_item_id: {item['inventory_item_id']}")
     if str(item["product_code"]).upper() != TARGET_ORDER_PRODUCT_CODE:
         raise RuntimeError(f"Unexpected linked item product_code: {item['product_code']}")
-    if str(item["status"]).lower() != "delivered":
+    if normalize_token(item["status"]).lower() != "delivered":
         raise RuntimeError(f"Linked item is not delivered: {item['status']}")
-    if str(item["delivered_order_id"] or "") != str(order["order_id"]):
+    if normalize_token(item["delivered_order_id"]) != normalize_token(order["order_id"]):
         raise RuntimeError(
             "Linked item was not delivered by this order\n"
             f"{validator_snapshot(connection, order, item, txs)}"

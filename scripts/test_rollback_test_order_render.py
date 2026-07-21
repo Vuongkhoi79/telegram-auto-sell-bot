@@ -121,10 +121,36 @@ class RollbackTestOrderRenderScriptTest(unittest.TestCase):
         self.assertEqual(dry.returncode, 0, dry.stdout + dry.stderr)
         self.assertIn("DRY_RUN_OK", dry.stdout)
         with closing(sqlite3.connect(self.db_path)) as connection:
-            before = connection.execute(
-                "SELECT status FROM inventory_items WHERE id = '565a3e52-4ce2-4062-ab50-4ca49350658d'"
-            ).fetchone()[0]
-        self.assertEqual(before, "delivered")
+            order = connection.execute(
+                "SELECT id, order_id, product_code, total_vnd, payment_status, order_status FROM orders WHERE order_id = ?",
+                (self.order_id,),
+            ).fetchone()
+            item = connection.execute(
+                """
+                SELECT status, reserved_order_id, delivered_order_id
+                FROM inventory_items
+                WHERE id = '565a3e52-4ce2-4062-ab50-4ca49350658d'
+                """
+            ).fetchone()
+            link = connection.execute(
+                """
+                SELECT state, order_id, inventory_item_id
+                FROM order_inventory_items
+                WHERE order_id = ? AND inventory_item_id = '565a3e52-4ce2-4062-ab50-4ca49350658d'
+                """,
+                ("order-row-chatgpt-shared-1",),
+            ).fetchone()
+            payment = connection.execute(
+                """
+                SELECT amount_vnd, status
+                FROM payment_transactions
+                WHERE provider_transaction_id = 'TEST-TX-ROLLBACK-1'
+                """
+            ).fetchone()
+        self.assertEqual(order, ("order-row-chatgpt-shared-1", self.order_id, "CHATGPT", 160000, "paid", "delivered"))
+        self.assertEqual(item, ("delivered", self.order_id, self.order_id))
+        self.assertEqual(link, ("delivered", "order-row-chatgpt-shared-1", "565a3e52-4ce2-4062-ab50-4ca49350658d"))
+        self.assertEqual(payment, (160000, "processed"))
 
         apply = self.run_script("--yes")
         self.assertEqual(apply.returncode, 0, apply.stdout + apply.stderr)
