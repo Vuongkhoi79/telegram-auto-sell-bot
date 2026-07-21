@@ -126,6 +126,7 @@ PRODUCT_ORDER = [
     "CANVA",
     "CAPCUT PRO",
     "CHATGPT",
+    "CHATGPT_SHARED",
     "CLAUDE AI",
     "CURSOR AI",
     "ELEVEN",
@@ -148,6 +149,7 @@ CATALOG_DISPLAY_NAMES = {
     "CAPCUT_12M": "CAPCUT PRO 365 ngay",
     "CAPCUT_60D": "CAPCUT PRO 60 ngay",
     "CAPCUT_30D": "CAPCUT PRO 30 ngay",
+    "CHATGPT_SHARED": "ChatGPT Plus dùng chung",
     "GEMINI": "GEMINI AI",
 }
 
@@ -178,6 +180,7 @@ TELEGRAM_PRODUCT_CODE_MAP = {
     "CAPCUT PRO 30 NGAY": "CAPCUT_30D",
     "CAPCUT PRO 30 NGÀY": "CAPCUT_30D",
     "CHATGPT": "GPT-PLUS-1M-PRIVATE",
+    "CHATGPT_SHARED": "CHATGPT_SHARED",
     "CLAUDE": "CLAUDE-PRO-1M-PRIVATE",
     "CLAUDE AI": "CLAUDE-PRO-1M-PRIVATE",
     "CURSOR": "CURSOR-PRO-1M-PRIVATE",
@@ -1327,7 +1330,7 @@ def _product_menu_keyboard(product_group: str = "account") -> InlineKeyboardMark
     buttons: list[InlineKeyboardButton] = []
     menu_counts: dict[str, int] = {}
     for item in _catalog_category_items(product_group):
-        product_name = _clean_product_title(str(item["category_key"]))
+        product_name = _catalog_display_name(str(item["category_key"]))
         available_count = int(item["available_count"] or 0)
         lookup_key = str(item["lookup_key"]).upper()
         menu_counts[lookup_key] = available_count
