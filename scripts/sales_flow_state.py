@@ -19,7 +19,7 @@ CANONICAL_PRODUCT_CODES = {
     "ELEVENLABS",
     "GAMMA",
     "GEMINI",
-    "GROK",
+    "GROK_75K",
     "HEYGEN",
     "HIGGSFIELD",
     "KLING",
@@ -46,8 +46,8 @@ def canonical_product_code(product_code: str) -> str:
         return "CAPCUT"
     if normalized.startswith("CHA"):
         return "CHATGPT"
-    if normalized.startswith("GRO"):
-        return "GROK"
+    if normalized.startswith("GRO") or normalized.startswith("SUPERGROK"):
+        return "GROK_75K"
     if normalized.startswith("CUR"):
         return "CURSOR"
     if normalized.startswith("CLA"):

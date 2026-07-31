@@ -141,7 +141,7 @@ PRODUCT_ORDER = [
     "ELEVEN",
     "GAMMA AI",
     "GEMINI AI",
-    "GROK SUPER",
+    "SUPERGROK AI",
     "HEYGEN AI",
     "HIGGFIELD",
     "KLING",
@@ -160,6 +160,7 @@ CATALOG_DISPLAY_NAMES = {
     "CAPCUT_30D": "CAPCUT PRO 30 ngay",
     "CHATGPT_SHARED": "ChatGPT Plus dùng chung",
     "GEMINI": "GEMINI AI",
+    "GROK_75K": "SUPERGROK AI",
 }
 
 # UI callback keys stay unchanged. Add aliases here when extending the catalog.
@@ -200,8 +201,10 @@ TELEGRAM_PRODUCT_CODE_MAP = {
     "GAMMA AI": "GAMMA-1M-PRIVATE",
     "GEMINI": "GEM-AIPRO-1M-PRIVATE",
     "GEMINI AI": "GEM-AIPRO-1M-PRIVATE",
-    "GROK": "GROK-SUPER-1M-PRIVATE",
-    "GROK SUPER": "GROK-SUPER-1M-PRIVATE",
+    "GROK": "GROK_75K",
+    "GROK SUPER": "GROK_75K",
+    "SUPERGROK AI": "GROK_75K",
+    "GROK_75K": "GROK_75K",
     "HEYGEN": "HEYGEN-1M-PRIVATE",
     "HEYGEN AI": "HEYGEN-1M-PRIVATE",
     "HIGGSFIELD": "HIGGSFIELD-1M-PRIVATE",
@@ -782,8 +785,8 @@ def _menu_stock_product_code(product_key: str) -> str | None:
         return "CHATGPT"
     if normalized_key.startswith("GEMINI"):
         return "GEMINI"
-    if normalized_key.startswith("GROK"):
-        return "GROK"
+    if normalized_key.startswith("GROK") or normalized_key.startswith("SUPERGROK"):
+        return "GROK_75K"
     if normalized_key.startswith("CAPCUT_7D") or "CAPCUT PRO 7D" in normalized_key or "CAPCUT PRO 7 NGAY" in normalized_key or "CAPCUT PRO 7 NGÀY" in normalized_key:
         return "CAPCUT_7D"
     if normalized_key.startswith("CAPCUT_30D") or "CAPCUT PRO 30D" in normalized_key or "CAPCUT PRO 30 NGAY" in normalized_key or "CAPCUT PRO 30 NGÀY" in normalized_key:

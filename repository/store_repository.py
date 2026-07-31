@@ -41,6 +41,7 @@ CANONICAL_CATALOG_PRODUCTS = {
     "CAPCUT_12M": {"name": "CAPCUT PRO 365 ngay", "price_vnd": 400000},
     "CAPCUT_30D": {"name": "CAPCUT PRO 30 ngay", "price_vnd": 45000},
     "GEMINI": {"name": "Gemini AI Pro", "price_vnd": 70000},
+    "GROK_75K": {"name": "SUPERGROK AI", "price_vnd": 75000},
 }
 
 
@@ -82,8 +83,10 @@ ACCOUNT_PRODUCT_CODE_ALIASES: dict[str, tuple[str, ...]] = {
     "GAMMA AI": ("GAMMA-1M-PRIVATE",),
     "GEMINI": ("GEM-AIPRO-1M-PRIVATE",),
     "GEMINI AI": ("GEM-AIPRO-1M-PRIVATE",),
-    "GROK": ("GROK-SUPER-1M-PRIVATE",),
-    "GROK SUPER": ("GROK-SUPER-1M-PRIVATE",),
+    "GROK": ("GROK_75K",),
+    "GROK SUPER": ("GROK_75K",),
+    "SUPERGROK AI": ("GROK_75K",),
+    "GROK_75K": ("GROK SUPER", "SUPERGROK AI"),
     "HEYGEN": ("HEYGEN-1M-PRIVATE",),
     "HEYGEN AI": ("HEYGEN-1M-PRIVATE",),
     "HIGGFIELD": ("HIGGSFIELD-1M-PRIVATE",),
@@ -179,6 +182,8 @@ class StoreRepository:
 
     def _product_code_candidates(self, product_code: str) -> list[str]:
         normalized = str(product_code or "").strip().upper()
+        if normalized in {"GROK", "GROK SUPER", "SUPERGROK AI", "GROK_75K"}:
+            return ["GROK_75K"]
         candidates = [normalized] if normalized else []
         for alias in ACCOUNT_PRODUCT_CODE_ALIASES.get(normalized, ()):
             alias = str(alias).strip().upper()

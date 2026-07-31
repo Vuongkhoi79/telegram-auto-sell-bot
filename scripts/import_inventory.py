@@ -43,6 +43,7 @@ DEFAULT_PRODUCT_DISPLAY_NAMES = {
     "CAPCUT_12M": "CAPCUT PRO 12M",
     "CAPCUT_30D": "CAPCUT PRO 30D",
     "GEMINI": "Gemini AI Pro",
+    "GROK_75K": "SUPERGROK AI",
     "CHATGPT_SHARED": "ChatGPT Plus dùng chung",
 }
 EXPECTED_PRODUCT_TERMS = {
@@ -51,12 +52,14 @@ EXPECTED_PRODUCT_TERMS = {
     "CAPCUT_12M": {"price_vnd": 400000, "warranty_days": 365},
     "CAPCUT_30D": {"price_vnd": 45000, "warranty_days": 30},
     "CHATGPT_SHARED": {"price_vnd": 45000, "warranty_days": 7},
+    "GROK_75K": {"price_vnd": 75000, "warranty_days": 7},
 }
 ALLOWED_PRODUCT_CODES = {
     "CHATGPT",
     "CHATGPT_SHARED",
     "GEMINI",
     "GROK",
+    "GROK_75K",
     "CAPCUT",
     "CAPCUT_7D",
     "CAPCUT_12M",
@@ -143,6 +146,8 @@ def normalize_import_product_code(product_code: str, row: dict[str, Any]) -> str
         return "CAPCUT_7D"
     if normalized == "CAPCUT" and duration in {"30D", "30DAY", "30DAYS", "30NGAY", "30NGÃ€Y"} and price_vnd == 45000 and warranty_days == 30:
         return "CAPCUT_30D"
+    if normalized in {"GROK", "GROK SUPER", "SUPERGROK AI"} and duration in {"30D", "30DAY", "30DAYS", "30NGAY"} and price_vnd == 75000 and warranty_days == 7:
+        return "GROK_75K"
     return normalized
 
 
@@ -387,7 +392,7 @@ def available_stock_for_code(connection: sqlite3.Connection, product_code: str) 
 
 
 def should_use_canonical_product(product_code: str, row: dict[str, Any]) -> bool:
-    return product_code.startswith("CAPCUT") or product_code == "CHATGPT_SHARED" or bool(row.get("__sheet_product"))
+    return product_code.startswith("CAPCUT") or product_code in {"CHATGPT_SHARED", "GROK_75K"} or bool(row.get("__sheet_product"))
 
 
 def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE, mode: str = "replace") -> dict[str, Any]:
