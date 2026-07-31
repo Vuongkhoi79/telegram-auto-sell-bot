@@ -22,13 +22,24 @@ NEW_DURATION = "30D"
 NEW_WARRANTY_DAYS = 7
 EXPECTED_CREDENTIAL_COUNT = 10
 DEFAULT_DATABASE = Path("/var/data/store.db")
-AUDIT_SOURCE = "migrate_grok_75k_inventory"
+EMBEDDED_CREDENTIAL_FINGERPRINTS = (
+    "039e658b4a8b153cf294d9d6d3cfba27b8de1ec400c3d6b49731d1edb3a409f5",
+    "0d08d35c9bc124b0463e7340d8fc9facb4c60aae886be02fae4742717897db8e",
+    "18e0ce3b2c3f4fdcf243f91fe14e2307636b235865f8293d867f0267a0a66184",
+    "2471dd635aa6fd23dd1a79e5e8b0acf76543acc9b30bea75a17715f2de8becf0",
+    "321206535feced5e105b3cb1bd59cc4538dff79987fdf0edc9f63f1cd335ce7b",
+    "5b047d0ca5664f5323139d4478991d996bc921867af62398eccac2d8d9b5d8c7",
+    "78e5a6866cab044ac36a0cc752dd111b9609071e713908d293a3d86c8b105959",
+    "8b3bdc44acf6f2fa7ebe5517af4195fabdc1e25ae0107d80f4619bbfe58388a6",
+    "8c8b00f6acffa56f7c89713728115b7c66310dafa75d04531f935974b60eb9fd",
+    "c321c4e1aabb566595d923aa77b76adab4e90d2449b6f10922756b98727ee9c1",
+)
 
 
 @dataclass(frozen=True)
 class CredentialRecord:
     row_number: int
-    credential: str
+    credential: str | None
     fingerprint: str
     masked: str
 
@@ -44,7 +55,11 @@ def parse_args() -> argparse.Namespace:
             "GROK to GROK_75K. Dry-run by default."
         )
     )
-    parser.add_argument("--excel", type=Path, required=True, help="Path to import_GROK_ONLY_READY1_price75000.xlsx")
+    parser.add_argument(
+        "--excel",
+        type=Path,
+        help="Optional path to import_GROK_ONLY_READY1_price75000.xlsx. Used only to verify embedded fingerprints.",
+    )
     parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE, help="Path to store.db")
     parser.add_argument("--yes", action="store_true", help="Apply the migration. Omit for dry-run.")
     return parser.parse_args()
@@ -118,6 +133,44 @@ def read_excel_credentials(path: Path) -> list[CredentialRecord]:
     if duplicates:
         raise ValueError(f"Excel contains duplicate credentials: {', '.join(duplicates)}")
     return records
+
+
+def embedded_credentials() -> list[CredentialRecord]:
+    if len(EMBEDDED_CREDENTIAL_FINGERPRINTS) != EXPECTED_CREDENTIAL_COUNT:
+        raise ValueError(
+            f"expected {EXPECTED_CREDENTIAL_COUNT} embedded fingerprints, "
+            f"found {len(EMBEDDED_CREDENTIAL_FINGERPRINTS)}"
+        )
+    duplicate_counts = Counter(EMBEDDED_CREDENTIAL_FINGERPRINTS)
+    duplicates = [value for value, count in duplicate_counts.items() if count > 1]
+    if duplicates:
+        raise ValueError(f"embedded fingerprints contain duplicates: {', '.join(duplicates)}")
+    return [
+        CredentialRecord(
+            row_number=index,
+            credential=None,
+            fingerprint=value,
+            masked="fingerprint-only",
+        )
+        for index, value in enumerate(EMBEDDED_CREDENTIAL_FINGERPRINTS, start=1)
+    ]
+
+
+def load_credential_records(excel_path: Path | None) -> list[CredentialRecord]:
+    embedded = embedded_credentials()
+    if excel_path is None:
+        return embedded
+    excel_records = read_excel_credentials(excel_path)
+    embedded_fingerprints = {record.fingerprint for record in embedded}
+    excel_fingerprints = {record.fingerprint for record in excel_records}
+    if excel_fingerprints != embedded_fingerprints:
+        missing = sorted(embedded_fingerprints - excel_fingerprints)
+        extra = sorted(excel_fingerprints - embedded_fingerprints)
+        raise ValueError(
+            "Excel fingerprints do not match embedded fingerprints: "
+            f"missing={[value[:12] for value in missing]} extra={[value[:12] for value in extra]}"
+        )
+    return excel_records
 
 
 def connect(database: Path) -> sqlite3.Connection:
@@ -196,28 +249,29 @@ def ensure_grok_75k_product(connection: sqlite3.Connection, now: str) -> str:
 
 def fetch_matches(connection: sqlite3.Connection, records: list[CredentialRecord]) -> dict[str, list[sqlite3.Row]]:
     matches: dict[str, list[sqlite3.Row]] = defaultdict(list)
-    for record in records:
-        rows = connection.execute(
-            """
-            SELECT
-                i.id AS inventory_item_id,
-                i.product_id,
-                p.code AS product_code,
-                i.status,
-                i.reserved_order_id,
-                i.delivered_order_id,
-                i.created_at,
-                i.reserved_at,
-                i.delivered_at,
-                i.disabled_at
-            FROM inventory_items AS i
-            JOIN products AS p ON p.id = i.product_id
-            WHERE i.secret_value = ?
-            ORDER BY p.code, i.status, i.created_at, i.id
-            """,
-            (record.credential,),
-        ).fetchall()
-        matches[record.fingerprint] = rows
+    wanted = {record.fingerprint for record in records}
+    for row in connection.execute(
+        """
+        SELECT
+            i.id AS inventory_item_id,
+            i.product_id,
+            p.code AS product_code,
+            i.secret_value,
+            i.status,
+            i.reserved_order_id,
+            i.delivered_order_id,
+            i.created_at,
+            i.reserved_at,
+            i.delivered_at,
+            i.disabled_at
+        FROM inventory_items AS i
+        JOIN products AS p ON p.id = i.product_id
+        ORDER BY p.code, i.status, i.created_at, i.id
+        """
+    ):
+        row_fingerprint = fingerprint(str(row["secret_value"]))
+        if row_fingerprint in wanted:
+            matches[row_fingerprint].append(row)
     return matches
 
 
@@ -228,7 +282,12 @@ def eligible_rows(
     rows: list[sqlite3.Row] = []
     for record in records:
         for row in matches[record.fingerprint]:
-            if row["product_code"] == OLD_PRODUCT_CODE and row["status"] == "available":
+            if (
+                row["product_code"] == OLD_PRODUCT_CODE
+                and row["status"] == "available"
+                and row["reserved_order_id"] is None
+                and row["delivered_order_id"] is None
+            ):
                 rows.append(row)
     return rows
 
@@ -252,11 +311,12 @@ def print_report(
     matches: dict[str, list[sqlite3.Row]],
     eligible: list[sqlite3.Row],
 ) -> None:
-    print(f"Excel credentials: {len(records)}")
-    print(f"Distinct Excel credentials: {len({record.credential for record in records})}")
+    print(f"Embedded fingerprints count: {len(EMBEDDED_CREDENTIAL_FINGERPRINTS)}")
+    print(f"Credential fingerprints in use: {len(records)}")
+    print(f"Distinct credential fingerprints: {len({record.fingerprint for record in records})}")
     for record in records:
         rows = matches[record.fingerprint]
-        print(f"- row={record.row_number} sha256={record.fingerprint[:12]} credential={record.masked} db_matches={len(rows)}")
+        print(f"- source_row={record.row_number} sha256={record.fingerprint[:12]} credential={record.masked} matched_rows={len(rows)}")
         for row in rows:
             print(
                 "  "
@@ -278,35 +338,7 @@ def backup_database(database: Path) -> Path:
     return backup_path
 
 
-def insert_audit_movement(connection: sqlite3.Connection, inventory_item_id: str, now: str) -> None:
-    tables = {
-        str(row["name"])
-        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-    }
-    if "inventory_movements" not in tables:
-        return
-    columns = table_columns(connection, "inventory_movements")
-    required = {"id", "inventory_item_id", "action", "source", "created_at"}
-    if not required.issubset(columns):
-        return
-    values: dict[str, Any] = {
-        "id": str(uuid.uuid4()),
-        "inventory_item_id": inventory_item_id,
-        "action": "release",
-        "order_id": None,
-        "admin_telegram_id": None,
-        "source": AUDIT_SOURCE,
-        "created_at": now,
-    }
-    insert_columns = [name for name in values if name in columns]
-    placeholders = ", ".join("?" for _ in insert_columns)
-    connection.execute(
-        f"INSERT INTO inventory_movements ({', '.join(insert_columns)}) VALUES ({placeholders})",
-        [values[name] for name in insert_columns],
-    )
-
-
-def apply_migration(database: Path, records: list[CredentialRecord], matches: dict[str, list[sqlite3.Row]]) -> None:
+def apply_migration(database: Path, records: list[CredentialRecord]) -> None:
     backup_path = backup_database(database)
     print(f"Backup created: {backup_path}")
     with connect(database) as connection:
@@ -314,6 +346,7 @@ def apply_migration(database: Path, records: list[CredentialRecord], matches: di
         try:
             now = utc_now_iso()
             product_id = ensure_grok_75k_product(connection, now)
+            matches = fetch_matches(connection, records)
             eligible = eligible_rows(records, matches)
             if len(eligible) != EXPECTED_CREDENTIAL_COUNT:
                 raise RuntimeError(
@@ -334,7 +367,6 @@ def apply_migration(database: Path, records: list[CredentialRecord], matches: di
                 )
                 if cursor.rowcount != 1:
                     raise RuntimeError(f"ABORT: failed to update inventory item {row['inventory_item_id']}")
-                insert_audit_movement(connection, str(row["inventory_item_id"]), now)
             if available_count(connection, NEW_PRODUCT_CODE) != EXPECTED_CREDENTIAL_COUNT:
                 raise RuntimeError(
                     f"ABORT: expected {NEW_PRODUCT_CODE} available={EXPECTED_CREDENTIAL_COUNT}, "
@@ -348,7 +380,7 @@ def apply_migration(database: Path, records: list[CredentialRecord], matches: di
 
 def main() -> int:
     args = parse_args()
-    records = read_excel_credentials(args.excel)
+    records = load_credential_records(args.excel)
     with connect(args.database) as connection:
         matches = fetch_matches(connection, records)
         eligible = eligible_rows(records, matches)
@@ -360,7 +392,7 @@ def main() -> int:
             raise RuntimeError(
                 f"ABORT: expected exactly {EXPECTED_CREDENTIAL_COUNT} eligible rows, found {len(eligible)}"
             )
-    apply_migration(args.database, records, matches)
+    apply_migration(args.database, records)
     with connect(args.database) as connection:
         print(f"After {OLD_PRODUCT_CODE} available: {available_count(connection, OLD_PRODUCT_CODE)}")
         print(f"After {NEW_PRODUCT_CODE} available: {available_count(connection, NEW_PRODUCT_CODE)}")
