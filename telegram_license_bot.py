@@ -44,13 +44,24 @@ from license_service import (
     LicenseService,
 )
 from payment_service import PaymentConfig, PaymentService
-from create_video_pro_license import (
-    PLAN_1M as CVP_PLAN_1M,
-    PLAN_3M as CVP_PLAN_3M,
-    PLANS as CVP_LICENSE_PLANS,
-    PRODUCT_CODE as CVP_PRODUCT_CODE,
-    CreateVideoProLicenseService,
-)
+try:
+    from create_video_pro_license import (
+        PLAN_1M as CVP_PLAN_1M,
+        PLAN_3M as CVP_PLAN_3M,
+        PLANS as CVP_LICENSE_PLANS,
+        PRODUCT_CODE as CVP_PRODUCT_CODE,
+        CreateVideoProLicenseService,
+    )
+    CVP_LICENSE_AVAILABLE = True
+    CVP_LICENSE_IMPORT_ERROR = ""
+except ModuleNotFoundError as exc:
+    CVP_PLAN_1M = "1M"
+    CVP_PLAN_3M = "3M"
+    CVP_LICENSE_PLANS: dict[str, dict[str, object]] = {}
+    CVP_PRODUCT_CODE = "CREATE_VIDEO_PRO"
+    CreateVideoProLicenseService = None  # type: ignore[assignment]
+    CVP_LICENSE_AVAILABLE = False
+    CVP_LICENSE_IMPORT_ERROR = str(exc)
 from repository.store_repository import StoreRepository
 from scripts.import_inventory import IMPORT_COLUMNS, credential_from_row, import_inventory, normalize_import_product_code, read_rows
 from scripts.sales_flow_state import log_sales_state
@@ -537,6 +548,21 @@ def _cvp_plan_label(plan_code: str) -> str:
     return f"{plan['name']} - {_format_vnd(int(plan['price_vnd']))}d"
 
 
+def _cvp_license_enabled(context: ContextTypes.DEFAULT_TYPE | None = None) -> bool:
+    if not CVP_LICENSE_AVAILABLE or CreateVideoProLicenseService is None:
+        return False
+    if context is None:
+        return True
+    return context.application.bot_data.get("cvp_license_service") is not None
+
+
+def _cvp_unavailable_text() -> str:
+    return (
+        "CREATE VIDEO PRO license is not available in this bot build.\n\n"
+        "Core account sales are still available."
+    )
+
+
 def _create_video_pro_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -550,6 +576,12 @@ def _create_video_pro_keyboard() -> InlineKeyboardMarkup:
 
 
 def _cvp_plan_keyboard() -> InlineKeyboardMarkup:
+    if not CVP_LICENSE_PLANS:
+        return InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("Quay lai", callback_data="menu_cvp")],
+            ]
+        )
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("1 Month - 100.000d", callback_data=f"cvp_buy_plan:{CVP_PLAN_1M}")],
@@ -560,6 +592,12 @@ def _cvp_plan_keyboard() -> InlineKeyboardMarkup:
 
 
 def _cvp_license_keyboard() -> InlineKeyboardMarkup:
+    if not CVP_LICENSE_PLANS:
+        return InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("Quay lai", callback_data="menu_cvp")],
+            ]
+        )
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("Renew 1 Month - 100.000d", callback_data=f"cvp_buy_plan:{CVP_PLAN_1M}")],
@@ -4089,6 +4127,8 @@ def _get_package_info(product_key: str, package_key: str) -> dict[str, object] |
 
 
 def _create_cvp_sales_order(update: Update, plan_code: str) -> dict[str, object]:
+    if not CVP_LICENSE_PLANS:
+        raise ValueError("CREATE VIDEO PRO licensing is not available")
     plan_code = str(plan_code or "").strip().upper()
     if plan_code not in CVP_LICENSE_PLANS:
         raise ValueError(f"Unknown CREATE VIDEO PRO plan: {plan_code}")
@@ -4169,10 +4209,16 @@ async def _send_cvp_download(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 
 async def _send_cvp_buy(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
+    if not _cvp_license_enabled(context):
+        await _show_navigation_screen(update, _cvp_unavailable_text(), _create_video_pro_keyboard(), edit=edit)
+        return
     await _show_navigation_screen(update, "CREATE VIDEO PRO\n\nChoose license plan", _cvp_plan_keyboard(), edit=edit)
 
 
 async def _create_cvp_order(update: Update, context: ContextTypes.DEFAULT_TYPE, plan_code: str, *, edit: bool = False) -> None:
+    if not _cvp_license_enabled(context):
+        await _safe_edit_or_send(update, _cvp_unavailable_text(), _create_video_pro_keyboard(), edit=edit)
+        return
     plan_code = str(plan_code or "").strip().upper()
     if plan_code not in CVP_LICENSE_PLANS:
         await _safe_edit_or_send(update, "Goi CREATE VIDEO PRO khong hop le.", _create_video_pro_keyboard(), edit=edit)
@@ -4191,7 +4237,10 @@ async def _create_cvp_order(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
 
 async def _send_cvp_my_license(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
-    service: CreateVideoProLicenseService = context.application.bot_data["cvp_license_service"]
+    if not _cvp_license_enabled(context):
+        await _show_navigation_screen(update, _cvp_unavailable_text(), _create_video_pro_keyboard(), edit=edit)
+        return
+    service = context.application.bot_data["cvp_license_service"]
     record = service.latest_for_user(int(update.effective_user.id)) if update.effective_user else None
     if not record:
         await _show_navigation_screen(update, "CREATE VIDEO PRO\n\nBan chua co license tra phi.", _cvp_license_keyboard(), edit=edit)
@@ -4210,6 +4259,9 @@ async def _send_cvp_my_license(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def _send_cvp_activate_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False) -> None:
+    if not _cvp_license_enabled(context):
+        await _safe_edit_or_send(update, _cvp_unavailable_text(), _create_video_pro_keyboard(), edit=edit)
+        return
     if update.effective_user:
         pending_cvp_activation_by_user.add(int(update.effective_user.id))
     await _safe_edit_or_send(
@@ -4225,7 +4277,10 @@ async def _handle_cvp_activation_text(update: Update, context: ContextTypes.DEFA
     if not user or int(user.id) not in pending_cvp_activation_by_user:
         return False
     pending_cvp_activation_by_user.discard(int(user.id))
-    service: CreateVideoProLicenseService = context.application.bot_data["cvp_license_service"]
+    if not _cvp_license_enabled(context):
+        await update.effective_message.reply_text(_cvp_unavailable_text(), reply_markup=_create_video_pro_keyboard())
+        return True
+    service = context.application.bot_data["cvp_license_service"]
     result = service.activate(int(user.id), text)
     if not result.ok:
         await update.effective_message.reply_text(result.message, reply_markup=_create_video_pro_keyboard())
@@ -4744,7 +4799,14 @@ async def fulfill_order(context: ContextTypes.DEFAULT_TYPE, order_id: str) -> di
     if sales_order:
         if str(sales_order.get("delivery_type", "account")) == "license":
             if _is_cvp_order(sales_order):
-                cvp_service: CreateVideoProLicenseService = context.application.bot_data["cvp_license_service"]
+                if not _cvp_license_enabled(context):
+                    return {
+                        "ok": False,
+                        "type": "create_video_pro_license",
+                        "message": _cvp_unavailable_text(),
+                        "order": sales_order,
+                    }
+                cvp_service = context.application.bot_data["cvp_license_service"]
                 result = cvp_service.issue_or_renew_from_order(sales_order)
                 if not result.ok:
                     return {"ok": False, "type": "create_video_pro_license", "message": result.message, "order": sales_order}
@@ -5911,7 +5973,11 @@ def build_application() -> Application:
     app = Application.builder().token(cfg["BOT_TOKEN"]).post_init(post_init).build()
     app.bot_data["admin_ids"] = admin_ids
     app.bot_data["license_service"] = license_service
-    app.bot_data["cvp_license_service"] = CreateVideoProLicenseService(store_db_path, private_key_path=Path(cfg["PRIVATE_KEY_PATH"]))
+    if _cvp_license_enabled():
+        app.bot_data["cvp_license_service"] = CreateVideoProLicenseService(store_db_path, private_key_path=Path(cfg["PRIVATE_KEY_PATH"]))  # type: ignore[operator]
+    else:
+        app.bot_data["cvp_license_service"] = None
+        logger.warning("CREATE VIDEO PRO license service disabled: %s", CVP_LICENSE_IMPORT_ERROR)
     app.bot_data["payment_service"] = payment_service
     app.bot_data["store_db_path"] = store_db_path
     app.bot_data["bank_provider"] = cfg["BANK_PROVIDER"]
