@@ -107,6 +107,18 @@ ACCOUNT_PRODUCT_CODE_ALIASES: dict[str, tuple[str, ...]] = {
 def public_delivery_credential(product_code: str, credential_text: str) -> str:
     """Return the customer-facing credential for a reserved inventory item."""
     credential_text = str(credential_text or "").strip()
+    if str(product_code or "").strip().upper() == "OFFICE_2024_LIFETIME":
+        parts = [part.strip() for part in credential_text.split("|", 1)]
+        product_key = parts[0] if parts else credential_text
+        version = parts[1] if len(parts) > 1 else "Office-2024-LTSC"
+        return (
+            "🔑 Product Key:\n"
+            f"{product_key}\n\n"
+            "📦 Phiên bản:\n"
+            f"{version}\n\n"
+            "🛡 Bảo hành:\n"
+            "12 tháng"
+        )
     if str(product_code or "").strip().upper() != "CHATGPT_SHARED":
         return credential_text
     parts = [part.strip() for part in credential_text.split("|")]

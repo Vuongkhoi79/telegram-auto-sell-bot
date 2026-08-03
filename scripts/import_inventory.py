@@ -44,6 +44,7 @@ DEFAULT_PRODUCT_DISPLAY_NAMES = {
     "CAPCUT_30D": "CAPCUT PRO 30D",
     "GEMINI": "Gemini AI Pro",
     "GROK_75K": "SUPERGROK AI",
+    "OFFICE_2024_LIFETIME": "Microsoft Office LTSC 2024 Professional Plus",
     "CHATGPT_SHARED": "ChatGPT Plus dùng chung",
 }
 EXPECTED_PRODUCT_TERMS = {
@@ -53,6 +54,7 @@ EXPECTED_PRODUCT_TERMS = {
     "CAPCUT_30D": {"price_vnd": 45000, "warranty_days": 30},
     "CHATGPT_SHARED": {"price_vnd": 45000, "warranty_days": 7},
     "GROK_75K": {"price_vnd": 75000, "warranty_days": 7},
+    "OFFICE_2024_LIFETIME": {"price_vnd": 198000, "warranty_days": 365, "duration": "LIFETIME"},
 }
 ALLOWED_PRODUCT_CODES = {
     "CHATGPT",
@@ -60,6 +62,7 @@ ALLOWED_PRODUCT_CODES = {
     "GEMINI",
     "GROK",
     "GROK_75K",
+    "OFFICE_2024_LIFETIME",
     "CAPCUT",
     "CAPCUT_7D",
     "CAPCUT_12M",
@@ -90,18 +93,23 @@ def text(value: Any) -> str:
     return "" if value is None else str(value).strip()
 
 
-def validate_credential(value: Any) -> str:
+def validate_credential(value: Any, product_code: str = "") -> str:
     credential = text(value)
     parts = credential.split("|")
+    if product_code == "OFFICE_2024_LIFETIME":
+        if len(parts) != 2 or any(not part.strip() for part in parts):
+            raise ValueError("OFFICE_2024_LIFETIME credential_text must be PRODUCT-KEY|Office-2024-LTSC")
+        return credential
     if len(parts) not in {2, 3, 4} or any(not part.strip() for part in parts):
         raise ValueError("credential_text must be email|password, email|password|2fa, or email|password|2fa|recovery_email")
     return credential
 
 
 def credential_from_row(row: dict[str, Any]) -> str:
+    product_code = text(row.get("product_code")).upper()
     credential_text = text(row.get("credential_text"))
     if credential_text:
-        return validate_credential(credential_text)
+        return validate_credential(credential_text, product_code)
 
     email = text(row.get("email"))
     password = text(row.get("password"))
@@ -114,7 +122,7 @@ def credential_from_row(row: dict[str, Any]) -> str:
         parts.append(two_factor)
     if recovery_email:
         parts.append(recovery_email)
-    return validate_credential("|".join(parts))
+    return validate_credential("|".join(parts), product_code)
 
 
 def validate_product_code(product_code: str) -> None:
@@ -129,11 +137,18 @@ def validate_product_terms(product_code: str, row: dict[str, Any]) -> None:
         return
     price_vnd = parse_int(row.get("price_vnd"), 0)
     warranty_days = parse_int(row.get("warranty_days"), 0)
-    if price_vnd != expected["price_vnd"] or warranty_days != expected["warranty_days"]:
+    duration = text(row.get("duration")).upper().replace(" ", "")
+    expected_duration = text(expected.get("duration")).upper().replace(" ", "")
+    if (
+        price_vnd != expected["price_vnd"]
+        or warranty_days != expected["warranty_days"]
+        or (expected_duration and duration != expected_duration)
+    ):
         raise ValueError(
             f"{product_code} requires price_vnd={expected['price_vnd']} "
-            f"and warranty_days={expected['warranty_days']}; got price_vnd={price_vnd}, "
-            f"warranty_days={warranty_days}"
+            f"and warranty_days={expected['warranty_days']}"
+            f"{f' and duration={expected_duration}' if expected_duration else ''}; "
+            f"got price_vnd={price_vnd}, warranty_days={warranty_days}, duration={duration}"
         )
 
 
@@ -210,6 +225,12 @@ def canonical_price_vnd(product_code: str, row: dict[str, Any]) -> int:
     return parse_int(row.get("price_vnd"), 0)
 
 
+def product_category(product_code: str, row: dict[str, Any]) -> str:
+    if product_code == "OFFICE_2024_LIFETIME":
+        return text(row.get("category")) or "SOFTWARE"
+    return "account"
+
+
 def parse_int(value: Any, default: int = 0) -> int:
     raw = text(value)
     if not raw:
@@ -227,7 +248,7 @@ def sync_product_metadata(
     connection.execute(
         """
         UPDATE products
-        SET name = ?, updated_at = ?, category = 'account', account_type = ?,
+        SET name = ?, updated_at = ?, category = ?, account_type = ?,
             duration = ?, price_vnd = ?, warranty_days = ?, note = ?,
             category_key = ?, product_group = 'account', active = 1, delivery_type = 'account'
         WHERE id = ?
@@ -235,6 +256,7 @@ def sync_product_metadata(
         (
             product_display_name(product_code, row),
             now,
+            product_category(product_code, row),
             text(row.get("account_type")),
             text(row.get("duration")),
             canonical_price_vnd(product_code, row),
@@ -264,7 +286,7 @@ def ensure_product(
             (id, code, name, active, delivery_type, created_at, updated_at,
              category, account_type, duration, price_vnd, warranty_days, note,
              category_key, product_group)
-        VALUES (?, ?, ?, 1, 'account', ?, ?, 'account', ?, ?, ?, ?, ?, ?, 'account')
+        VALUES (?, ?, ?, 1, 'account', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'account')
         """,
         (
             product_id,
@@ -272,6 +294,7 @@ def ensure_product(
             product_display_name(product_code, row),
             now,
             now,
+            product_category(product_code, row),
             text(row.get("account_type")),
             text(row.get("duration")),
             canonical_price_vnd(product_code, row),
@@ -392,7 +415,7 @@ def available_stock_for_code(connection: sqlite3.Connection, product_code: str) 
 
 
 def should_use_canonical_product(product_code: str, row: dict[str, Any]) -> bool:
-    return product_code.startswith("CAPCUT") or product_code in {"CHATGPT_SHARED", "GROK_75K"} or bool(row.get("__sheet_product"))
+    return product_code.startswith("CAPCUT") or product_code in {"CHATGPT_SHARED", "GROK_75K", "OFFICE_2024_LIFETIME"} or bool(row.get("__sheet_product"))
 
 
 def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE, mode: str = "replace") -> dict[str, Any]:

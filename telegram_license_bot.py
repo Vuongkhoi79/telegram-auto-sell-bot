@@ -153,6 +153,7 @@ PRODUCT_ORDER = [
     "GAMMA AI",
     "GEMINI AI",
     "SUPERGROK AI",
+    "OFFICE_2024_LIFETIME",
     "HEYGEN AI",
     "HIGGFIELD",
     "KLING",
@@ -172,6 +173,7 @@ CATALOG_DISPLAY_NAMES = {
     "CHATGPT_SHARED": "ChatGPT Plus dùng chung",
     "GEMINI": "GEMINI AI",
     "GROK_75K": "SUPERGROK AI",
+    "OFFICE_2024_LIFETIME": "Microsoft Office LTSC 2024 Professional Plus",
 }
 
 # UI callback keys stay unchanged. Add aliases here when extending the catalog.
@@ -216,6 +218,9 @@ TELEGRAM_PRODUCT_CODE_MAP = {
     "GROK SUPER": "GROK_75K",
     "SUPERGROK AI": "GROK_75K",
     "GROK_75K": "GROK_75K",
+    "MICROSOFT OFFICE LTSC 2024 PROFESSIONAL PLUS": "OFFICE_2024_LIFETIME",
+    "OFFICE": "OFFICE_2024_LIFETIME",
+    "OFFICE_2024_LIFETIME": "OFFICE_2024_LIFETIME",
     "HEYGEN": "HEYGEN-1M-PRIVATE",
     "HEYGEN AI": "HEYGEN-1M-PRIVATE",
     "HIGGSFIELD": "HIGGSFIELD-1M-PRIVATE",
@@ -825,6 +830,8 @@ def _menu_stock_product_code(product_key: str) -> str | None:
         return "GEMINI"
     if normalized_key.startswith("GROK") or normalized_key.startswith("SUPERGROK"):
         return "GROK_75K"
+    if normalized_key.startswith("OFFICE") or normalized_key.startswith("MICROSOFT OFFICE"):
+        return "OFFICE_2024_LIFETIME"
     if normalized_key.startswith("CAPCUT_7D") or "CAPCUT PRO 7D" in normalized_key or "CAPCUT PRO 7 NGAY" in normalized_key or "CAPCUT PRO 7 NGÀY" in normalized_key:
         return "CAPCUT_7D"
     if normalized_key.startswith("CAPCUT_30D") or "CAPCUT PRO 30D" in normalized_key or "CAPCUT PRO 30 NGAY" in normalized_key or "CAPCUT PRO 30 NGÀY" in normalized_key:
@@ -3274,18 +3281,26 @@ def _quantity_text(product_name: str, package_name: str) -> str:
     available_count = int(package["available_count"]) if package else 0
     display_name = str(package["display_name"]) if package else package_name
     warranty_days = 0
+    duration = ""
     if package:
         try:
             product = StoreRepository(_resolve_store_db_path()).get_product_details(str(package["product_code"]))
-            warranty_days = int(product.get("warranty_days", 0) or 0) if product else 0
+            if product:
+                warranty_days = int(product.get("warranty_days", 0) or 0)
+                duration = str(product.get("duration", "") or "")
         except (OSError, RuntimeError, sqlite3.Error):
             warranty_days = 0
-    warranty_text = f"{warranty_days} ngày" if warranty_days else "Theo từng gói"
+            duration = ""
+    duration_text = "Trọn đời" if duration.strip().upper() == "LIFETIME" else duration.strip()
+    duration_line = f"⏳ Thời hạn: {duration_text}\n" if duration_text else ""
+    warranty_text = "12 tháng" if warranty_days == 365 else (f"{warranty_days} ngày" if warranty_days else "Theo từng gói")
+    title = display_name if str(package.get("product_code", "") if package else "").upper() == "OFFICE_2024_LIFETIME" else _clean_product_title(display_name)
     return (
-        f"💎 {_clean_product_title(display_name)}"
+        f"💎 {title}"
         f"{_shop_separator()}"
         f"💰 Giá: {_format_vnd(unit_price)}đ\n"
         f"📦 Kho: {available_count}\n"
+        f"{duration_line}"
         f"🛡 Bảo hành: {warranty_text}\n"
         "Giao ngay sau thanh toán"
         f"{_shop_separator()}"

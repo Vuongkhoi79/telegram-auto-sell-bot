@@ -20,6 +20,7 @@ CANONICAL_PRODUCT_CODES = {
     "GAMMA",
     "GEMINI",
     "GROK_75K",
+    "OFFICE_2024_LIFETIME",
     "HEYGEN",
     "HIGGSFIELD",
     "KLING",
@@ -48,6 +49,8 @@ def canonical_product_code(product_code: str) -> str:
         return "CHATGPT"
     if normalized.startswith("GRO") or normalized.startswith("SUPERGROK"):
         return "GROK_75K"
+    if normalized.startswith("OFFICE") or normalized.startswith("MICROSOFT OFFICE"):
+        return "OFFICE_2024_LIFETIME"
     if normalized.startswith("CUR"):
         return "CURSOR"
     if normalized.startswith("CLA"):
