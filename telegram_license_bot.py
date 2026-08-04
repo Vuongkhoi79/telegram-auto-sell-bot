@@ -421,6 +421,15 @@ def _format_vnd(amount: int) -> str:
     return f"{int(amount):,}".replace(",", ".")
 
 
+def _format_warranty_text(warranty_days: int) -> str:
+    days = int(warranty_days or 0)
+    if days == 365:
+        return "12 tháng"
+    if days > 0:
+        return f"{days} ngày"
+    return "Theo từng gói"
+
+
 def _shop_separator() -> str:
     return "\n\n"
 
@@ -3144,7 +3153,7 @@ def _product_detail_text(product_name: str, available: bool, stock: int) -> str:
         warranty_days = int(product.get("warranty_days", 0) or 0)
     status_text = "Còn hàng" if available else "Hết hàng"
     price_text = f"{_format_vnd(min(prices))}đ" if prices else "Liên hệ"
-    warranty_text = f"{warranty_days} ngày" if warranty_days else "Theo từng gói"
+    warranty_text = _format_warranty_text(warranty_days)
     display_name = _catalog_display_name(product_name)
     return (
         f"💎 {_clean_product_title(display_name)}"
@@ -3166,6 +3175,19 @@ def _product_detail_keyboard(product_name: str, available: bool) -> InlineKeyboa
     return InlineKeyboardMarkup([[InlineKeyboardButton("Quay lại sản phẩm", callback_data="menu_products")]])
 
 
+def _package_warranty_button_line(package: dict[str, object]) -> str:
+    if str(package.get("product_code", "") or "").strip().upper() != "OFFICE_2024_LIFETIME":
+        return ""
+    try:
+        product = StoreRepository(_resolve_store_db_path()).get_product_details(str(package.get("product_code", "")))
+    except (OSError, RuntimeError, sqlite3.Error):
+        product = None
+    if not product:
+        return ""
+    warranty_days = int(product.get("warranty_days", 0) or 0)
+    return f"\n🛡 Bảo hành: {_format_warranty_text(warranty_days)}" if warranty_days else ""
+
+
 def _package_keyboard(product_name: str) -> InlineKeyboardMarkup:
     rows = []
     packages = _packages_for_product(product_name)
@@ -3182,7 +3204,10 @@ def _package_keyboard(product_name: str) -> InlineKeyboardMarkup:
         else:
             rows.extend(
                 [InlineKeyboardButton(
-                    f"🎁 {package['display_name']}\n💰 {_format_vnd(int(package['price_vnd']))}đ\n📦 Còn: {int(package['available_count'] or 0)}",
+                    f"🎁 {package['display_name']}\n"
+                    f"💰 {_format_vnd(int(package['price_vnd']))}đ\n"
+                    f"📦 Còn: {int(package['available_count'] or 0)}"
+                    f"{_package_warranty_button_line(package)}",
                     callback_data=f"pkg:{product_code}:{str(package.get('package_code') or package['product_code']).upper()}",
                 )]
                 for package in packages
@@ -3293,7 +3318,7 @@ def _quantity_text(product_name: str, package_name: str) -> str:
             duration = ""
     duration_text = "Trọn đời" if duration.strip().upper() == "LIFETIME" else duration.strip()
     duration_line = f"⏳ Thời hạn: {duration_text}\n" if duration_text else ""
-    warranty_text = "12 tháng" if warranty_days == 365 else (f"{warranty_days} ngày" if warranty_days else "Theo từng gói")
+    warranty_text = _format_warranty_text(warranty_days)
     title = display_name if str(package.get("product_code", "") if package else "").upper() == "OFFICE_2024_LIFETIME" else _clean_product_title(display_name)
     return (
         f"💎 {title}"
@@ -3308,6 +3333,28 @@ def _quantity_text(product_name: str, package_name: str) -> str:
     )
 
 
+def _order_product_details(order: dict[str, object]) -> dict[str, object] | None:
+    product_code = str(
+        order.get("product_code")
+        or order.get("package_code")
+        or order.get("product_id")
+        or order.get("product_name")
+        or ""
+    ).strip()
+    if not product_code:
+        return None
+    try:
+        return StoreRepository(_resolve_store_db_path()).get_product_details(product_code)
+    except (OSError, RuntimeError, sqlite3.Error):
+        return None
+
+
+def _order_warranty_line(order: dict[str, object]) -> str:
+    product = _order_product_details(order)
+    warranty_days = int((product or {}).get("warranty_days", 0) or 0)
+    return f"🛡 Bảo hành\n{_format_warranty_text(warranty_days)}" if warranty_days else ""
+
+
 def _order_payment_text(order: dict[str, object]) -> str:
     balance = 0
     gross_amount = int(order.get("gross_amount", _order_payable_amount(order)) or 0)
@@ -3316,6 +3363,8 @@ def _order_payment_text(order: dict[str, object]) -> str:
         f"Giá bán: {_format_vnd(gross_amount)}đ",
     ]
     amount_lines.append(f"Cần thanh toán: {_format_vnd(payable_amount)}đ")
+    warranty_line = _order_warranty_line(order)
+    warranty_section = f"{_shop_separator()}{warranty_line}" if warranty_line else ""
     return (
         "🧾 Đơn hàng"
         f"{_shop_separator()}"
@@ -3327,6 +3376,7 @@ def _order_payment_text(order: dict[str, object]) -> str:
         f"{_shop_separator()}"
         "📦 Số lượng\n"
         f"{order.get('quantity', '')}"
+        f"{warranty_section}"
         f"{_shop_separator()}"
         f"💰 Thanh toán\n{'\n'.join(amount_lines)}"
         f"{_shop_separator()}"
@@ -3354,12 +3404,15 @@ def _qr_caption(order: dict[str, object], payment_service: PaymentService) -> st
         f"Giá bán: {_format_vnd(gross_amount)}đ",
     ]
     amount_lines.append(f"Cần thanh toán: {_format_vnd(payable_amount)}đ")
+    warranty_line = _order_warranty_line(order)
+    warranty_text = f"{warranty_line}\n" if warranty_line else ""
     return (
         "🏦 Chuyển khoản QR\n\n"
         "💰 Thanh toán:\n"
         + "\n".join(amount_lines)
         + "\n"
-        f"🏦 Ngân hàng: {payment_service.config.bank_name}\n"
+        + warranty_text
+        + f"🏦 Ngân hàng: {payment_service.config.bank_name}\n"
         f"Tài khoản: {payment_service.config.bank_account_name}\n"
         f"STK: {payment_service.config.bank_account}\n"
         f"Nội dung: {order.get('order_id', '')}\n\n"

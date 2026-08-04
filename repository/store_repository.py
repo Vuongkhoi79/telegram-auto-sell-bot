@@ -87,6 +87,10 @@ ACCOUNT_PRODUCT_CODE_ALIASES: dict[str, tuple[str, ...]] = {
     "GROK SUPER": ("GROK_75K",),
     "SUPERGROK AI": ("GROK_75K",),
     "GROK_75K": ("GROK SUPER", "SUPERGROK AI"),
+    "OFFICE": ("OFFICE_2024_LIFETIME",),
+    "MICROSOFT OFFICE": ("OFFICE_2024_LIFETIME",),
+    "MICROSOFT OFFICE LTSC 2024 PROFESSIONAL PLUS": ("OFFICE_2024_LIFETIME",),
+    "OFFICE_2024_LIFETIME": ("OFFICE", "MICROSOFT OFFICE", "MICROSOFT OFFICE LTSC 2024 PROFESSIONAL PLUS"),
     "HEYGEN": ("HEYGEN-1M-PRIVATE",),
     "HEYGEN AI": ("HEYGEN-1M-PRIVATE",),
     "HIGGFIELD": ("HIGGSFIELD-1M-PRIVATE",),
@@ -628,6 +632,8 @@ class StoreRepository:
                                 THEN 'CAPCUT_7D'
                             WHEN UPPER(p.code) = 'GROK-SUPER-1M-PRIVATE'
                                 THEN 'GROK'
+                            WHEN UPPER(p.code) = ?
+                                THEN UPPER(p.code)
                             ELSE UPPER(COALESCE(NULLIF(p.category_key, ''), NULLIF(p.category, ''), p.code))
                         END AS menu_code,
                         CASE
@@ -655,7 +661,15 @@ class StoreRepository:
                 HAVING available_count > 0 OR p.price_vnd > 0
                 ORDER BY p.menu_order, p.name COLLATE NOCASE, p.code
                 """,
-                (category_key.upper(), category_key.upper(), category_key.upper(), category_key.upper(), product_group, category_key.upper()),
+                (
+                    category_key.upper(),
+                    category_key.upper(),
+                    category_key.upper(),
+                    category_key.upper(),
+                    category_key.upper(),
+                    product_group,
+                    category_key.upper(),
+                ),
             ).fetchall()
         return [{**dict(row), "available_count": int(row["available_count"] or 0)} for row in rows]
 
