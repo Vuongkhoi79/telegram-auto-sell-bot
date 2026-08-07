@@ -38,19 +38,22 @@ OPTIONAL_COLUMNS = (
 IMPORT_COLUMNS = tuple(dict.fromkeys((*REQUIRED_COLUMNS, *OPTIONAL_COLUMNS)))
 SKIPPED_SHEET_NAMES = {"README", "HƯỚNG DẪN", "HUONG DAN", "TEMPLATE"}
 DEFAULT_PRODUCT_DISPLAY_NAMES = {
-    "CAPCUT": "CAPCUT PRO 12M",
+    "CAPCUT": "CAPCUT PRO 12 tháng",
     "CAPCUT_7D": "CAPCUT PRO 7 ngay",
-    "CAPCUT_12M": "CAPCUT PRO 12M",
-    "CAPCUT_30D": "CAPCUT PRO 30D",
+    "CAPCUT_365D": "CAPCUT PRO 12 tháng",
+    "CAPCUT_12M": "CAPCUT PRO 12 tháng",
+    "CAPCUT_60D": "CAPCUT PRO 60 ngay",
+    "CAPCUT_30D": "CAPCUT PRO 30 ngay",
     "GEMINI": "Gemini AI Pro",
     "GROK_75K": "SUPERGROK AI",
     "OFFICE_2024_LIFETIME": "Microsoft Office LTSC 2024 Professional Plus",
     "CHATGPT_SHARED": "ChatGPT Plus dùng chung",
 }
 EXPECTED_PRODUCT_TERMS = {
-    "CAPCUT": {"price_vnd": 400000, "warranty_days": 365},
+    "CAPCUT": {"price_vnd": 400000, "warranty_days": 60, "duration": "365D"},
     "CAPCUT_7D": {"price_vnd": 8000, "warranty_days": 7},
-    "CAPCUT_12M": {"price_vnd": 400000, "warranty_days": 365},
+    "CAPCUT_365D": {"price_vnd": 400000, "warranty_days": 60, "duration": "365D"},
+    "CAPCUT_12M": {"price_vnd": 400000, "warranty_days": 60, "duration": "365D"},
     "CAPCUT_30D": {"price_vnd": 45000, "warranty_days": 30},
     "CHATGPT_SHARED": {"price_vnd": 45000, "warranty_days": 7},
     "GROK_75K": {"price_vnd": 75000, "warranty_days": 7},
@@ -65,7 +68,9 @@ ALLOWED_PRODUCT_CODES = {
     "OFFICE_2024_LIFETIME",
     "CAPCUT",
     "CAPCUT_7D",
+    "CAPCUT_365D",
     "CAPCUT_12M",
+    "CAPCUT_60D",
     "CAPCUT_30D",
     "CLAUDE",
     "CURSOR",
@@ -161,7 +166,7 @@ def normalize_import_product_code(product_code: str, row: dict[str, Any]) -> str
         return "CAPCUT_7D"
     if normalized == "CAPCUT" and duration in {"30D", "30DAY", "30DAYS", "30NGAY", "30NGÃ€Y"} and price_vnd == 45000 and warranty_days == 30:
         return "CAPCUT_30D"
-    if normalized in {"GROK", "GROK SUPER", "SUPERGROK AI"} and duration in {"30D", "30DAY", "30DAYS", "30NGAY"} and price_vnd == 75000 and warranty_days == 7:
+    if normalized in {"GROK", "GROK SUPER", "SUPERGROK AI"} and duration in {"30D", "30DAY", "30DAYS", "30NGAY", "30NGÃ€Y"} and price_vnd == 75000 and warranty_days == 7:
         return "GROK_75K"
     return normalized
 
@@ -177,7 +182,7 @@ def canonical_product_code(product_code: str) -> str:
 
 
 def product_code_candidates(product_code: str) -> list[str]:
-    if product_code in {"CAPCUT_12M", "CAPCUT_30D", "CAPCUT_7D"}:
+    if product_code in {"CAPCUT_365D", "CAPCUT_12M", "CAPCUT_60D", "CAPCUT_30D", "CAPCUT_7D"}:
         return [product_code]
     candidates = [product_code]
     for alias in ACCOUNT_PRODUCT_CODE_ALIASES.get(product_code, ()):

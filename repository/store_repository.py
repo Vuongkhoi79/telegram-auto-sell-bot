@@ -35,10 +35,10 @@ CATALOG_COLUMNS = {
 }
 
 CANONICAL_CATALOG_PRODUCTS = {
-    "CAPCUT": {"name": "CAPCUT PRO 365 ngay", "price_vnd": 400000},
+    "CAPCUT": {"name": "CAPCUT PRO 12 tháng", "price_vnd": 400000},
     "CAPCUT_7D": {"name": "CAPCUT PRO 7 ngay", "price_vnd": 8000},
-    "CAPCUT_365D": {"name": "CAPCUT PRO 365 ngay", "price_vnd": 400000},
-    "CAPCUT_12M": {"name": "CAPCUT PRO 365 ngay", "price_vnd": 400000},
+    "CAPCUT_365D": {"name": "CAPCUT PRO 12 tháng", "price_vnd": 400000},
+    "CAPCUT_12M": {"name": "CAPCUT PRO 12 tháng", "price_vnd": 400000},
     "CAPCUT_30D": {"name": "CAPCUT PRO 30 ngay", "price_vnd": 45000},
     "GEMINI": {"name": "Gemini AI Pro", "price_vnd": 70000},
     "GROK_75K": {"name": "SUPERGROK AI", "price_vnd": 75000},

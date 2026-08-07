@@ -132,7 +132,7 @@ CAPCUT_PACKAGE_ORDER = (
     ("CAPCUT_7D", "CAPCUT PRO 7 ngày"),
     ("CAPCUT_30D", "CAPCUT PRO 30 ngày"),
     ("CAPCUT_60D", "CAPCUT PRO 60 ngày"),
-    ("CAPCUT_365D", "CAPCUT PRO 365 ngày"),
+    ("CAPCUT_365D", "CAPCUT PRO 12 tháng"),
 )
 CAPCUT_PACKAGE_FALLBACK_PRICES = {
     "CAPCUT_7D": 8000,
@@ -166,8 +166,8 @@ PRODUCT_ORDER = [
 CATALOG_DISPLAY_NAMES = {
     "CAPCUT": "CAPCUT PRO",
     "CAPCUT_7D": "CAPCUT PRO 7 ngay",
-    "CAPCUT_365D": "CAPCUT PRO 365 ngay",
-    "CAPCUT_12M": "CAPCUT PRO 365 ngay",
+    "CAPCUT_365D": "CAPCUT PRO 12 tháng",
+    "CAPCUT_12M": "CAPCUT PRO 12 tháng",
     "CAPCUT_60D": "CAPCUT PRO 60 ngay",
     "CAPCUT_30D": "CAPCUT PRO 30 ngay",
     "CHATGPT_SHARED": "ChatGPT Plus dùng chung",

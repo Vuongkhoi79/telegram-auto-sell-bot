@@ -444,7 +444,7 @@ class StoreRepositoryTest(unittest.TestCase):
             sheet.append(REQUIRED_COLUMNS)
             for credential in credentials:
                 if sheet_name == "CAPCUT":
-                    sheet.append([sheet_name, "AI", sheet_name, "personal", "365D", 400000, 365, credential, "", 1])
+                    sheet.append([sheet_name, "AI", sheet_name, "personal", "365D", 400000, 60, credential, "", 1])
                 else:
                     sheet.append([sheet_name, "AI", sheet_name, "personal", "30D", 100, 7, credential, "", 1])
         workbook.save(workbook_path)
@@ -456,7 +456,7 @@ class StoreRepositoryTest(unittest.TestCase):
         self.assertEqual(report["stock"], {"CAPCUT": 2, "GEMINI": 2})
         with closing(sqlite3.connect(self.db_path)) as connection:
             capcut = connection.execute("SELECT code, name, category, delivery_type, price_vnd FROM products WHERE code = 'CAPCUT'").fetchone()
-        self.assertEqual(capcut, ("CAPCUT", "CAPCUT PRO 365 ngay", "account", "account", 400000))
+        self.assertEqual(capcut, ("CAPCUT", "CAPCUT PRO 12 tháng", "account", "account", 400000))
 
     def test_chatgpt_shared_imports_slots_and_delivers_login_only(self) -> None:
         workbook_path = Path(self.temp_dir.name) / "chatgpt-shared.xlsx"
@@ -595,7 +595,7 @@ class StoreRepositoryTest(unittest.TestCase):
         sheet = workbook.active
         sheet.title = "CAPCUT"
         sheet.append(REQUIRED_COLUMNS)
-        sheet.append(["", "AI", "CapCut Pro", "personal", "365D", 400000, 365, "capcut@example.com|pass", "", 1])
+        sheet.append(["", "AI", "CapCut Pro", "personal", "365D", 400000, 60, "capcut@example.com|pass", "", 1])
         workbook.save(workbook_path)
         workbook.close()
 
@@ -611,7 +611,7 @@ class StoreRepositoryTest(unittest.TestCase):
         sheet.title = "CAPCUT"
         sheet.append(REQUIRED_COLUMNS)
         for credential in ("one@example.com|pass", "two@example.com|pass", "three@example.com|pass"):
-            sheet.append(["CAPCUT", "AI", "CAPCUT", "personal", "365D", 400000, 365, credential, "", 1])
+            sheet.append(["CAPCUT", "AI", "CAPCUT", "personal", "365D", 400000, 60, credential, "", 1])
         workbook.save(workbook_path)
         workbook.close()
 
@@ -639,7 +639,7 @@ class StoreRepositoryTest(unittest.TestCase):
         capcut = workbook.create_sheet("CAPCUT")
         capcut.append(REQUIRED_COLUMNS)
         for index in range(3):
-            capcut.append(["CAPCUT", "AI", "CAPCUT PRO", "personal", "365D", 400000, 365, f"capcut{index}@example.com|pass", "", 1])
+            capcut.append(["CAPCUT", "AI", "CAPCUT PRO", "personal", "365D", 400000, 60, f"capcut{index}@example.com|pass", "", 1])
         workbook.save(workbook_path)
         workbook.close()
 
@@ -672,7 +672,7 @@ class StoreRepositoryTest(unittest.TestCase):
             prices = dict(connection.execute("SELECT code, price_vnd FROM products WHERE code IN ('GEMINI', 'CAPCUT')").fetchall())
             names = dict(connection.execute("SELECT code, name FROM products WHERE code IN ('GEMINI', 'CAPCUT')").fetchall())
         self.assertEqual(prices["GEMINI"], 70000)
-        self.assertEqual(names["CAPCUT"], "CAPCUT PRO 365 ngay")
+        self.assertEqual(names["CAPCUT"], "CAPCUT PRO 12 tháng")
 
         previous_store_db_path = os.environ.get("STORE_DB_PATH")
         previous_make_order_id = bot._make_order_id
@@ -693,7 +693,7 @@ class StoreRepositoryTest(unittest.TestCase):
             self.assertIn("🔴 CAPCUT PRO 7 ngày - 8.000đ [ Hết]", capcut_package_buttons)
             self.assertIn("🔴 CAPCUT PRO 30 ngày - 45.000đ [ Hết]", capcut_package_buttons)
             self.assertIn("🔴 CAPCUT PRO 60 ngày - 90.000đ [ Hết]", capcut_package_buttons)
-            self.assertIn("🟢 CAPCUT PRO 365 ngày - 400.000đ [3]", capcut_package_buttons)
+            self.assertIn("🟢 CAPCUT PRO 12 tháng - 400.000đ [3]", capcut_package_buttons)
             capcut_package_callbacks = [button.callback_data for row in bot._package_keyboard("CAPCUT PRO").inline_keyboard for button in row]
             self.assertIn("pkg:CAPCUT:CAPCUT_7D", capcut_package_callbacks)
             self.assertIn("pkg:CAPCUT:CAPCUT_30D", capcut_package_callbacks)
@@ -866,7 +866,7 @@ class StoreRepositoryTest(unittest.TestCase):
                     ("CATALOG-CAPCUT", "CAPCUT PRO"),
                     ("CHATGPT", "CHATGPT"),
                     ("GEMINI", "Gemini AI Pro"),
-                    ("CAPCUT", "CAPCUT PRO 365 ngay"),
+                    ("CAPCUT", "CAPCUT PRO 12 tháng"),
                 ):
                     connection.execute(
                         """
