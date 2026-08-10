@@ -13,6 +13,7 @@ import sqlite3
 import sys
 from collections import Counter, defaultdict
 from contextlib import closing
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,9 @@ from scripts.import_inventory import credential_from_row, normalize_import_produ
 DEFAULT_DATABASE = Path("/var/data/store.db")
 TARGET_PRODUCT_CODE = "CAPCUT_30D"
 EXPECTED_CREDENTIAL_COUNT = 10
+VN_TZ = timezone(timedelta(hours=7))
+DELIVERY_COUNT_START_DATE = date(2026, 7, 30)
+DELIVERY_COUNT_END_DATE = date(2026, 8, 10)
 
 # SHA-256 of the full credentials from:
 # C:\Users\Admin\Desktop\Hàng nhập Bot\7.29.26_import_inventory_CAPCUT_PER_PRODUCT_FIXED.xlsx
@@ -235,7 +239,13 @@ def linked_order_rows(connection: sqlite3.Connection, inventory_item_id: str) ->
             {col("transaction_id", "transaction_id")},
             {col("created_at", "order_created_at")},
             {col("paid_at", "paid_at")},
-            {col("delivered_at", "order_delivered_at")}
+            {col("delivered_at", "order_delivered_at")},
+            {col("telegram_user_id", "telegram_user_id")},
+            {col("chat_id", "chat_id")},
+            {col("telegram_chat_id", "telegram_chat_id")},
+            {col("username", "username")},
+            {col("buyer_id", "buyer_id")},
+            {col("customer_id", "customer_id")}
         FROM order_inventory_items AS oi
         JOIN orders AS o ON o.id = oi.order_id
         WHERE oi.inventory_item_id = ?
@@ -243,6 +253,185 @@ def linked_order_rows(connection: sqlite3.Connection, inventory_item_id: str) ->
         """,
         (inventory_item_id,),
     ).fetchall()
+
+
+def parse_timestamp(value: object) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw or raw == "-":
+        return None
+    raw = raw.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def format_utc(value: object) -> str:
+    parsed = parse_timestamp(value)
+    if parsed is None:
+        return "-"
+    return parsed.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def format_vn(value: object) -> str:
+    parsed = parse_timestamp(value)
+    if parsed is None:
+        return "-"
+    return parsed.astimezone(VN_TZ).strftime("%Y-%m-%d %H:%M:%S UTC+7")
+
+
+def first_movement_by_action(
+    connection: sqlite3.Connection,
+    inventory_item_id: str,
+    actions: set[str],
+) -> sqlite3.Row | None:
+    for row in movement_rows(connection, inventory_item_id):
+        if str(row["action"] or "").lower() in actions:
+            return row
+    return None
+
+
+def movement_source(
+    connection: sqlite3.Connection,
+    inventory_item_id: str,
+    actions: set[str],
+) -> str:
+    row = first_movement_by_action(connection, inventory_item_id, actions)
+    if row is None:
+        return ""
+    return str(row["source"] or "")
+
+
+def movement_time(
+    connection: sqlite3.Connection,
+    inventory_item_id: str,
+    actions: set[str],
+) -> str:
+    row = first_movement_by_action(connection, inventory_item_id, actions)
+    if row is None:
+        return ""
+    return str(row["created_at"] or "")
+
+
+def buyer_label(order: sqlite3.Row | None) -> str:
+    if order is None:
+        return "-"
+    parts: list[str] = []
+    for key in ("telegram_user_id", "chat_id", "telegram_chat_id", "username", "buyer_id", "customer_id"):
+        value = str(order[key] or "").strip() if key in order.keys() else ""
+        if value:
+            parts.append(f"{key}={value}")
+    return " ".join(parts) or "-"
+
+
+def delivery_entries(
+    connection: sqlite3.Connection,
+    capcut_matches_by_fp: dict[str, list[sqlite3.Row]],
+) -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+    for embedded_fp in EMBEDDED_CREDENTIAL_FINGERPRINTS:
+        for row in capcut_matches_by_fp.get(embedded_fp, []):
+            inventory_item_id = str(row["inventory_item_id"])
+            status = str(row["status"] or "")
+            linked_orders = linked_order_rows(connection, inventory_item_id)
+            delivered_links = [
+                linked for linked in linked_orders if str(linked["link_state"] or "").lower() == "delivered"
+            ]
+            if not delivered_links and (status.lower() == "delivered" or str(row["delivered_at"] or "")):
+                delivered_links = linked_orders or [None]  # type: ignore[list-item]
+            for linked in delivered_links:
+                order_created_at = str(linked["order_created_at"] or "") if linked is not None else ""
+                order_delivered_at = str(linked["order_delivered_at"] or "") if linked is not None else ""
+                reserve_movement_at = movement_time(connection, inventory_item_id, {"reserve", "reserved"})
+                deliver_movement_at = movement_time(connection, inventory_item_id, {"deliver", "delivered"})
+                reserved_at = str(row["reserved_at"] or "") or reserve_movement_at or order_created_at
+                delivered_at = str(row["delivered_at"] or "") or order_delivered_at or deliver_movement_at
+                entries.append(
+                    {
+                        "fingerprint": embedded_fp,
+                        "fingerprint_short": short_fingerprint(embedded_fp),
+                        "inventory_item_id": inventory_item_id,
+                        "order_id": str(linked["order_id"] or "") if linked is not None else public_order_id(connection, row, "delivered"),
+                        "order_created_at": order_created_at,
+                        "reserved_at": reserved_at,
+                        "delivered_at": delivered_at,
+                        "product_code": str(row["product_code"] or ""),
+                        "quantity": str(linked["quantity"] or "") if linked is not None else "",
+                        "reserve_source": movement_source(connection, inventory_item_id, {"reserve", "reserved"}) or "order_inventory_items",
+                        "deliver_source": movement_source(connection, inventory_item_id, {"deliver", "delivered"}) or "order_inventory_items",
+                        "buyer": buyer_label(linked),
+                        "status": status or "-",
+                    }
+                )
+
+    far_future = datetime.max.replace(tzinfo=timezone.utc)
+    entries.sort(key=lambda item: parse_timestamp(item["delivered_at"]) or parse_timestamp(item["order_created_at"]) or far_future)
+    return entries
+
+
+def print_delivery_timeline(entries: list[dict[str, str]]) -> None:
+    print("delivery_timeline_chronological:")
+    if not entries:
+        print("  none")
+    for index, entry in enumerate(entries, start=1):
+        print(f"  delivery_{index}:")
+        print(f"    fingerprint={entry['fingerprint_short']}")
+        print(f"    inventory_item_id={entry['inventory_item_id']}")
+        print(f"    order_id={entry['order_id'] or '-'}")
+        print(f"    order_created_at_utc={format_utc(entry['order_created_at'])}")
+        print(f"    order_created_at_vn={format_vn(entry['order_created_at'])}")
+        print(f"    reserved_at_utc={format_utc(entry['reserved_at'])}")
+        print(f"    reserved_at_vn={format_vn(entry['reserved_at'])}")
+        print(f"    delivered_at_utc={format_utc(entry['delivered_at'])}")
+        print(f"    delivered_at_vn={format_vn(entry['delivered_at'])}")
+        print(f"    product_code={entry['product_code'] or '-'}")
+        print(f"    quantity={entry['quantity'] or '-'}")
+        print(f"    reserve_source={entry['reserve_source'] or '-'}")
+        print(f"    deliver_source={entry['deliver_source'] or '-'}")
+        print(f"    buyer_user={entry['buyer']}")
+        print(f"    status={entry['status']}")
+
+    print("delivery_timeline_table:")
+    print("  STT | Ngày giờ VN | Order ID | Fingerprint | Buyer/User | Status")
+    if not entries:
+        print("  none")
+    for index, entry in enumerate(entries, start=1):
+        print(
+            "  "
+            f"{index} | {format_vn(entry['delivered_at'])} | {entry['order_id'] or '-'} | "
+            f"{entry['fingerprint_short']} | {entry['buyer']} | {entry['status']}"
+        )
+
+    print("delivery_count_by_vn_date:")
+    counts: Counter[str] = Counter()
+    for entry in entries:
+        parsed = parse_timestamp(entry["delivered_at"])
+        if parsed is None:
+            continue
+        counts[parsed.astimezone(VN_TZ).date().isoformat()] += 1
+    current = DELIVERY_COUNT_START_DATE
+    while current <= DELIVERY_COUNT_END_DATE:
+        print(f"  {current.isoformat()}={counts[current.isoformat()]}")
+        current += timedelta(days=1)
+
+    print("latest_6_deliveries:")
+    latest_entries = entries[-6:]
+    if not latest_entries:
+        print("  none")
+    for index, entry in enumerate(latest_entries, start=1):
+        print(
+            f"  {index}. delivered_at_vn={format_vn(entry['delivered_at'])} "
+            f"delivered_at_utc={format_utc(entry['delivered_at'])} "
+            f"order_id={entry['order_id'] or '-'} "
+            f"fingerprint={entry['fingerprint_short']} "
+            f"inventory_item_id={entry['inventory_item_id']} "
+            f"buyer_user={entry['buyer']}"
+        )
+    print(f"delivery_timeline_count={len(entries)}")
+    print(f"latest_6_count={min(6, len(entries))}")
 
 
 def payment_summary(connection: sqlite3.Connection, order_row_id: str) -> str:
@@ -753,6 +942,7 @@ def main() -> int:
                             str(row["delivered_at"] or "-"),
                         )
                     )
+        print_delivery_timeline(delivery_entries(connection, capcut_matches_by_fp))
         cross_counts = print_cross_product_matches(cross_matches_by_fp)
         order_classifications = print_order_audit(connection, unique_delivered_order_ids, embedded_set)
 
