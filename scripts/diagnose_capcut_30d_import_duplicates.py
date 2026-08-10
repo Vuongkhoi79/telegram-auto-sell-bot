@@ -358,11 +358,144 @@ def print_available_stock_breakdown(
     return {"total": len(rows), "new_lot": new_lot_count, "old_lot": old_lot_count}
 
 
+def is_before_cutoff(value: str, cutoff: str) -> bool:
+    value = str(value or "").strip()
+    return bool(value and value < cutoff)
+
+
+def capcut_30d_rows_before_cutoff(
+    connection: sqlite3.Connection,
+    rows: list[sqlite3.Row],
+    cutoff: str,
+) -> list[tuple[str, sqlite3.Row, str]]:
+    result: list[tuple[str, sqlite3.Row, str]] = []
+    for row in rows:
+        if str(row["product_code"] or "").upper() != TARGET_PRODUCT_CODE:
+            continue
+        inventory_item_id = str(row["inventory_item_id"])
+        created_at = str(row["created_at"] or "")
+        item_imported_at = imported_at(connection, inventory_item_id, created_at)
+        earliest_known_at = min([value for value in (created_at, item_imported_at) if value] or [""])
+        if is_before_cutoff(earliest_known_at, cutoff):
+            result.append((fingerprint(str(row["secret_value"] or "")), row, item_imported_at))
+    return result
+
+
+def was_available_at_cutoff(connection: sqlite3.Connection, row: sqlite3.Row, cutoff: str) -> bool:
+    status = str(row["status"] or "")
+    if status == "available":
+        return True
+
+    reserved_at = str(row["reserved_at"] or "")
+    delivered_at = str(row["delivered_at"] or "")
+    disabled_at = str(row["disabled_at"] or "")
+
+    if status == "reserved":
+        return is_before_cutoff(str(row["created_at"] or ""), cutoff) and not is_before_cutoff(reserved_at, cutoff)
+    if status == "delivered":
+        if is_before_cutoff(delivered_at, cutoff):
+            return False
+        return is_before_cutoff(str(row["created_at"] or ""), cutoff)
+    if status == "disabled":
+        if is_before_cutoff(disabled_at, cutoff):
+            return False
+        return is_before_cutoff(str(row["created_at"] or ""), cutoff)
+
+    movements = movement_rows(connection, str(row["inventory_item_id"]))
+    for movement in movements:
+        action = str(movement["action"] or "")
+        movement_at = str(movement["created_at"] or "")
+        if action in {"reserve", "deliver", "disable"} and is_before_cutoff(movement_at, cutoff):
+            return False
+    return is_before_cutoff(str(row["created_at"] or ""), cutoff)
+
+
+def print_old_inventory_timeline(
+    connection: sqlite3.Connection,
+    old_rows: list[tuple[str, sqlite3.Row, str]],
+    embedded_set: set[str],
+    cutoff: str,
+) -> dict[str, int]:
+    print("old_inventory_before_cutoff:")
+    print(f"  cutoff={cutoff}")
+    status_counts: Counter[str] = Counter()
+    old_lot_remaining_available = 0
+    old_lot_sold = 0
+    old_lot_disabled = 0
+    old_lot_reserved = 0
+    available_at_cutoff = 0
+
+    if not old_rows:
+        print("  none")
+    for index, (row_fp, row, item_imported_at) in enumerate(old_rows, start=1):
+        inventory_item_id = str(row["inventory_item_id"])
+        status = str(row["status"] or "")
+        status_counts[status] += 1
+        first_movement = first_movement_summary(connection, inventory_item_id, str(row["created_at"] or ""))
+        belongs_to_embedded = row_fp in embedded_set
+        item_was_available_at_cutoff = was_available_at_cutoff(connection, row, cutoff)
+        if item_was_available_at_cutoff:
+            available_at_cutoff += 1
+        if not belongs_to_embedded:
+            if status == "available":
+                old_lot_remaining_available += 1
+            elif status == "delivered":
+                old_lot_sold += 1
+            elif status == "disabled":
+                old_lot_disabled += 1
+            elif status == "reserved":
+                old_lot_reserved += 1
+        delivered_order_id = (
+            order_links(connection, inventory_item_id)["delivered"]
+            or order_id_from_raw(connection, str(row["delivered_order_id_raw"] or ""))
+            or "-"
+        )
+        print(f"  old_item_{index}:")
+        print(f"    fingerprint={short_fingerprint(row_fp)}")
+        print(f"    inventory_item_id={inventory_item_id}")
+        print(f"    belongs_to_embedded_8_new_lot={'yes' if belongs_to_embedded else 'no'}")
+        print(f"    created_at={row['created_at'] or '-'}")
+        print(f"    imported_at={item_imported_at or '-'}")
+        print(f"    first_action={first_movement['action'] or '-'}")
+        print(f"    first_action_at={first_movement['created_at'] or '-'}")
+        print(f"    first_action_source={first_movement['source'] or '-'}")
+        print(f"    status={status or '-'}")
+        print(f"    available_at_cutoff={'yes' if item_was_available_at_cutoff else 'no'}")
+        print(f"    delivered_order_id={delivered_order_id}")
+        print(f"    delivered_at={row['delivered_at'] or '-'}")
+        print(f"    disabled_at={row['disabled_at'] or '-'}")
+
+    print("old_inventory_status_summary:")
+    print(f"  available={status_counts.get('available', 0)}")
+    print(f"  reserved={status_counts.get('reserved', 0)}")
+    print(f"  delivered={status_counts.get('delivered', 0)}")
+    print(f"  disabled={status_counts.get('disabled', 0)}")
+    print(f"  available_at_cutoff={available_at_cutoff}")
+    print("old_lot_not_in_embedded_8_summary:")
+    print(f"  currently_available={old_lot_remaining_available}")
+    print(f"  delivered={old_lot_sold}")
+    print(f"  reserved={old_lot_reserved}")
+    print(f"  disabled={old_lot_disabled}")
+    return {
+        "total": len(old_rows),
+        "available": status_counts.get("available", 0),
+        "reserved": status_counts.get("reserved", 0),
+        "delivered": status_counts.get("delivered", 0),
+        "disabled": status_counts.get("disabled", 0),
+        "available_at_cutoff": available_at_cutoff,
+        "old_lot_currently_available": old_lot_remaining_available,
+        "old_lot_delivered": old_lot_sold,
+        "old_lot_reserved": old_lot_reserved,
+        "old_lot_disabled": old_lot_disabled,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only CAPCUT_30D duplicate diagnostic.")
     parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE, help="Path to store.db")
     parser.add_argument("--excel", type=Path, default=None, help="Optional local Excel path to verify embedded fingerprints")
     parser.add_argument("--import-date", default=str(date.today()), help="Date prefix used to count import events, e.g. 2026-08-10")
+    parser.add_argument("--cutoff", default="2026-08-05T10:43:30+00:00", help="Cutoff for old CAPCUT_30D inventory timeline")
     args = parser.parse_args()
 
     if len(EMBEDDED_CREDENTIAL_FINGERPRINTS) != EXPECTED_CREDENTIAL_COUNT:
@@ -390,6 +523,7 @@ def main() -> int:
             if row_fp in embedded_set:
                 matches_by_fp[row_fp].append(row)
         available_rows = available_target_rows(inventory_rows)
+        old_rows = capcut_30d_rows_before_cutoff(connection, inventory_rows, args.cutoff)
 
         print("mode=read_only")
         print(f"database={database_path}")
@@ -424,6 +558,7 @@ def main() -> int:
                 if product_code.upper() != TARGET_PRODUCT_CODE:
                     product_mismatch[product_code] += 1
         available_breakdown = print_available_stock_breakdown(connection, available_rows, embedded_set)
+        old_timeline = print_old_inventory_timeline(connection, old_rows, embedded_set, args.cutoff)
 
     matched = sum(total_counts.get(status, 0) for status in ("available", "reserved", "delivered", "disabled"))
     print("summary:")
@@ -439,6 +574,12 @@ def main() -> int:
     print(f"  current_available_total={available_breakdown['total']}")
     print(f"  current_available_from_embedded_8_new_lot={available_breakdown['new_lot']}")
     print(f"  current_available_not_in_embedded_8_old_lot={available_breakdown['old_lot']}")
+    print(f"  old_inventory_before_cutoff_total={old_timeline['total']}")
+    print(f"  old_inventory_available_at_cutoff={old_timeline['available_at_cutoff']}")
+    print(f"  old_lot_not_in_embedded_8_currently_available={old_timeline['old_lot_currently_available']}")
+    print(f"  old_lot_not_in_embedded_8_delivered={old_timeline['old_lot_delivered']}")
+    print(f"  old_lot_not_in_embedded_8_reserved={old_timeline['old_lot_reserved']}")
+    print(f"  old_lot_not_in_embedded_8_disabled={old_timeline['old_lot_disabled']}")
     if product_mismatch:
         print("  product_mismatch=yes")
         for product_code, count in sorted(product_mismatch.items()):
