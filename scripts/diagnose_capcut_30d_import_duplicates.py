@@ -13,6 +13,7 @@ import sqlite3
 import sys
 from collections import Counter, defaultdict
 from contextlib import closing
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -115,6 +116,7 @@ def select_inventory_rows(connection: sqlite3.Connection) -> list[sqlite3.Row]:
     def col(name: str, alias: str) -> str:
         return f"i.{name} AS {alias}" if name in inventory_cols else f"'' AS {alias}"
 
+    order_by = "i.created_at, i.id" if "created_at" in inventory_cols else "i.id"
     query = f"""
         SELECT
             i.id AS inventory_item_id,
@@ -129,7 +131,7 @@ def select_inventory_rows(connection: sqlite3.Connection) -> list[sqlite3.Row]:
             {col("disabled_at", "disabled_at")}
         FROM inventory_items AS i
         JOIN products AS p ON p.id = i.product_id
-        ORDER BY p.code, i.created_at, i.id
+        ORDER BY p.code, {order_by}
     """
     return connection.execute(query).fetchall()
 
@@ -206,7 +208,50 @@ def imported_at(connection: sqlite3.Connection, inventory_item_id: str, created_
     return str((row or {})["imported_at"] or created_at or "")
 
 
-def print_match(connection: sqlite3.Connection, embedded_fp: str, rows: list[sqlite3.Row]) -> Counter[str]:
+def movement_rows(connection: sqlite3.Connection, inventory_item_id: str) -> list[sqlite3.Row]:
+    if not table_exists(connection, "inventory_movements"):
+        return []
+    movement_cols = table_columns(connection, "inventory_movements")
+    required = {"inventory_item_id", "created_at", "action"}
+    if not required.issubset(movement_cols):
+        return []
+
+    def col(name: str, alias: str) -> str:
+        return f"{name} AS {alias}" if name in movement_cols else f"'' AS {alias}"
+
+    query = f"""
+        SELECT
+            {col("action", "action")},
+            {col("created_at", "created_at")},
+            {col("source", "source")},
+            {col("order_id", "order_id")},
+            {col("admin_telegram_id", "admin_telegram_id")}
+        FROM inventory_movements
+        WHERE inventory_item_id = ?
+        ORDER BY created_at, rowid
+    """
+    return connection.execute(query, (inventory_item_id,)).fetchall()
+
+
+def first_movement_summary(connection: sqlite3.Connection, inventory_item_id: str, fallback_created_at: str) -> dict[str, str]:
+    rows = movement_rows(connection, inventory_item_id)
+    if not rows:
+        return {
+            "action": "",
+            "created_at": fallback_created_at,
+            "source": "",
+            "order_id": "",
+        }
+    first = rows[0]
+    return {
+        "action": str(first["action"] or ""),
+        "created_at": str(first["created_at"] or ""),
+        "source": str(first["source"] or ""),
+        "order_id": str(first["order_id"] or ""),
+    }
+
+
+def print_match(connection: sqlite3.Connection, embedded_fp: str, rows: list[sqlite3.Row], import_date: str) -> Counter[str]:
     print(f"credential fingerprint={short_fingerprint(embedded_fp)}")
     if not rows:
         print("  match=not_found")
@@ -229,13 +274,36 @@ def print_match(connection: sqlite3.Connection, embedded_fp: str, rows: list[sql
             or "-"
         )
         created_at = str(row["created_at"] or "")
+        inventory_item_id = str(row["inventory_item_id"])
+        first_movement = first_movement_summary(connection, inventory_item_id, created_at)
+        movements = movement_rows(connection, inventory_item_id)
+        import_events_on_date = [
+            movement for movement in movements
+            if str(movement["action"] or "") == "import" and str(movement["created_at"] or "").startswith(import_date)
+        ]
         print(f"  match_{index}:")
+        print(f"    inventory_item_id={inventory_item_id}")
         print(f"    product_code={row['product_code']}")
         print(f"    status={status or '-'}")
         print(f"    reserved_order_id={reserved_order_id}")
         print(f"    delivered_order_id={delivered_order_id}")
         print(f"    created_at={created_at or '-'}")
         print(f"    imported_at={imported_at(connection, str(row['inventory_item_id']), created_at) or '-'}")
+        print(f"    first_action={first_movement['action'] or '-'}")
+        print(f"    first_action_at={first_movement['created_at'] or '-'}")
+        print(f"    first_action_source={first_movement['source'] or '-'}")
+        print(f"    import_events_on_{import_date}={len(import_events_on_date)}")
+        if movements:
+            print("    movements:")
+            for movement_index, movement in enumerate(movements, start=1):
+                print(
+                    f"      {movement_index}. action={movement['action'] or '-'} "
+                    f"created_at={movement['created_at'] or '-'} "
+                    f"source={movement['source'] or '-'} "
+                    f"order_id={movement['order_id'] or '-'}"
+                )
+        else:
+            print("    movements=none")
         print(f"    in_any_order={'yes' if int(links['linked_order_count'] or 0) else 'no'}")
     return counts
 
@@ -244,6 +312,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only CAPCUT_30D duplicate diagnostic.")
     parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE, help="Path to store.db")
     parser.add_argument("--excel", type=Path, default=None, help="Optional local Excel path to verify embedded fingerprints")
+    parser.add_argument("--import-date", default=str(date.today()), help="Date prefix used to count import events, e.g. 2026-08-10")
     args = parser.parse_args()
 
     if len(EMBEDDED_CREDENTIAL_FINGERPRINTS) != EXPECTED_CREDENTIAL_COUNT:
@@ -284,10 +353,21 @@ def main() -> int:
 
         total_counts: Counter[str] = Counter()
         product_mismatch: Counter[str] = Counter()
+        matched_item_ids: list[str] = []
+        matched_created_today = 0
+        matched_import_events_today = 0
         for embedded_fp in EMBEDDED_CREDENTIAL_FINGERPRINTS:
             rows = matches_by_fp.get(embedded_fp, [])
-            total_counts.update(print_match(connection, embedded_fp, rows))
+            total_counts.update(print_match(connection, embedded_fp, rows, args.import_date))
             for row in rows:
+                matched_item_ids.append(str(row["inventory_item_id"]))
+                if str(row["created_at"] or "").startswith(args.import_date):
+                    matched_created_today += 1
+                matched_import_events_today += sum(
+                    1 for movement in movement_rows(connection, str(row["inventory_item_id"]))
+                    if str(movement["action"] or "") == "import"
+                    and str(movement["created_at"] or "").startswith(args.import_date)
+                )
                 product_code = str(row["product_code"] or "")
                 if product_code.upper() != TARGET_PRODUCT_CODE:
                     product_mismatch[product_code] += 1
@@ -300,6 +380,9 @@ def main() -> int:
     print(f"  delivered={total_counts.get('delivered', 0)}")
     print(f"  disabled={total_counts.get('disabled', 0)}")
     print(f"  not_found={total_counts.get('not_found', 0)}")
+    print(f"  matched_inventory_items={len(matched_item_ids)}")
+    print(f"  matched_created_on_{args.import_date}={matched_created_today}")
+    print(f"  matched_import_events_on_{args.import_date}={matched_import_events_today}")
     if product_mismatch:
         print("  product_mismatch=yes")
         for product_code, count in sorted(product_mismatch.items()):
