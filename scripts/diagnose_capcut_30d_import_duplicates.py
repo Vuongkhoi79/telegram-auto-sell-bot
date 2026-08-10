@@ -308,6 +308,56 @@ def print_match(connection: sqlite3.Connection, embedded_fp: str, rows: list[sql
     return counts
 
 
+def available_target_rows(rows: list[sqlite3.Row]) -> list[tuple[str, sqlite3.Row]]:
+    result: list[tuple[str, sqlite3.Row]] = []
+    for row in rows:
+        if str(row["product_code"] or "").upper() != TARGET_PRODUCT_CODE:
+            continue
+        if str(row["status"] or "").lower() != "available":
+            continue
+        result.append((fingerprint(str(row["secret_value"] or "")), row))
+    return result
+
+
+def print_available_stock_breakdown(
+    connection: sqlite3.Connection,
+    rows: list[tuple[str, sqlite3.Row]],
+    embedded_set: set[str],
+) -> dict[str, int]:
+    print("available_stock_breakdown:")
+    if not rows:
+        print("  none")
+        return {"total": 0, "new_lot": 0, "old_lot": 0}
+
+    new_lot_count = 0
+    old_lot_count = 0
+    for index, (row_fp, row) in enumerate(rows, start=1):
+        inventory_item_id = str(row["inventory_item_id"])
+        created_at = str(row["created_at"] or "")
+        first_movement = first_movement_summary(connection, inventory_item_id, created_at)
+        is_new_lot = row_fp in embedded_set
+        if is_new_lot:
+            new_lot_count += 1
+        else:
+            old_lot_count += 1
+        print(f"  available_{index}:")
+        print(f"    fingerprint={short_fingerprint(row_fp)}")
+        print(f"    inventory_item_id={inventory_item_id}")
+        print(f"    belongs_to_embedded_8_new_lot={'yes' if is_new_lot else 'no'}")
+        print(f"    product_code={row['product_code']}")
+        print(f"    status={row['status'] or '-'}")
+        print(f"    created_at={created_at or '-'}")
+        print(f"    imported_at={imported_at(connection, inventory_item_id, created_at) or '-'}")
+        print(f"    first_action={first_movement['action'] or '-'}")
+        print(f"    first_action_at={first_movement['created_at'] or '-'}")
+        print(f"    first_action_source={first_movement['source'] or '-'}")
+    print("available_stock_summary:")
+    print(f"  total_available={len(rows)}")
+    print(f"  belongs_to_embedded_8_new_lot={new_lot_count}")
+    print(f"  not_in_embedded_8_old_lot={old_lot_count}")
+    return {"total": len(rows), "new_lot": new_lot_count, "old_lot": old_lot_count}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only CAPCUT_30D duplicate diagnostic.")
     parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE, help="Path to store.db")
@@ -333,11 +383,13 @@ def main() -> int:
     with closing(sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)) as connection:
         connection.row_factory = sqlite3.Row
         stock = stock_summary(connection, TARGET_PRODUCT_CODE)
-        for row in select_inventory_rows(connection):
+        inventory_rows = select_inventory_rows(connection)
+        for row in inventory_rows:
             secret_value = str(row["secret_value"] or "")
             row_fp = fingerprint(secret_value)
             if row_fp in embedded_set:
                 matches_by_fp[row_fp].append(row)
+        available_rows = available_target_rows(inventory_rows)
 
         print("mode=read_only")
         print(f"database={database_path}")
@@ -371,6 +423,7 @@ def main() -> int:
                 product_code = str(row["product_code"] or "")
                 if product_code.upper() != TARGET_PRODUCT_CODE:
                     product_mismatch[product_code] += 1
+        available_breakdown = print_available_stock_breakdown(connection, available_rows, embedded_set)
 
     matched = sum(total_counts.get(status, 0) for status in ("available", "reserved", "delivered", "disabled"))
     print("summary:")
@@ -383,6 +436,9 @@ def main() -> int:
     print(f"  matched_inventory_items={len(matched_item_ids)}")
     print(f"  matched_created_on_{args.import_date}={matched_created_today}")
     print(f"  matched_import_events_on_{args.import_date}={matched_import_events_today}")
+    print(f"  current_available_total={available_breakdown['total']}")
+    print(f"  current_available_from_embedded_8_new_lot={available_breakdown['new_lot']}")
+    print(f"  current_available_not_in_embedded_8_old_lot={available_breakdown['old_lot']}")
     if product_mismatch:
         print("  product_mismatch=yes")
         for product_code, count in sorted(product_mismatch.items()):
