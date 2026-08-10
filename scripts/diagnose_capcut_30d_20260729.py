@@ -208,6 +208,67 @@ def order_links(connection: sqlite3.Connection, inventory_item_id: str) -> dict[
     return result
 
 
+def linked_order_rows(connection: sqlite3.Connection, inventory_item_id: str) -> list[sqlite3.Row]:
+    if not (table_exists(connection, "order_inventory_items") and table_exists(connection, "orders")):
+        return []
+    oi_cols = table_columns(connection, "order_inventory_items")
+    order_cols = table_columns(connection, "orders")
+    if not {"order_id", "inventory_item_id", "state"}.issubset(oi_cols):
+        return []
+
+    def col(name: str, alias: str) -> str:
+        return f"o.{name} AS {alias}" if name in order_cols else f"'' AS {alias}"
+
+    return connection.execute(
+        f"""
+        SELECT
+            oi.state AS link_state,
+            {col("id", "order_row_id")},
+            {col("order_id", "order_id")},
+            {col("product_code", "order_product_code")},
+            {col("package_name", "package_name")},
+            {col("quantity", "quantity")},
+            {col("unit_price_vnd", "unit_price_vnd")},
+            {col("total_vnd", "total_vnd")},
+            {col("payment_status", "payment_status")},
+            {col("order_status", "order_status")},
+            {col("transaction_id", "transaction_id")},
+            {col("created_at", "order_created_at")},
+            {col("paid_at", "paid_at")},
+            {col("delivered_at", "order_delivered_at")}
+        FROM order_inventory_items AS oi
+        JOIN orders AS o ON o.id = oi.order_id
+        WHERE oi.inventory_item_id = ?
+        ORDER BY o.created_at, o.order_id
+        """,
+        (inventory_item_id,),
+    ).fetchall()
+
+
+def payment_summary(connection: sqlite3.Connection, order_row_id: str) -> str:
+    if not order_row_id or not table_exists(connection, "payment_transactions"):
+        return "payment_transactions=unavailable"
+    payment_cols = table_columns(connection, "payment_transactions")
+    if "order_id" not in payment_cols:
+        return "payment_order_id_column=missing"
+    status_expr = "GROUP_CONCAT(status, ',')" if "status" in payment_cols else "''"
+    amount_expr = "SUM(amount_vnd)" if "amount_vnd" in payment_cols else "0"
+    row = connection.execute(
+        f"""
+        SELECT COUNT(*) AS qty, {status_expr} AS statuses, {amount_expr} AS amount_vnd
+        FROM payment_transactions
+        WHERE order_id = ?
+        """,
+        (order_row_id,),
+    ).fetchone()
+    if not row or int(row["qty"] or 0) == 0:
+        return "payment_transactions=0"
+    return (
+        f"payment_transactions={int(row['qty'] or 0)} "
+        f"statuses={row['statuses'] or '-'} amount_vnd={int(row['amount_vnd'] or 0)}"
+    )
+
+
 def order_id_from_raw(connection: sqlite3.Connection, raw_value: str) -> str:
     raw_value = str(raw_value or "").strip()
     if not raw_value or not table_exists(connection, "orders"):
@@ -237,6 +298,22 @@ def stock_summary(connection: sqlite3.Connection) -> dict[str, int]:
         GROUP BY i.status
         """,
         (TARGET_PRODUCT_CODE,),
+    ).fetchall()
+    return {str(row["status"]): int(row["qty"] or 0) for row in rows}
+
+
+def stock_summary_by_product(connection: sqlite3.Connection, product_code: str) -> dict[str, int]:
+    if not (table_exists(connection, "inventory_items") and table_exists(connection, "products")):
+        return {}
+    rows = connection.execute(
+        """
+        SELECT i.status, COUNT(*) AS qty
+        FROM inventory_items AS i
+        JOIN products AS p ON p.id = i.product_id
+        WHERE UPPER(p.code) = ?
+        GROUP BY i.status
+        """,
+        (product_code.upper(),),
     ).fetchall()
     return {str(row["status"]): int(row["qty"] or 0) for row in rows}
 
@@ -284,7 +361,66 @@ def print_account_match(connection: sqlite3.Connection, embedded_fp: str, rows: 
         print(f"    first_action_at={first['created_at'] or '-'}")
         print(f"    first_action_source={first['source'] or '-'}")
         print(f"    in_any_order={'yes' if int(links['linked_order_count'] or 0) else 'no'}")
+        linked_orders = linked_order_rows(connection, inventory_item_id)
+        if linked_orders:
+            print("    linked_orders:")
+            for linked in linked_orders:
+                order_row_id = str(linked["order_row_id"] or "")
+                print(
+                    f"      order_id={linked['order_id'] or '-'} "
+                    f"link_state={linked['link_state'] or '-'} "
+                    f"order_product_code={linked['order_product_code'] or '-'} "
+                    f"package_name={linked['package_name'] or '-'} "
+                    f"quantity={linked['quantity'] or '-'} "
+                    f"unit_price_vnd={linked['unit_price_vnd'] or '-'} "
+                    f"total_vnd={linked['total_vnd'] or '-'} "
+                    f"payment_status={linked['payment_status'] or '-'} "
+                    f"order_status={linked['order_status'] or '-'} "
+                    f"paid_at={linked['paid_at'] or '-'} "
+                    f"order_delivered_at={linked['order_delivered_at'] or '-'} "
+                    f"{payment_summary(connection, order_row_id)}"
+                )
+        movements = movement_rows(connection, inventory_item_id)
+        if movements:
+            print("    movements:")
+            for movement_index, movement in enumerate(movements, start=1):
+                print(
+                    f"      {movement_index}. action={movement['action'] or '-'} "
+                    f"created_at={movement['created_at'] or '-'} "
+                    f"source={movement['source'] or '-'} "
+                    f"order_id={movement['order_id'] or '-'}"
+                )
     return counts
+
+
+def print_cross_product_matches(cross_matches_by_fp: dict[str, list[sqlite3.Row]]) -> Counter[str]:
+    product_counts: Counter[str] = Counter()
+    print("cross_product_matches_not_counted_in_capcut:")
+    any_cross = False
+    for embedded_fp in EMBEDDED_CREDENTIAL_FINGERPRINTS:
+        rows = cross_matches_by_fp.get(embedded_fp, [])
+        if not rows:
+            continue
+        any_cross = True
+        print(f"  fingerprint={short_fingerprint(embedded_fp)}")
+        for row in rows:
+            product_code = str(row["product_code"] or "")
+            product_counts[product_code] += 1
+            print(
+                f"    inventory_item_id={row['inventory_item_id']} "
+                f"product_code={product_code} "
+                f"status={row['status'] or '-'} "
+                f"created_at={row['created_at'] or '-'} "
+                f"delivered_order_id={row['delivered_order_id_raw'] or '-'} "
+                f"delivered_at={row['delivered_at'] or '-'}"
+            )
+    if not any_cross:
+        print("  none")
+    if product_counts:
+        print("cross_product_summary:")
+        for product_code, count in sorted(product_counts.items()):
+            print(f"  {product_code}={count}")
+    return product_counts
 
 
 def available_membership(rows: list[sqlite3.Row], embedded_set: set[str]) -> tuple[list[str], list[tuple[str, str]]]:
@@ -320,16 +456,21 @@ def main() -> int:
         raise SystemExit(f"Database not found: {args.database}")
 
     embedded_set = set(EMBEDDED_CREDENTIAL_FINGERPRINTS)
-    matches_by_fp: dict[str, list[sqlite3.Row]] = defaultdict(list)
+    capcut_matches_by_fp: dict[str, list[sqlite3.Row]] = defaultdict(list)
+    cross_matches_by_fp: dict[str, list[sqlite3.Row]] = defaultdict(list)
     with closing(sqlite3.connect(f"file:{args.database}?mode=ro", uri=True)) as connection:
         connection.row_factory = sqlite3.Row
         inventory_rows = select_inventory_rows(connection)
         for row in inventory_rows:
             row_fp = fingerprint(str(row["secret_value"] or ""))
             if row_fp in embedded_set:
-                matches_by_fp[row_fp].append(row)
+                if str(row["product_code"] or "").upper() == TARGET_PRODUCT_CODE:
+                    capcut_matches_by_fp[row_fp].append(row)
+                else:
+                    cross_matches_by_fp[row_fp].append(row)
 
         stock = stock_summary(connection)
+        grok_stock = stock_summary_by_product(connection, "GROK_75K")
         available_lot_matches, current_available_rows = available_membership(inventory_rows, embedded_set)
         print("mode=read_only")
         print(f"database={args.database}")
@@ -343,22 +484,34 @@ def main() -> int:
             f"delivered={stock.get('delivered', 0)} "
             f"disabled={stock.get('disabled', 0)}"
         )
+        print(
+            "grok_75k_stock_summary_for_cross_check="
+            f"available={grok_stock.get('available', 0)} "
+            f"reserved={grok_stock.get('reserved', 0)} "
+            f"delivered={grok_stock.get('delivered', 0)} "
+            f"disabled={grok_stock.get('disabled', 0)}"
+        )
         print(f"current_capcut_30d_available_rows={len(current_available_rows)}")
 
         total_counts: Counter[str] = Counter()
         delivered_orders: list[tuple[str, str, str]] = []
+        unique_delivered_order_ids: set[str] = set()
         for embedded_fp in EMBEDDED_CREDENTIAL_FINGERPRINTS:
-            rows = matches_by_fp.get(embedded_fp, [])
+            rows = capcut_matches_by_fp.get(embedded_fp, [])
             total_counts.update(print_account_match(connection, embedded_fp, rows))
             for row in rows:
                 if str(row["status"] or "") == "delivered":
+                    delivered_order_id = public_order_id(connection, row, "delivered") or "-"
+                    if delivered_order_id != "-":
+                        unique_delivered_order_ids.add(delivered_order_id)
                     delivered_orders.append(
                         (
                             embedded_fp,
-                            public_order_id(connection, row, "delivered") or "-",
+                            delivered_order_id,
                             str(row["delivered_at"] or "-"),
                         )
                     )
+        cross_counts = print_cross_product_matches(cross_matches_by_fp)
 
     matched = sum(total_counts.get(status, 0) for status in ("available", "reserved", "delivered", "disabled"))
     print("available_membership:")
@@ -376,6 +529,12 @@ def main() -> int:
             print(f"  fingerprint={short_fingerprint(embedded_fp)} order_id={order_id} delivered_at={delivered_at_value}")
     else:
         print("  none")
+    print("unique_capcut_30d_delivered_order_ids:")
+    if unique_delivered_order_ids:
+        for order_id in sorted(unique_delivered_order_ids):
+            print(f"  {order_id}")
+    else:
+        print("  none")
 
     print("summary:")
     print(f"  matched={matched}")
@@ -386,6 +545,7 @@ def main() -> int:
     print(f"  not_found={total_counts.get('not_found', 0)}")
     print(f"  current_capcut_30d_available={len(current_available_rows)}")
     print(f"  current_available_from_file_20260729={len(available_lot_matches)}")
+    print(f"  cross_product_matches_not_counted={sum(cross_counts.values())}")
     print("changes_written=false")
     return 0
 
