@@ -269,6 +269,53 @@ def payment_summary(connection: sqlite3.Connection, order_row_id: str) -> str:
     )
 
 
+def payment_rows(connection: sqlite3.Connection, order_row_id: str) -> list[sqlite3.Row]:
+    if not order_row_id or not table_exists(connection, "payment_transactions"):
+        return []
+    payment_cols = table_columns(connection, "payment_transactions")
+    if "order_id" not in payment_cols:
+        return []
+
+    def col(name: str, alias: str) -> str:
+        return f"{name} AS {alias}" if name in payment_cols else f"'' AS {alias}"
+
+    return connection.execute(
+        f"""
+        SELECT
+            {col("id", "payment_id")},
+            {col("provider", "provider")},
+            {col("provider_transaction_id", "provider_tx")},
+            {col("amount_vnd", "amount_vnd")},
+            {col("description", "description")},
+            {col("raw_payload_json", "raw_payload_json")},
+            {col("status", "status")},
+            {col("received_at", "received_at")},
+            {col("processed_at", "processed_at")}
+        FROM payment_transactions
+        WHERE order_id = ?
+        ORDER BY received_at, id
+        """,
+        (order_row_id,),
+    ).fetchall()
+
+
+def payment_reference(row: sqlite3.Row) -> str:
+    parts: list[str] = []
+    description = str(row["description"] or "").strip()
+    raw_payload = str(row["raw_payload_json"] or "").strip()
+    if description:
+        parts.append(f"description={description[:160]}")
+    if raw_payload:
+        lowered = raw_payload.lower()
+        hints = []
+        for key in ("reference", "content", "description", "payer", "account", "name", "tid", "transaction"):
+            if key in lowered:
+                hints.append(key)
+        suffix = f" raw_payload_contains={','.join(hints)}" if hints else ""
+        parts.append(f"raw_payload_len={len(raw_payload)}{suffix}")
+    return " ".join(parts) or "-"
+
+
 def order_id_from_raw(connection: sqlite3.Connection, raw_value: str) -> str:
     raw_value = str(raw_value or "").strip()
     if not raw_value or not table_exists(connection, "orders"):
@@ -423,6 +470,201 @@ def print_cross_product_matches(cross_matches_by_fp: dict[str, list[sqlite3.Row]
     return product_counts
 
 
+def order_audit_rows(connection: sqlite3.Connection, order_ids: set[str]) -> list[sqlite3.Row]:
+    if not order_ids or not table_exists(connection, "orders"):
+        return []
+    order_cols = table_columns(connection, "orders")
+    if "order_id" not in order_cols:
+        return []
+
+    def col(name: str, alias: str) -> str:
+        return f"{name} AS {alias}" if name in order_cols else f"'' AS {alias}"
+
+    placeholders = ", ".join("?" for _ in order_ids)
+    return connection.execute(
+        f"""
+        SELECT
+            {col("id", "order_row_id")},
+            {col("order_id", "order_id")},
+            {col("product_code", "order_product_code")},
+            {col("package_name", "package_name")},
+            {col("quantity", "quantity")},
+            {col("unit_price_vnd", "unit_price_vnd")},
+            {col("total_vnd", "total_vnd")},
+            {col("payment_status", "payment_status")},
+            {col("order_status", "order_status")},
+            {col("transaction_id", "transaction_id")},
+            {col("created_at", "created_at")},
+            {col("paid_at", "paid_at")},
+            {col("delivered_at", "delivered_at")}
+        FROM orders
+        WHERE order_id IN ({placeholders})
+        ORDER BY created_at, order_id
+        """,
+        tuple(sorted(order_ids)),
+    ).fetchall()
+
+
+def item_rows_for_order(connection: sqlite3.Connection, order_row_id: str) -> list[sqlite3.Row]:
+    if not (table_exists(connection, "order_inventory_items") and table_exists(connection, "inventory_items") and table_exists(connection, "products")):
+        return []
+    return connection.execute(
+        """
+        SELECT
+            oi.state AS link_state,
+            i.id AS inventory_item_id,
+            i.secret_value AS secret_value,
+            i.status AS item_status,
+            i.delivered_at AS item_delivered_at,
+            p.code AS product_code
+        FROM order_inventory_items AS oi
+        JOIN inventory_items AS i ON i.id = oi.inventory_item_id
+        JOIN products AS p ON p.id = i.product_id
+        WHERE oi.order_id = ?
+        ORDER BY oi.created_at, i.id
+        """,
+        (order_row_id,),
+    ).fetchall()
+
+
+def provider_tx_duplicate_counts(payment_rows_by_order: dict[str, list[sqlite3.Row]]) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for rows in payment_rows_by_order.values():
+        for row in rows:
+            provider_tx = str(row["provider_tx"] or "").strip()
+            if provider_tx:
+                counts[provider_tx] += 1
+    return counts
+
+
+def classify_order(
+    order: sqlite3.Row,
+    payments: list[sqlite3.Row],
+    duplicate_provider_txs: Counter[str],
+) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+    order_id = str(order["order_id"] or "")
+    order_product_code = str(order["order_product_code"] or "").upper()
+    payment_status = str(order["payment_status"] or "").lower()
+    order_status = str(order["order_status"] or "").lower()
+    quantity = int(order["quantity"] or 0)
+    unit_price = int(order["unit_price_vnd"] or 0)
+    total_vnd = int(order["total_vnd"] or 0)
+    payment_amount = sum(int(row["amount_vnd"] or 0) for row in payments)
+    payment_statuses = {str(row["status"] or "").lower() for row in payments}
+    provider_txs = [str(row["provider_tx"] or "").strip() for row in payments if str(row["provider_tx"] or "").strip()]
+    text_blob = " ".join(
+        [
+            order_id,
+            str(order["package_name"] or ""),
+            str(order["transaction_id"] or ""),
+            " ".join(str(row["description"] or "") for row in payments),
+        ]
+    ).lower()
+
+    if order_product_code != TARGET_PRODUCT_CODE:
+        reasons.append(f"order_product_code_is_{order_product_code or '-'}")
+    if payment_status != "paid":
+        reasons.append(f"payment_status_is_{payment_status or '-'}")
+    if order_status not in {"delivered", "manual_delivery"}:
+        reasons.append(f"order_status_is_{order_status or '-'}")
+    if not payments:
+        reasons.append("no_payment_transaction")
+    if payment_status == "paid" and not payments:
+        reasons.append("paid_without_transaction")
+    if unit_price != 45000:
+        reasons.append(f"unit_price_not_45000={unit_price}")
+    if quantity <= 0:
+        reasons.append(f"invalid_quantity={quantity}")
+    if total_vnd != quantity * unit_price:
+        reasons.append(f"total_not_quantity_x_unit={total_vnd}")
+    if payments and payment_amount != total_vnd:
+        reasons.append(f"payment_amount_mismatch={payment_amount}_vs_{total_vnd}")
+    if payments and not payment_statuses.intersection({"matched", "processed", "received"}):
+        reasons.append(f"payment_tx_statuses_not_confirming={','.join(sorted(payment_statuses)) or '-'}")
+    duplicate_txs = sorted({tx for tx in provider_txs if duplicate_provider_txs[tx] > 1})
+    if duplicate_txs:
+        reasons.append("duplicate_provider_tx=" + ",".join(duplicate_txs))
+    if any(keyword in text_blob for keyword in ("test", "manual", "admin", "demo")):
+        reasons.append("test_manual_admin_keyword")
+
+    if not reasons:
+        return "CONFIRMED_REAL_SALE", ["paid_order_with_matching_unique_payment"]
+    severe = {
+        "no_payment_transaction",
+        "paid_without_transaction",
+    }
+    if severe.intersection(reasons) or any(reason.startswith("duplicate_provider_tx=") for reason in reasons):
+        return "SUSPICIOUS_INVALID_DELIVERY", reasons
+    return "NEEDS_MANUAL_REVIEW", reasons
+
+
+def print_order_audit(
+    connection: sqlite3.Connection,
+    order_ids: set[str],
+    embedded_set: set[str],
+) -> Counter[str]:
+    print("capcut_30d_delivered_order_audit:")
+    classifications: Counter[str] = Counter()
+    orders = order_audit_rows(connection, order_ids)
+    if not orders:
+        print("  none")
+        return classifications
+    payment_rows_by_order = {
+        str(order["order_row_id"] or ""): payment_rows(connection, str(order["order_row_id"] or ""))
+        for order in orders
+    }
+    duplicate_provider_txs = provider_tx_duplicate_counts(payment_rows_by_order)
+    for order in orders:
+        order_row_id = str(order["order_row_id"] or "")
+        payments = payment_rows_by_order.get(order_row_id, [])
+        classification, reasons = classify_order(order, payments, duplicate_provider_txs)
+        classifications[classification] += 1
+        print(f"  order_id={order['order_id'] or '-'}")
+        print(f"    classification={classification}")
+        print(f"    reasons={';'.join(reasons)}")
+        print(f"    created_at={order['created_at'] or '-'}")
+        print(f"    paid_at={order['paid_at'] or '-'}")
+        print(f"    delivered_at={order['delivered_at'] or '-'}")
+        print(f"    order_status={order['order_status'] or '-'}")
+        print(f"    payment_status={order['payment_status'] or '-'}")
+        print(f"    quantity={order['quantity'] or '-'}")
+        print(f"    unit_price={order['unit_price_vnd'] or '-'}")
+        print(f"    total_vnd={order['total_vnd'] or '-'}")
+        print(f"    transaction_id={order['transaction_id'] or '-'}")
+        print(f"    payment_transaction_count={len(payments)}")
+        if payments:
+            print("    payment_transactions:")
+            for payment in payments:
+                provider_tx = str(payment["provider_tx"] or "")
+                duplicate_suffix = " duplicate_provider_tx=yes" if provider_tx and duplicate_provider_txs[provider_tx] > 1 else ""
+                print(
+                    f"      provider={payment['provider'] or '-'} "
+                    f"provider_tx={provider_tx or '-'} "
+                    f"amount_vnd={payment['amount_vnd'] or '-'} "
+                    f"status={payment['status'] or '-'} "
+                    f"received_at={payment['received_at'] or '-'} "
+                    f"processed_at={payment['processed_at'] or '-'}"
+                    f"{duplicate_suffix}"
+                )
+                print(f"      reference={payment_reference(payment)}")
+        linked_items = item_rows_for_order(connection, order_row_id)
+        if linked_items:
+            print("    linked_inventory_items:")
+            for item in linked_items:
+                item_fp = fingerprint(str(item["secret_value"] or ""))
+                print(
+                    f"      inventory_item_id={item['inventory_item_id']} "
+                    f"fingerprint={short_fingerprint(item_fp)} "
+                    f"in_file_20260729={'yes' if item_fp in embedded_set else 'no'} "
+                    f"product_code={item['product_code'] or '-'} "
+                    f"link_state={item['link_state'] or '-'} "
+                    f"item_status={item['item_status'] or '-'} "
+                    f"item_delivered_at={item['item_delivered_at'] or '-'}"
+                )
+    return classifications
+
+
 def available_membership(rows: list[sqlite3.Row], embedded_set: set[str]) -> tuple[list[str], list[tuple[str, str]]]:
     matches: list[str] = []
     available_rows: list[tuple[str, str]] = []
@@ -512,6 +754,7 @@ def main() -> int:
                         )
                     )
         cross_counts = print_cross_product_matches(cross_matches_by_fp)
+        order_classifications = print_order_audit(connection, unique_delivered_order_ids, embedded_set)
 
     matched = sum(total_counts.get(status, 0) for status in ("available", "reserved", "delivered", "disabled"))
     print("available_membership:")
@@ -546,6 +789,9 @@ def main() -> int:
     print(f"  current_capcut_30d_available={len(current_available_rows)}")
     print(f"  current_available_from_file_20260729={len(available_lot_matches)}")
     print(f"  cross_product_matches_not_counted={sum(cross_counts.values())}")
+    print(f"  confirmed_real_sale_orders={order_classifications.get('CONFIRMED_REAL_SALE', 0)}")
+    print(f"  suspicious_invalid_delivery_orders={order_classifications.get('SUSPICIOUS_INVALID_DELIVERY', 0)}")
+    print(f"  needs_manual_review_orders={order_classifications.get('NEEDS_MANUAL_REVIEW', 0)}")
     print("changes_written=false")
     return 0
 
