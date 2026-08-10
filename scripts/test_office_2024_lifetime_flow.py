@@ -85,7 +85,7 @@ def _write_office_workbook(path: Path, count: int = 15) -> list[str]:
                 "license_key",
                 "LIFETIME",
                 198000,
-                365,
+                "LIFETIME",
                 credential,
                 "",
                 1,
@@ -123,7 +123,7 @@ def test_office_2024_lifetime_import_menu_order_and_delivery() -> None:
             assert product["code"] == OFFICE_CODE
             assert product["price_vnd"] == 198000
             assert product["duration"] == "LIFETIME"
-            assert product["warranty_days"] == 365
+            assert product["warranty_days"] == 0
             assert repo.get_stock_count(OFFICE_CODE) == 15
 
             menu_labels = [button.text for row in bot._product_menu_keyboard().inline_keyboard for button in row]
@@ -134,8 +134,10 @@ def test_office_2024_lifetime_import_menu_order_and_delivery() -> None:
             assert "198.000" in quantity_text
             assert "Kho: 15" in quantity_text
             assert "Thời hạn: Trọn đời" in quantity_text
-            assert "Bảo hành: 12 tháng" in quantity_text
-            assert "Bảo hành: 365 ngày" not in quantity_text
+            assert "Bảo hành: Trọn đời" in quantity_text
+            assert "12 tháng" not in quantity_text
+            assert "365 ngày" not in quantity_text
+            assert "12M" not in quantity_text
             assert "Bảo hành: 7 ngày" not in quantity_text
 
             fake_update = type(
@@ -156,7 +158,8 @@ def test_office_2024_lifetime_import_menu_order_and_delivery() -> None:
             assert "📦 Phiên bản:" in delivered_one[0]
             assert "Office-2024-LTSC" in delivered_one[0]
             assert "🛡 Bảo hành:" in delivered_one[0]
-            assert "12 tháng" in delivered_one[0]
+            assert "Trọn đời" in delivered_one[0]
+            assert "12 tháng" not in delivered_one[0]
             assert "|Office-2024-LTSC" not in delivered_one[0]
             assert "password" not in delivered_one[0].lower()
             assert repo.get_stock_count(OFFICE_CODE) == 14
@@ -272,8 +275,10 @@ def test_office_2024_lifetime_callback_payment_and_delivery_with_software_catego
             product_update = FakeUpdate(f"product:{OFFICE_CODE}")
             asyncio.run(bot._on_menu_impl(product_update, context))
             product_detail_text = product_update.callback_query.edits[-1][0]
-            assert "Bảo hành: 12 tháng" in product_detail_text
-            assert "Bảo hành: 365 ngày" not in product_detail_text
+            assert "Bảo hành: Trọn đời" in product_detail_text
+            assert "12 tháng" not in product_detail_text
+            assert "365 ngày" not in product_detail_text
+            assert "12M" not in product_detail_text
             assert "Bảo hành: 7 ngày" not in product_detail_text
             package_markup = product_update.callback_query.edits[-1][1]
             package_buttons = [button for row in package_markup.inline_keyboard for button in row]
@@ -281,13 +286,19 @@ def test_office_2024_lifetime_callback_payment_and_delivery_with_software_catego
             assert package_button.callback_data == f"pkg:{OFFICE_CODE}:{OFFICE_CODE}"
             assert "198.000" in package_button.text
             assert "15" in package_button.text
-            assert "Bảo hành: 12 tháng" in package_button.text
+            assert "Bảo hành: Trọn đời" in package_button.text
+            assert "12 tháng" not in package_button.text
+            assert "365 ngày" not in package_button.text
+            assert "12M" not in package_button.text
             assert "Bảo hành: 7 ngày" not in package_button.text
 
             package_update = FakeUpdate(f"pkg:{OFFICE_CODE}:{OFFICE_CODE}")
             asyncio.run(bot._on_menu_impl(package_update, context))
             quantity_text = package_update.callback_query.edits[-1][0]
-            assert "Bảo hành: 12 tháng" in quantity_text
+            assert "Bảo hành: Trọn đời" in quantity_text
+            assert "12 tháng" not in quantity_text
+            assert "365 ngày" not in quantity_text
+            assert "12M" not in quantity_text
             assert "Bảo hành: 7 ngày" not in quantity_text
             quantity_markup = package_update.callback_query.edits[-1][1]
             quantity_buttons = [button for row in quantity_markup.inline_keyboard for button in row]
@@ -309,7 +320,10 @@ def test_office_2024_lifetime_callback_payment_and_delivery_with_software_catego
             asyncio.run(bot._on_menu_impl(skip_update, context))
             payment_text, payment_markup = skip_update.callback_query.edits[-1]
             assert "198.000" in payment_text
-            assert "Bảo hành\n12 tháng" in payment_text
+            assert "Bảo hành\nTrọn đời" in payment_text
+            assert "12 tháng" not in payment_text
+            assert "365 ngày" not in payment_text
+            assert "12M" not in payment_text
             assert "7 ngày" not in payment_text
             assert context.user_data["pending_order_id"] == "ORD-OFFICE-CB-1"
             pay_button = next(
@@ -335,7 +349,10 @@ def test_office_2024_lifetime_callback_payment_and_delivery_with_software_catego
             qr_caption = qr_update.callback_query.photos[-1][0]
             assert "198.000" in qr_caption
             assert "ORD-OFFICE-CB-1" in qr_caption
-            assert "Bảo hành\n12 tháng" in qr_caption
+            assert "Bảo hành\nTrọn đời" in qr_caption
+            assert "12 tháng" not in qr_caption
+            assert "365 ngày" not in qr_caption
+            assert "12M" not in qr_caption
             assert "7 ngày" not in qr_caption
 
             repo.mark_order_paid("ORD-OFFICE-CB-1", "TX-OFFICE-CB-1")
@@ -352,6 +369,8 @@ def test_office_2024_lifetime_callback_payment_and_delivery_with_software_catego
             assert "Product Key:" in delivery_text
             assert "Phiên bản:" in delivery_text
             assert "Office-2024-LTSC" in delivery_text
+            assert "Trọn đời" in delivery_text
+            assert "12 tháng" not in delivery_text
             assert "|Office-2024-LTSC" not in delivery_text
             assert "password" not in delivery_text.lower()
             assert repo.get_stock_count(OFFICE_CODE) == 14
@@ -390,7 +409,7 @@ def test_office_2024_lifetime_callback_payment_and_delivery_with_software_catego
                 os.environ["STORE_DB_PATH"] = previous_store_db_path
 
 
-def test_office_import_updates_existing_product_warranty_from_7_to_365_without_touching_history() -> None:
+def test_office_import_updates_existing_product_warranty_to_lifetime_without_touching_history() -> None:
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         db_path = root / "store.db"
@@ -434,7 +453,7 @@ def test_office_import_updates_existing_product_warranty_from_7_to_365_without_t
         repo = StoreRepository(db_path)
         product = repo.get_product_details(OFFICE_CODE)
         assert product is not None
-        assert product["warranty_days"] == 365
+        assert product["warranty_days"] == 0
         assert product["duration"] == "LIFETIME"
         assert product["price_vnd"] == 198000
         assert repo.get_stock_count(OFFICE_CODE) == 15

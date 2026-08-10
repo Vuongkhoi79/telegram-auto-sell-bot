@@ -121,7 +121,7 @@ def public_delivery_credential(product_code: str, credential_text: str) -> str:
             "📦 Phiên bản:\n"
             f"{version}\n\n"
             "🛡 Bảo hành:\n"
-            "12 tháng"
+            "Trọn đời"
         )
     if str(product_code or "").strip().upper() != "CHATGPT_SHARED":
         return credential_text

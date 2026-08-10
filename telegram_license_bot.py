@@ -430,6 +430,16 @@ def _format_warranty_text(warranty_days: int) -> str:
     return "Theo từng gói"
 
 
+def _is_lifetime_warranty_product(product_code: str) -> bool:
+    return str(product_code or "").strip().upper() == "OFFICE_2024_LIFETIME"
+
+
+def _format_product_warranty_text(product_code: str, warranty_days: int) -> str:
+    if _is_lifetime_warranty_product(product_code):
+        return "Trọn đời"
+    return _format_warranty_text(warranty_days)
+
+
 def _shop_separator() -> str:
     return "\n\n"
 
@@ -3151,9 +3161,10 @@ def _product_detail_text(product_name: str, available: bool, stock: int) -> str:
         product = None
     if product:
         warranty_days = int(product.get("warranty_days", 0) or 0)
+    product_code = str((product or {}).get("code") or _catalog_lookup_key(product_name))
     status_text = "Còn hàng" if available else "Hết hàng"
     price_text = f"{_format_vnd(min(prices))}đ" if prices else "Liên hệ"
-    warranty_text = _format_warranty_text(warranty_days)
+    warranty_text = _format_product_warranty_text(product_code, warranty_days)
     display_name = _catalog_display_name(product_name)
     return (
         f"💎 {_clean_product_title(display_name)}"
@@ -3176,16 +3187,15 @@ def _product_detail_keyboard(product_name: str, available: bool) -> InlineKeyboa
 
 
 def _package_warranty_button_line(package: dict[str, object]) -> str:
-    if str(package.get("product_code", "") or "").strip().upper() != "OFFICE_2024_LIFETIME":
+    product_code = str(package.get("product_code", "") or "").strip().upper()
+    if not _is_lifetime_warranty_product(product_code):
         return ""
     try:
-        product = StoreRepository(_resolve_store_db_path()).get_product_details(str(package.get("product_code", "")))
+        product = StoreRepository(_resolve_store_db_path()).get_product_details(product_code)
     except (OSError, RuntimeError, sqlite3.Error):
         product = None
-    if not product:
-        return ""
-    warranty_days = int(product.get("warranty_days", 0) or 0)
-    return f"\n🛡 Bảo hành: {_format_warranty_text(warranty_days)}" if warranty_days else ""
+    warranty_days = int((product or {}).get("warranty_days", 0) or 0)
+    return f"\n🛡 Bảo hành: {_format_product_warranty_text(product_code, warranty_days)}"
 
 
 def _package_keyboard(product_name: str) -> InlineKeyboardMarkup:
@@ -3305,6 +3315,7 @@ def _quantity_text(product_name: str, package_name: str) -> str:
     unit_price = int(package["price_vnd"]) if package else 0
     available_count = int(package["available_count"]) if package else 0
     display_name = str(package["display_name"]) if package else package_name
+    product_code = str(package.get("product_code", "") if package else "").strip().upper()
     warranty_days = 0
     duration = ""
     if package:
@@ -3318,8 +3329,8 @@ def _quantity_text(product_name: str, package_name: str) -> str:
             duration = ""
     duration_text = "Trọn đời" if duration.strip().upper() == "LIFETIME" else duration.strip()
     duration_line = f"⏳ Thời hạn: {duration_text}\n" if duration_text else ""
-    warranty_text = _format_warranty_text(warranty_days)
-    title = display_name if str(package.get("product_code", "") if package else "").upper() == "OFFICE_2024_LIFETIME" else _clean_product_title(display_name)
+    warranty_text = _format_product_warranty_text(product_code, warranty_days)
+    title = display_name if _is_lifetime_warranty_product(product_code) else _clean_product_title(display_name)
     return (
         f"💎 {title}"
         f"{_shop_separator()}"
@@ -3351,7 +3362,15 @@ def _order_product_details(order: dict[str, object]) -> dict[str, object] | None
 
 def _order_warranty_line(order: dict[str, object]) -> str:
     product = _order_product_details(order)
+    product_code = str(
+        (product or {}).get("code")
+        or order.get("product_code")
+        or order.get("package_code")
+        or ""
+    )
     warranty_days = int((product or {}).get("warranty_days", 0) or 0)
+    if _is_lifetime_warranty_product(product_code):
+        return f"🛡 Bảo hành\n{_format_product_warranty_text(product_code, warranty_days)}"
     return f"🛡 Bảo hành\n{_format_warranty_text(warranty_days)}" if warranty_days else ""
 
 

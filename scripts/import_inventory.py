@@ -57,7 +57,7 @@ EXPECTED_PRODUCT_TERMS = {
     "CAPCUT_30D": {"price_vnd": 45000, "warranty_days": 30},
     "CHATGPT_SHARED": {"price_vnd": 45000, "warranty_days": 7},
     "GROK_75K": {"price_vnd": 75000, "warranty_days": 7},
-    "OFFICE_2024_LIFETIME": {"price_vnd": 198000, "warranty_days": 365, "duration": "LIFETIME"},
+    "OFFICE_2024_LIFETIME": {"price_vnd": 198000, "warranty": "LIFETIME", "duration": "LIFETIME"},
 }
 ALLOWED_PRODUCT_CODES = {
     "CHATGPT",
@@ -88,6 +88,18 @@ ALLOWED_PRODUCT_CODES = {
     "VEO3",
     "VIEWMAX",
 }
+LIFETIME_WARRANTY_TOKENS = {
+    "0",
+    "LIFETIME",
+    "TRONDOI",
+    "TRỌNĐỜI",
+    "TRON DOI",
+    "TRỌN ĐỜI",
+    "VINHVIEN",
+    "VĨNHVIỄN",
+    "VINH VIEN",
+    "VĨNH VIỄN",
+}
 
 
 def utc_now_iso() -> str:
@@ -96,6 +108,28 @@ def utc_now_iso() -> str:
 
 def text(value: Any) -> str:
     return "" if value is None else str(value).strip()
+
+
+def normalized_lifetime_token(value: Any) -> str:
+    return text(value).upper().replace("_", " ").replace("-", " ").strip()
+
+
+def is_lifetime_warranty_value(value: Any) -> bool:
+    normalized = normalized_lifetime_token(value)
+    compact = normalized.replace(" ", "")
+    return normalized in LIFETIME_WARRANTY_TOKENS or compact in LIFETIME_WARRANTY_TOKENS
+
+
+def product_warranty_days(product_code: str, row: dict[str, Any]) -> int:
+    raw_value = row.get("warranty_days")
+    if text(product_code).upper() == "OFFICE_2024_LIFETIME":
+        if is_lifetime_warranty_value(raw_value):
+            return 0
+        parsed = parse_int(raw_value, 0)
+        if parsed in {0, 365}:
+            return 0
+        return parsed
+    return parse_int(raw_value, 0)
 
 
 def validate_credential(value: Any, product_code: str = "") -> str:
@@ -141,9 +175,17 @@ def validate_product_terms(product_code: str, row: dict[str, Any]) -> None:
     if not expected:
         return
     price_vnd = parse_int(row.get("price_vnd"), 0)
-    warranty_days = parse_int(row.get("warranty_days"), 0)
+    warranty_days = product_warranty_days(product_code, row)
     duration = text(row.get("duration")).upper().replace(" ", "")
     expected_duration = text(expected.get("duration")).upper().replace(" ", "")
+    if product_code == "OFFICE_2024_LIFETIME":
+        if price_vnd != expected["price_vnd"] or duration != expected_duration or warranty_days != 0:
+            raise ValueError(
+                f"{product_code} requires price_vnd={expected['price_vnd']}, "
+                f"warranty=LIFETIME, and duration={expected_duration}; "
+                f"got price_vnd={price_vnd}, warranty_days={row.get('warranty_days')}, duration={duration}"
+            )
+        return
     if (
         price_vnd != expected["price_vnd"]
         or warranty_days != expected["warranty_days"]
@@ -161,7 +203,7 @@ def normalize_import_product_code(product_code: str, row: dict[str, Any]) -> str
     normalized = text(product_code).upper()
     duration = text(row.get("duration")).upper().replace(" ", "")
     price_vnd = parse_int(row.get("price_vnd"), 0)
-    warranty_days = parse_int(row.get("warranty_days"), 0)
+    warranty_days = product_warranty_days(normalized, row)
     if normalized == "CAPCUT" and duration in {"7D", "7DAY", "7DAYS", "7NGAY", "7NGÀY"} and price_vnd == 8000 and warranty_days == 7:
         return "CAPCUT_7D"
     if normalized == "CAPCUT" and duration in {"30D", "30DAY", "30DAYS", "30NGAY", "30NGÃ€Y"} and price_vnd == 45000 and warranty_days == 30:
@@ -265,7 +307,7 @@ def sync_product_metadata(
             text(row.get("account_type")),
             text(row.get("duration")),
             canonical_price_vnd(product_code, row),
-            parse_int(row.get("warranty_days"), 0),
+            product_warranty_days(product_code, row),
             text(row.get("note")),
             product_code,
             product_id,
@@ -303,7 +345,7 @@ def ensure_product(
             text(row.get("account_type")),
             text(row.get("duration")),
             canonical_price_vnd(product_code, row),
-            parse_int(row.get("warranty_days"), 0),
+            product_warranty_days(product_code, row),
             text(row.get("note")),
             product_code,
         ),
