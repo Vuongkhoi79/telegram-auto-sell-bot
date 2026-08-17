@@ -15,7 +15,7 @@ from openpyxl import Workbook
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from repository.store_repository import StoreRepository
+from repository.store_repository import StoreRepository, public_delivery_credential
 from scripts.import_inventory import OPTIONAL_COLUMNS, REQUIRED_COLUMNS, import_inventory
 from scripts.cleanup_demo_inventory import cleanup_demo_inventory
 import telegram_license_bot as bot
@@ -728,6 +728,99 @@ class StoreRepositoryTest(unittest.TestCase):
                 os.environ.pop("STORE_DB_PATH", None)
             else:
                 os.environ["STORE_DB_PATH"] = previous_store_db_path
+
+    def test_windows_category_packages_and_inventory_are_separate(self) -> None:
+        repo = StoreRepository(self.db_path)
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            with connection:
+                now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+                for code, name, price, order in (
+                    ("CATALOG-WINDOWS", "WINDOWS", 0, 19),
+                    ("WINDOWS_10", "Windows 10", 350000, 19),
+                    ("WINDOWS_11", "Windows 11", 500000, 20),
+                ):
+                    connection.execute(
+                        """
+                        INSERT INTO products
+                            (id, code, name, active, delivery_type, created_at, updated_at,
+                             category, category_key, duration, price_vnd, product_group, show_in_menu, menu_order)
+                        VALUES (?, ?, ?, 1, 'account', ?, ?, 'SOFTWARE', 'WINDOWS', 'LIFETIME', ?, 'account', 1, ?)
+                        ON CONFLICT(code) DO UPDATE SET
+                            name=excluded.name, active=1, category_key='WINDOWS',
+                            duration='LIFETIME', price_vnd=excluded.price_vnd,
+                            product_group='account', show_in_menu=1, menu_order=excluded.menu_order
+                        """,
+                        (f"test-{code}", code, name, now, now, price, order),
+                    )
+        repo.add_inventory_item("WINDOWS_10", "AAAAA-BBBBB-CCCCC-DDDDD-EEEEE|Windows-10")
+        repo.add_inventory_item("WINDOWS_11", "FFFFF-GGGGG-HHHHH-IIIII-JJJJJ|Windows-11")
+
+        previous_store_db_path = os.environ.get("STORE_DB_PATH")
+        previous_make_order_id = bot._make_order_id
+        try:
+            os.environ["STORE_DB_PATH"] = str(self.db_path)
+            menu_buttons = [button for row in bot._product_menu_keyboard().inline_keyboard for button in row]
+            self.assertTrue(any("WINDOWS (2)" in button.text and button.callback_data == "product:WINDOWS" for button in menu_buttons))
+
+            package_buttons = [button for row in bot._package_keyboard("WINDOWS").inline_keyboard for button in row]
+            labels = [button.text for button in package_buttons]
+            callbacks = [button.callback_data for button in package_buttons]
+            self.assertTrue(any("Windows 10" in label and "350.000" in label for label in labels))
+            self.assertTrue(any("Windows 11" in label and "500.000" in label for label in labels))
+            self.assertIn("pkg:WINDOWS:WINDOWS_10", callbacks)
+            self.assertIn("pkg:WINDOWS:WINDOWS_11", callbacks)
+
+            windows10 = bot._get_package_info("WINDOWS", "WINDOWS_10")
+            windows11 = bot._get_package_info("WINDOWS", "WINDOWS_11")
+            self.assertIsNotNone(windows10)
+            self.assertIsNotNone(windows11)
+            self.assertEqual((windows10["price_vnd"], windows10["available_count"]), (350000, 1))
+            self.assertEqual((windows11["price_vnd"], windows11["available_count"]), (500000, 1))
+
+            bot._make_order_id = lambda _product_name: "ORD-WINDOWS-10"
+            fake_update = type(
+                "FakeOrderUpdate",
+                (),
+                {"effective_user": type("FakeUser", (), {"id": 42, "full_name": "Test User", "username": ""})()},
+            )()
+            order = bot._create_sales_order(fake_update, "WINDOWS", "WINDOWS_10", 1)
+            self.assertEqual((order["unit_price"], order["total"], order["product_code"]), (350000, 350000, "WINDOWS_10"))
+            self.assertEqual(StoreRepository(self.db_path).get_stock_count("WINDOWS_10"), 0)
+            self.assertEqual(StoreRepository(self.db_path).get_stock_count("WINDOWS_11"), 1)
+            delivered = public_delivery_credential("WINDOWS_10", "AAAAA-BBBBB-CCCCC-DDDDD-EEEEE|Windows-10")
+            self.assertIn("AAAAA-BBBBB-CCCCC-DDDDD-EEEEE", delivered)
+            self.assertIn("Windows-10", delivered)
+        finally:
+            bot._make_order_id = previous_make_order_id
+            if previous_store_db_path is None:
+                os.environ.pop("STORE_DB_PATH", None)
+            else:
+                os.environ["STORE_DB_PATH"] = previous_store_db_path
+
+    def test_startup_seeds_windows_products_idempotently(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            with connection:
+                connection.execute(
+                    "DELETE FROM products WHERE code IN ('CATALOG-WINDOWS', 'WINDOWS_10', 'WINDOWS_11')"
+                )
+
+        StoreRepository(self.db_path)
+        StoreRepository(self.db_path)
+
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            rows = connection.execute(
+                """
+                SELECT code, name, category_key, price_vnd, active
+                FROM products
+                WHERE code IN ('CATALOG-WINDOWS', 'WINDOWS_10', 'WINDOWS_11')
+                ORDER BY code
+                """
+            ).fetchall()
+        self.assertEqual(len(rows), 3)
+        by_code = {row[0]: row for row in rows}
+        self.assertEqual((by_code["CATALOG-WINDOWS"][1], by_code["CATALOG-WINDOWS"][2], by_code["CATALOG-WINDOWS"][3]), ("WINDOWS", "WINDOWS", 0))
+        self.assertEqual((by_code["WINDOWS_10"][1], by_code["WINDOWS_10"][2], by_code["WINDOWS_10"][3]), ("Windows 10", "WINDOWS", 350000))
+        self.assertEqual((by_code["WINDOWS_11"][1], by_code["WINDOWS_11"][2], by_code["WINDOWS_11"][3]), ("Windows 11", "WINDOWS", 500000))
 
     def test_quantity_reservation_boundaries_follow_available_stock(self) -> None:
         def fresh_repo_with_stock(stock: int) -> StoreRepository:

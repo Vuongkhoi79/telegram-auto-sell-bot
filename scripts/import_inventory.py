@@ -48,6 +48,8 @@ DEFAULT_PRODUCT_DISPLAY_NAMES = {
     "GROK_75K": "SUPERGROK AI",
     "OFFICE_2024_LIFETIME": "Microsoft Office LTSC 2024 Professional Plus",
     "CHATGPT_SHARED": "ChatGPT Plus dùng chung",
+    "WINDOWS_10": "Windows 10",
+    "WINDOWS_11": "Windows 11",
 }
 EXPECTED_PRODUCT_TERMS = {
     "CAPCUT": {"price_vnd": 400000, "warranty_days": 60, "duration": "365D"},
@@ -58,6 +60,8 @@ EXPECTED_PRODUCT_TERMS = {
     "CHATGPT_SHARED": {"price_vnd": 45000, "warranty_days": 7},
     "GROK_75K": {"price_vnd": 75000, "warranty_days": 7},
     "OFFICE_2024_LIFETIME": {"price_vnd": 198000, "warranty": "LIFETIME", "duration": "LIFETIME"},
+    "WINDOWS_10": {"price_vnd": 350000, "warranty": "LIFETIME", "duration": "LIFETIME"},
+    "WINDOWS_11": {"price_vnd": 500000, "warranty": "LIFETIME", "duration": "LIFETIME"},
 }
 ALLOWED_PRODUCT_CODES = {
     "CHATGPT",
@@ -66,6 +70,8 @@ ALLOWED_PRODUCT_CODES = {
     "GROK",
     "GROK_75K",
     "OFFICE_2024_LIFETIME",
+    "WINDOWS_10",
+    "WINDOWS_11",
     "CAPCUT",
     "CAPCUT_7D",
     "CAPCUT_365D",
@@ -122,7 +128,7 @@ def is_lifetime_warranty_value(value: Any) -> bool:
 
 def product_warranty_days(product_code: str, row: dict[str, Any]) -> int:
     raw_value = row.get("warranty_days")
-    if text(product_code).upper() == "OFFICE_2024_LIFETIME":
+    if text(product_code).upper() in {"OFFICE_2024_LIFETIME", "WINDOWS_10", "WINDOWS_11"}:
         if is_lifetime_warranty_value(raw_value):
             return 0
         parsed = parse_int(raw_value, 0)
@@ -135,9 +141,9 @@ def product_warranty_days(product_code: str, row: dict[str, Any]) -> int:
 def validate_credential(value: Any, product_code: str = "") -> str:
     credential = text(value)
     parts = credential.split("|")
-    if product_code == "OFFICE_2024_LIFETIME":
+    if product_code in {"OFFICE_2024_LIFETIME", "WINDOWS_10", "WINDOWS_11"}:
         if len(parts) != 2 or any(not part.strip() for part in parts):
-            raise ValueError("OFFICE_2024_LIFETIME credential_text must be PRODUCT-KEY|Office-2024-LTSC")
+            raise ValueError(f"{product_code} credential_text must be PRODUCT-KEY|version")
         return credential
     if len(parts) not in {2, 3, 4} or any(not part.strip() for part in parts):
         raise ValueError("credential_text must be email|password, email|password|2fa, or email|password|2fa|recovery_email")
@@ -178,7 +184,7 @@ def validate_product_terms(product_code: str, row: dict[str, Any]) -> None:
     warranty_days = product_warranty_days(product_code, row)
     duration = text(row.get("duration")).upper().replace(" ", "")
     expected_duration = text(expected.get("duration")).upper().replace(" ", "")
-    if product_code == "OFFICE_2024_LIFETIME":
+    if expected.get("warranty") == "LIFETIME":
         if price_vnd != expected["price_vnd"] or duration != expected_duration or warranty_days != 0:
             raise ValueError(
                 f"{product_code} requires price_vnd={expected['price_vnd']}, "
@@ -273,7 +279,7 @@ def canonical_price_vnd(product_code: str, row: dict[str, Any]) -> int:
 
 
 def product_category(product_code: str, row: dict[str, Any]) -> str:
-    if product_code == "OFFICE_2024_LIFETIME":
+    if product_code in {"OFFICE_2024_LIFETIME", "WINDOWS_10", "WINDOWS_11"}:
         return text(row.get("category")) or "SOFTWARE"
     return "account"
 
@@ -462,7 +468,7 @@ def available_stock_for_code(connection: sqlite3.Connection, product_code: str) 
 
 
 def should_use_canonical_product(product_code: str, row: dict[str, Any]) -> bool:
-    return product_code.startswith("CAPCUT") or product_code in {"CHATGPT_SHARED", "GROK_75K", "OFFICE_2024_LIFETIME"} or bool(row.get("__sheet_product"))
+    return product_code.startswith("CAPCUT") or product_code in {"CHATGPT_SHARED", "GROK_75K", "OFFICE_2024_LIFETIME", "WINDOWS_10", "WINDOWS_11"} or bool(row.get("__sheet_product"))
 
 
 def import_inventory(input_path: Path, database_path: Path = DEFAULT_DATABASE, mode: str = "replace") -> dict[str, Any]:

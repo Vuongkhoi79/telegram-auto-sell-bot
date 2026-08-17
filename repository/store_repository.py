@@ -42,7 +42,42 @@ CANONICAL_CATALOG_PRODUCTS = {
     "CAPCUT_30D": {"name": "CAPCUT PRO 30 ngay", "price_vnd": 45000},
     "GEMINI": {"name": "Gemini AI Pro", "price_vnd": 70000},
     "GROK_75K": {"name": "SUPERGROK AI", "price_vnd": 75000},
+    "WINDOWS_10": {"name": "Windows 10", "price_vnd": 350000, "category_key": "WINDOWS"},
+    "WINDOWS_11": {"name": "Windows 11", "price_vnd": 500000, "category_key": "WINDOWS"},
 }
+
+WINDOWS_STARTUP_PRODUCTS = (
+    {
+        "code": "CATALOG-WINDOWS",
+        "name": "WINDOWS",
+        "category_key": "WINDOWS",
+        "category": "account",
+        "duration": "LIFETIME",
+        "price_vnd": 0,
+        "warranty_days": 0,
+        "menu_order": 19,
+    },
+    {
+        "code": "WINDOWS_10",
+        "name": "Windows 10",
+        "category_key": "WINDOWS",
+        "category": "account",
+        "duration": "LIFETIME",
+        "price_vnd": 350000,
+        "warranty_days": 0,
+        "menu_order": 19,
+    },
+    {
+        "code": "WINDOWS_11",
+        "name": "Windows 11",
+        "category_key": "WINDOWS",
+        "category": "account",
+        "duration": "LIFETIME",
+        "price_vnd": 500000,
+        "warranty_days": 0,
+        "menu_order": 20,
+    },
+)
 
 
 def canonical_catalog_product(product_code: str) -> dict[str, Any] | None:
@@ -91,6 +126,11 @@ ACCOUNT_PRODUCT_CODE_ALIASES: dict[str, tuple[str, ...]] = {
     "MICROSOFT OFFICE": ("OFFICE_2024_LIFETIME",),
     "MICROSOFT OFFICE LTSC 2024 PROFESSIONAL PLUS": ("OFFICE_2024_LIFETIME",),
     "OFFICE_2024_LIFETIME": ("OFFICE", "MICROSOFT OFFICE", "MICROSOFT OFFICE LTSC 2024 PROFESSIONAL PLUS"),
+    "WINDOWS": ("WINDOWS_10", "WINDOWS_11"),
+    "WINDOWS_10": ("WINDOWS 10",),
+    "WINDOWS 10": ("WINDOWS_10",),
+    "WINDOWS_11": ("WINDOWS 11",),
+    "WINDOWS 11": ("WINDOWS_11",),
     "HEYGEN": ("HEYGEN-1M-PRIVATE",),
     "HEYGEN AI": ("HEYGEN-1M-PRIVATE",),
     "HIGGFIELD": ("HIGGSFIELD-1M-PRIVATE",),
@@ -111,10 +151,15 @@ ACCOUNT_PRODUCT_CODE_ALIASES: dict[str, tuple[str, ...]] = {
 def public_delivery_credential(product_code: str, credential_text: str) -> str:
     """Return the customer-facing credential for a reserved inventory item."""
     credential_text = str(credential_text or "").strip()
-    if str(product_code or "").strip().upper() == "OFFICE_2024_LIFETIME":
+    normalized_product_code = str(product_code or "").strip().upper()
+    if normalized_product_code in {"OFFICE_2024_LIFETIME", "WINDOWS_10", "WINDOWS_11"}:
         parts = [part.strip() for part in credential_text.split("|", 1)]
         product_key = parts[0] if parts else credential_text
-        version = parts[1] if len(parts) > 1 else "Office-2024-LTSC"
+        version = parts[1] if len(parts) > 1 else {
+            "OFFICE_2024_LIFETIME": "Office-2024-LTSC",
+            "WINDOWS_10": "Windows-10",
+            "WINDOWS_11": "Windows-11",
+        }.get(normalized_product_code, "")
         return (
             "🔑 Product Key:\n"
             f"{product_key}\n\n"
@@ -123,7 +168,7 @@ def public_delivery_credential(product_code: str, credential_text: str) -> str:
             "🛡 Bảo hành:\n"
             "Trọn đời"
         )
-    if str(product_code or "").strip().upper() != "CHATGPT_SHARED":
+    if normalized_product_code != "CHATGPT_SHARED":
         return credential_text
     parts = [part.strip() for part in credential_text.split("|")]
     if len(parts) >= 2 and parts[0] and parts[1]:
@@ -186,6 +231,8 @@ class StoreRepository:
                     connection.execute(f"ALTER TABLE orders ADD COLUMN {name} {definition}")
             now = _utc_now_iso()
             for code, product in CANONICAL_CATALOG_PRODUCTS.items():
+                if code in {"WINDOWS_10", "WINDOWS_11"}:
+                    continue
                 connection.execute(
                     """
                     UPDATE products
@@ -193,7 +240,31 @@ class StoreRepository:
                         delivery_type = 'account', name = ?, price_vnd = ?, updated_at = ?
                     WHERE UPPER(code) = ?
                     """,
-                    (code, str(product["name"]), int(product["price_vnd"]), now, code),
+                    (str(product.get("category_key", code)), str(product["name"]), int(product["price_vnd"]), now, code),
+                )
+            for product in WINDOWS_STARTUP_PRODUCTS:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO products
+                        (id, code, name, active, delivery_type, created_at, updated_at,
+                         category, account_type, duration, price_vnd, warranty_days, note,
+                         menu_order, show_in_menu, product_group, category_key, description)
+                    VALUES (?, ?, ?, 1, 'account', ?, ?, ?, '', ?, ?, ?, '',
+                            ?, 1, 'account', ?, '')
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        str(product["code"]),
+                        str(product["name"]),
+                        now,
+                        now,
+                        str(product["category"]),
+                        str(product["duration"]),
+                        int(product["price_vnd"]),
+                        int(product["warranty_days"]),
+                        int(product["menu_order"]),
+                        str(product["category_key"]),
+                    ),
                 )
 
     def _product_code_candidates(self, product_code: str) -> list[str]:
@@ -524,6 +595,8 @@ class StoreRepository:
                                 THEN 'CAPCUT'
                             WHEN UPPER(p.code) = 'GROK-SUPER-1M-PRIVATE'
                                 THEN 'GROK'
+                            WHEN UPPER(p.code) IN ('WINDOWS_10', 'WINDOWS_11')
+                                THEN 'WINDOWS'
                             ELSE UPPER(p.code)
                         END AS menu_code,
                         p.code,
@@ -632,6 +705,8 @@ class StoreRepository:
                                 THEN 'CAPCUT_7D'
                             WHEN UPPER(p.code) = 'GROK-SUPER-1M-PRIVATE'
                                 THEN 'GROK'
+                            WHEN UPPER(p.code) IN ('WINDOWS_10', 'WINDOWS_11')
+                                THEN 'WINDOWS'
                             WHEN UPPER(p.code) = ?
                                 THEN UPPER(p.code)
                             ELSE UPPER(COALESCE(NULLIF(p.category_key, ''), NULLIF(p.category, ''), p.code))

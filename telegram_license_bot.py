@@ -154,6 +154,7 @@ PRODUCT_ORDER = [
     "GEMINI AI",
     "SUPERGROK AI",
     "OFFICE_2024_LIFETIME",
+    "WINDOWS",
     "HEYGEN AI",
     "HIGGFIELD",
     "KLING",
@@ -174,6 +175,9 @@ CATALOG_DISPLAY_NAMES = {
     "GEMINI": "GEMINI AI",
     "GROK_75K": "SUPERGROK AI",
     "OFFICE_2024_LIFETIME": "Microsoft Office LTSC 2024 Professional Plus",
+    "WINDOWS": "WINDOWS",
+    "WINDOWS_10": "Windows 10",
+    "WINDOWS_11": "Windows 11",
 }
 
 # UI callback keys stay unchanged. Add aliases here when extending the catalog.
@@ -221,6 +225,11 @@ TELEGRAM_PRODUCT_CODE_MAP = {
     "MICROSOFT OFFICE LTSC 2024 PROFESSIONAL PLUS": "OFFICE_2024_LIFETIME",
     "OFFICE": "OFFICE_2024_LIFETIME",
     "OFFICE_2024_LIFETIME": "OFFICE_2024_LIFETIME",
+    "WINDOWS": "WINDOWS",
+    "WINDOWS_10": "WINDOWS_10",
+    "WINDOWS 10": "WINDOWS_10",
+    "WINDOWS_11": "WINDOWS_11",
+    "WINDOWS 11": "WINDOWS_11",
     "HEYGEN": "HEYGEN-1M-PRIVATE",
     "HEYGEN AI": "HEYGEN-1M-PRIVATE",
     "HIGGSFIELD": "HIGGSFIELD-1M-PRIVATE",
@@ -851,6 +860,12 @@ def _menu_stock_product_code(product_key: str) -> str | None:
         return "GROK_75K"
     if normalized_key.startswith("OFFICE") or normalized_key.startswith("MICROSOFT OFFICE"):
         return "OFFICE_2024_LIFETIME"
+    if normalized_key.startswith("WINDOWS_10") or normalized_key.startswith("WINDOWS 10"):
+        return "WINDOWS_10"
+    if normalized_key.startswith("WINDOWS_11") or normalized_key.startswith("WINDOWS 11"):
+        return "WINDOWS_11"
+    if normalized_key.startswith("WINDOWS"):
+        return "WINDOWS"
     if normalized_key.startswith("CAPCUT_7D") or "CAPCUT PRO 7D" in normalized_key or "CAPCUT PRO 7 NGAY" in normalized_key or "CAPCUT PRO 7 NGÀY" in normalized_key:
         return "CAPCUT_7D"
     if normalized_key.startswith("CAPCUT_30D") or "CAPCUT PRO 30D" in normalized_key or "CAPCUT PRO 30 NGAY" in normalized_key or "CAPCUT PRO 30 NGÀY" in normalized_key:

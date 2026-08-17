@@ -17,7 +17,7 @@ CATALOG = [
     ("CANVA", "CANVA"), ("HEYGEN", "HEYGEN AI"), ("CLAUDE", "CLAUDE AI"),
     ("GAMMA", "GAMMA AI"), ("CURSOR", "Cursor AI"), ("ADOBE", "ADOBE"),
     ("VIEWMAX", "viewmax"), ("ARTLIST", "ARTLIST"), ("KREA", "KREA AI"),
-    ("DREAMINA", "Dreamina"), ("GMAIL", "GMAIL"),
+    ("DREAMINA", "Dreamina"), ("GMAIL", "GMAIL"), ("WINDOWS", "WINDOWS"),
 ]
 
 def main() -> None:
