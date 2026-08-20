@@ -42,6 +42,7 @@ CANONICAL_CATALOG_PRODUCTS = {
     "CAPCUT_30D": {"name": "CAPCUT PRO 30 ngay", "price_vnd": 45000},
     "GEMINI": {"name": "Gemini AI Pro", "price_vnd": 70000},
     "GROK_75K": {"name": "SUPERGROK AI", "price_vnd": 75000},
+    "OFFICE_365_PLUS_12M": {"name": "Microsoft Office 365 Plus 1 Month + 11 Months (GIFT)", "price_vnd": 299000, "category_key": "OFFICE"},
     "WINDOWS_10": {"name": "Windows 10", "price_vnd": 350000, "category_key": "WINDOWS"},
     "WINDOWS_11": {"name": "Windows 11", "price_vnd": 500000, "category_key": "WINDOWS"},
 }
@@ -122,8 +123,10 @@ ACCOUNT_PRODUCT_CODE_ALIASES: dict[str, tuple[str, ...]] = {
     "GROK SUPER": ("GROK_75K",),
     "SUPERGROK AI": ("GROK_75K",),
     "GROK_75K": ("GROK SUPER", "SUPERGROK AI"),
-    "OFFICE": ("OFFICE_2024_LIFETIME",),
-    "MICROSOFT OFFICE": ("OFFICE_2024_LIFETIME",),
+    "OFFICE": ("OFFICE_2024_LIFETIME", "OFFICE_365_PLUS_12M"),
+    "MICROSOFT OFFICE": ("OFFICE_2024_LIFETIME", "OFFICE_365_PLUS_12M"),
+    "MICROSOFT OFFICE 365 PLUS 1 MONTH + 11 MONTHS (GIFT)": ("OFFICE_365_PLUS_12M",),
+    "OFFICE_365_PLUS_12M": ("OFFICE 365", "MICROSOFT OFFICE 365 PLUS 1 MONTH + 11 MONTHS (GIFT)"),
     "MICROSOFT OFFICE LTSC 2024 PROFESSIONAL PLUS": ("OFFICE_2024_LIFETIME",),
     "OFFICE_2024_LIFETIME": ("OFFICE", "MICROSOFT OFFICE", "MICROSOFT OFFICE LTSC 2024 PROFESSIONAL PLUS"),
     "WINDOWS": ("WINDOWS_10", "WINDOWS_11"),
@@ -167,6 +170,18 @@ def public_delivery_credential(product_code: str, credential_text: str) -> str:
             f"{version}\n\n"
             "🛡 Bảo hành:\n"
             "Trọn đời"
+        )
+    if normalized_product_code == "OFFICE_365_PLUS_12M":
+        parts = [part.strip() for part in credential_text.split("|")]
+        email = parts[0] if len(parts) >= 1 else ""
+        password = parts[1] if len(parts) >= 2 else ""
+        return (
+            "Email:\n"
+            f"{email}\n\n"
+            "Password:\n"
+            f"{password}\n\n"
+            "Login:\n"
+            "https://portal.office.com"
         )
     if normalized_product_code != "CHATGPT_SHARED":
         return credential_text
@@ -591,6 +606,8 @@ class StoreRepository:
                                 THEN 'CHATGPT'
                             WHEN UPPER(p.code) = 'GEM-AIPRO-1M-PRIVATE'
                                 THEN 'GEMINI'
+                            WHEN UPPER(p.code) IN ('OFFICE_2024_LIFETIME', 'OFFICE_365_PLUS_12M')
+                                THEN 'OFFICE'
                             WHEN UPPER(p.code) IN ('CAPCUT', 'CAPCUT_12M', 'CAPCUT_365D', 'CAPCUT_60D', 'CAPCUT_30D', 'CAPCUT_7D', 'CAPCUT-PRO-1M-PRIVATE', 'CAPCUT-PRO-12M-PRIVATE', 'CAPCUT-PRO-60D-PRIVATE', 'CAPCUT-PRO-30D-PRIVATE', 'CAPCUT-PRO-7D-PRIVATE')
                                 THEN 'CAPCUT'
                             WHEN UPPER(p.code) = 'GROK-SUPER-1M-PRIVATE'
@@ -687,6 +704,8 @@ class StoreRepository:
                                 THEN 'CHATGPT'
                             WHEN UPPER(p.code) = 'GEM-AIPRO-1M-PRIVATE'
                                 THEN 'GEMINI'
+                            WHEN UPPER(p.code) IN ('OFFICE_2024_LIFETIME', 'OFFICE_365_PLUS_12M')
+                                THEN 'OFFICE'
                             WHEN ? = 'CAPCUT' AND UPPER(p.code) IN ('CAPCUT', 'CAPCUT_365D', 'CAPCUT_12M', 'CAPCUT-PRO-1M-PRIVATE', 'CAPCUT-PRO-12M-PRIVATE')
                                 THEN 'CAPCUT'
                             WHEN ? = 'CAPCUT' AND UPPER(p.code) IN ('CAPCUT_60D', 'CAPCUT-PRO-60D-PRIVATE')

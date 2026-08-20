@@ -140,6 +140,9 @@ CAPCUT_PACKAGE_FALLBACK_PRICES = {
     "CAPCUT_60D": 90000,
     "CAPCUT_365D": 420000,
 }
+OFFICE_CATEGORY_KEY = "OFFICE"
+OFFICE_2024_CODE = "OFFICE_2024_LIFETIME"
+OFFICE_365_CODE = "OFFICE_365_PLUS_12M"
 PRODUCT_ORDER = [
     "ADOBE",
     "ARTLIST",
@@ -153,7 +156,7 @@ PRODUCT_ORDER = [
     "GAMMA AI",
     "GEMINI AI",
     "SUPERGROK AI",
-    "OFFICE_2024_LIFETIME",
+    "OFFICE",
     "WINDOWS",
     "HEYGEN AI",
     "HIGGFIELD",
@@ -174,7 +177,9 @@ CATALOG_DISPLAY_NAMES = {
     "CHATGPT_SHARED": "ChatGPT Plus dùng chung",
     "GEMINI": "GEMINI AI",
     "GROK_75K": "SUPERGROK AI",
+    "OFFICE": "Microsoft Office",
     "OFFICE_2024_LIFETIME": "Microsoft Office LTSC 2024 Professional Plus",
+    "OFFICE_365_PLUS_12M": "Microsoft Office 365 Plus 1 Month + 11 Months (GIFT)",
     "WINDOWS": "WINDOWS",
     "WINDOWS_10": "Windows 10",
     "WINDOWS_11": "Windows 11",
@@ -222,9 +227,12 @@ TELEGRAM_PRODUCT_CODE_MAP = {
     "GROK SUPER": "GROK_75K",
     "SUPERGROK AI": "GROK_75K",
     "GROK_75K": "GROK_75K",
+    "MICROSOFT OFFICE": "OFFICE",
     "MICROSOFT OFFICE LTSC 2024 PROFESSIONAL PLUS": "OFFICE_2024_LIFETIME",
-    "OFFICE": "OFFICE_2024_LIFETIME",
+    "MICROSOFT OFFICE 365 PLUS 1 MONTH + 11 MONTHS (GIFT)": "OFFICE_365_PLUS_12M",
+    "OFFICE": "OFFICE",
     "OFFICE_2024_LIFETIME": "OFFICE_2024_LIFETIME",
+    "OFFICE_365_PLUS_12M": "OFFICE_365_PLUS_12M",
     "WINDOWS": "WINDOWS",
     "WINDOWS_10": "WINDOWS_10",
     "WINDOWS 10": "WINDOWS_10",
@@ -858,8 +866,12 @@ def _menu_stock_product_code(product_key: str) -> str | None:
         return "GEMINI"
     if normalized_key.startswith("GROK") or normalized_key.startswith("SUPERGROK"):
         return "GROK_75K"
-    if normalized_key.startswith("OFFICE") or normalized_key.startswith("MICROSOFT OFFICE"):
-        return "OFFICE_2024_LIFETIME"
+    if normalized_key in {"OFFICE", "MICROSOFT OFFICE"}:
+        return OFFICE_CATEGORY_KEY
+    if normalized_key.startswith("OFFICE_365") or "OFFICE 365" in normalized_key or "MICROSOFT OFFICE 365" in normalized_key:
+        return OFFICE_365_CODE
+    if normalized_key.startswith("OFFICE_2024") or "OFFICE LTSC 2024" in normalized_key or "MICROSOFT OFFICE LTSC 2024" in normalized_key:
+        return OFFICE_2024_CODE
     if normalized_key.startswith("WINDOWS_10") or normalized_key.startswith("WINDOWS 10"):
         return "WINDOWS_10"
     if normalized_key.startswith("WINDOWS_11") or normalized_key.startswith("WINDOWS 11"):
@@ -3203,7 +3215,7 @@ def _product_detail_keyboard(product_name: str, available: bool) -> InlineKeyboa
 
 def _package_warranty_button_line(package: dict[str, object]) -> str:
     product_code = str(package.get("product_code", "") or "").strip().upper()
-    if not _is_lifetime_warranty_product(product_code):
+    if product_code not in {OFFICE_2024_CODE, OFFICE_365_CODE}:
         return ""
     try:
         product = StoreRepository(_resolve_store_db_path()).get_product_details(product_code)

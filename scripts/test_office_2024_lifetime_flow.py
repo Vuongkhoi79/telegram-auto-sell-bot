@@ -22,6 +22,10 @@ from scripts.import_inventory import REQUIRED_COLUMNS, import_inventory
 
 OFFICE_CODE = "OFFICE_2024_LIFETIME"
 OFFICE_NAME = "Microsoft Office LTSC 2024 Professional Plus"
+OFFICE_CATEGORY = "OFFICE"
+OFFICE_CATEGORY_NAME = "Microsoft Office"
+OFFICE_365_CODE = "OFFICE_365_PLUS_12M"
+OFFICE_365_NAME = "Microsoft Office 365 Plus 1 Month + 11 Months (GIFT)"
 
 
 class FakeQuery:
@@ -96,6 +100,34 @@ def _write_office_workbook(path: Path, count: int = 15) -> list[str]:
     return credentials
 
 
+def _write_office_365_workbook(path: Path, count: int = 3) -> list[str]:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = OFFICE_365_CODE
+    sheet.append(REQUIRED_COLUMNS)
+    credentials: list[str] = []
+    for index in range(count):
+        credential = f"office365-user-{index}@example.test|office365-secret-{index}"
+        credentials.append(credential)
+        sheet.append(
+            [
+                OFFICE_365_CODE,
+                "account",
+                OFFICE_365_NAME,
+                "account",
+                "1M+11M_GIFT",
+                299000,
+                365,
+                credential,
+                "",
+                1,
+            ]
+        )
+    workbook.save(path)
+    workbook.close()
+    return credentials
+
+
 def test_office_2024_lifetime_import_menu_order_and_delivery() -> None:
     previous_store_db_path = os.environ.get("STORE_DB_PATH")
     previous_make_order_id = bot._make_order_id
@@ -127,7 +159,7 @@ def test_office_2024_lifetime_import_menu_order_and_delivery() -> None:
             assert repo.get_stock_count(OFFICE_CODE) == 15
 
             menu_labels = [button.text for row in bot._product_menu_keyboard().inline_keyboard for button in row]
-            assert any(f"{OFFICE_NAME} (15)" in label for label in menu_labels)
+            assert any(f"{OFFICE_CATEGORY_NAME} (15)" in label for label in menu_labels)
 
             quantity_text = bot._quantity_text(OFFICE_NAME, OFFICE_CODE)
             assert OFFICE_NAME in quantity_text
@@ -215,6 +247,156 @@ def test_office_2024_lifetime_import_menu_order_and_delivery() -> None:
                 os.environ["STORE_DB_PATH"] = previous_store_db_path
 
 
+def test_office_365_plus_import_menu_payment_and_account_delivery_is_separate_from_office_2024() -> None:
+    previous_store_db_path = os.environ.get("STORE_DB_PATH")
+    previous_make_order_id = bot._make_order_id
+    previous_orders_path = bot.ORDERS_DB_PATH
+    previous_business_partners_path = bot.BUSINESS_PARTNERS_PATH
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        db_path = root / "store.db"
+        office_2024_workbook = root / "office-2024.xlsx"
+        office_365_workbook = root / "office-365.xlsx"
+        orders_path = root / "orders.json"
+        bot._initialize_store_db(db_path)
+        _write_office_workbook(office_2024_workbook, count=15)
+        _write_office_365_workbook(office_365_workbook, count=2)
+
+        office_2024_report = import_inventory(office_2024_workbook, db_path, mode="replace")
+        office_365_report = import_inventory(office_365_workbook, db_path, mode="append")
+        assert office_2024_report["row_errors"] == 0
+        assert office_365_report["row_errors"] == 0
+        assert office_365_report["credentials_added"] == 2
+        assert office_365_report["stock"] == {OFFICE_365_CODE: 2}
+
+        try:
+            os.environ["STORE_DB_PATH"] = str(db_path)
+            bot.ORDERS_DB_PATH = orders_path
+            bot.BUSINESS_PARTNERS_PATH = root / "business_partners.json"
+            context = SimpleNamespace(
+                application=SimpleNamespace(
+                    bot_data={
+                        "store_db_path": db_path,
+                        "bot_username": "AIDailyBot",
+                        "payment_service": PaymentService(
+                            PaymentConfig(
+                                bank_name="ACB",
+                                bank_account="123456789",
+                                bank_account_name="AI STORE",
+                                qr_url="",
+                            )
+                        ),
+                    }
+                ),
+                args=[],
+                user_data={},
+            )
+            repo = StoreRepository(db_path)
+            office_365_product = repo.get_product_details(OFFICE_365_CODE)
+            assert office_365_product is not None
+            assert office_365_product["account_type"] == "account"
+            assert office_365_product["duration"] == "1M+11M_GIFT"
+            assert office_365_product["price_vnd"] == 299000
+            assert office_365_product["warranty_days"] == 365
+            assert repo.get_stock_count(OFFICE_CODE) == 15
+            assert repo.get_stock_count(OFFICE_365_CODE) == 2
+
+            menu_buttons = [button for row in bot._product_menu_keyboard().inline_keyboard for button in row]
+            office_button = next(button for button in menu_buttons if OFFICE_CATEGORY_NAME in button.text)
+            assert office_button.callback_data == f"product:{OFFICE_CATEGORY}"
+            assert "(17)" in office_button.text
+
+            product_update = FakeUpdate(f"product:{OFFICE_CATEGORY}")
+            asyncio.run(bot._on_menu_impl(product_update, context))
+            package_markup = product_update.callback_query.edits[-1][1]
+            package_buttons = [button for row in package_markup.inline_keyboard for button in row]
+            office_2024_button = next(button for button in package_buttons if button.callback_data == f"pkg:{OFFICE_CATEGORY}:{OFFICE_CODE}")
+            office_365_button = next(button for button in package_buttons if button.callback_data == f"pkg:{OFFICE_CATEGORY}:{OFFICE_365_CODE}")
+            assert "198.000" in office_2024_button.text
+            assert "299.000" in office_365_button.text
+            assert "2" in office_365_button.text
+            assert any(button.callback_data == "menu_products" for button in package_buttons)
+
+            package_update = FakeUpdate(f"pkg:{OFFICE_CATEGORY}:{OFFICE_365_CODE}")
+            asyncio.run(bot._on_menu_impl(package_update, context))
+            quantity_text = package_update.callback_query.edits[-1][0]
+            assert OFFICE_365_NAME.upper() in quantity_text
+            assert "299.000" in quantity_text
+            assert "Kho: 2" in quantity_text
+            quantity_markup = package_update.callback_query.edits[-1][1]
+            quantity_buttons = [button for row in quantity_markup.inline_keyboard for button in row]
+            assert any(button.callback_data == f"qty:{OFFICE_CATEGORY}:{OFFICE_365_CODE}:1" for button in quantity_buttons)
+            assert any(button.callback_data == f"product:{OFFICE_CATEGORY}" for button in quantity_buttons)
+
+            bot._make_order_id = lambda _product_name: "ORD-OFFICE365-CB-1"
+            qty_update = FakeUpdate(f"qty:{OFFICE_CATEGORY}:{OFFICE_365_CODE}:1")
+            asyncio.run(bot._on_menu_impl(qty_update, context))
+            assert context.user_data["dtkd_order_ref"] == {
+                "product_code": OFFICE_CATEGORY,
+                "package_code": OFFICE_365_CODE,
+                "quantity": 1,
+            }
+
+            skip_update = FakeUpdate("dtkd_order_ref_skip")
+            asyncio.run(bot._on_menu_impl(skip_update, context))
+            payment_text, payment_markup = skip_update.callback_query.edits[-1]
+            assert "299.000" in payment_text
+            pay_button = next(
+                button
+                for row in payment_markup.inline_keyboard
+                for button in row
+                if button.callback_data.startswith("pay_acb:")
+            )
+            assert pay_button.callback_data == "pay_acb:ORD-OFFICE365-CB-1"
+
+            order = repo.find_order("ORD-OFFICE365-CB-1")
+            assert order is not None
+            assert order["product_code"] == OFFICE_365_CODE
+            assert order["package_code"] == OFFICE_365_CODE
+            assert order["unit_price"] == 299000
+            assert order["total"] == 299000
+
+            repo.mark_order_paid("ORD-OFFICE365-CB-1", "TX-OFFICE365-CB-1")
+
+            async def send_message(chat_id, text, reply_markup=None):
+                return None
+
+            context.bot = SimpleNamespace(send_message=send_message)
+            fulfillment = asyncio.run(bot.fulfill_order(context, "ORD-OFFICE365-CB-1"))
+            assert fulfillment["ok"] is True
+            delivery_text = str(fulfillment["delivery"])
+            assert "Email:" in delivery_text
+            assert "Password:" in delivery_text
+            assert "Login:" in delivery_text
+            assert "https://portal.office.com" in delivery_text
+            assert "Product Key:" not in delivery_text
+            assert "Office-2024-LTSC" not in delivery_text
+            assert repo.get_stock_count(OFFICE_CODE) == 15
+            assert repo.get_stock_count(OFFICE_365_CODE) == 1
+
+            with closing(sqlite3.connect(db_path)) as connection:
+                wrong_product_count = connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM order_inventory_items AS oi
+                    JOIN inventory_items AS i ON i.id = oi.inventory_item_id
+                    JOIN products AS p ON p.id = i.product_id
+                    WHERE oi.order_id = (SELECT id FROM orders WHERE order_id = ?)
+                      AND p.code != ?
+                    """,
+                    ("ORD-OFFICE365-CB-1", OFFICE_365_CODE),
+                ).fetchone()[0]
+            assert wrong_product_count == 0
+        finally:
+            bot._make_order_id = previous_make_order_id
+            bot.ORDERS_DB_PATH = previous_orders_path
+            bot.BUSINESS_PARTNERS_PATH = previous_business_partners_path
+            if previous_store_db_path is None:
+                os.environ.pop("STORE_DB_PATH", None)
+            else:
+                os.environ["STORE_DB_PATH"] = previous_store_db_path
+
+
 def test_office_2024_lifetime_callback_payment_and_delivery_with_software_category_key() -> None:
     previous_store_db_path = os.environ.get("STORE_DB_PATH")
     previous_make_order_id = bot._make_order_id
@@ -268,11 +450,11 @@ def test_office_2024_lifetime_callback_payment_and_delivery_with_software_catego
             )
 
             menu_buttons = [button for row in bot._product_menu_keyboard().inline_keyboard for button in row]
-            office_button = next(button for button in menu_buttons if OFFICE_NAME in button.text)
-            assert office_button.callback_data == f"product:{OFFICE_CODE}"
+            office_button = next(button for button in menu_buttons if OFFICE_CATEGORY_NAME in button.text)
+            assert office_button.callback_data == f"product:{OFFICE_CATEGORY}"
             assert "(15)" in office_button.text
 
-            product_update = FakeUpdate(f"product:{OFFICE_CODE}")
+            product_update = FakeUpdate(f"product:{OFFICE_CATEGORY}")
             asyncio.run(bot._on_menu_impl(product_update, context))
             product_detail_text = product_update.callback_query.edits[-1][0]
             assert "Bảo hành: Trọn đời" in product_detail_text
@@ -282,8 +464,7 @@ def test_office_2024_lifetime_callback_payment_and_delivery_with_software_catego
             assert "Bảo hành: 7 ngày" not in product_detail_text
             package_markup = product_update.callback_query.edits[-1][1]
             package_buttons = [button for row in package_markup.inline_keyboard for button in row]
-            package_button = next(button for button in package_buttons if button.callback_data.startswith("pkg:"))
-            assert package_button.callback_data == f"pkg:{OFFICE_CODE}:{OFFICE_CODE}"
+            package_button = next(button for button in package_buttons if button.callback_data == f"pkg:{OFFICE_CATEGORY}:{OFFICE_CODE}")
             assert "198.000" in package_button.text
             assert "15" in package_button.text
             assert "Bảo hành: Trọn đời" in package_button.text
@@ -292,7 +473,7 @@ def test_office_2024_lifetime_callback_payment_and_delivery_with_software_catego
             assert "12M" not in package_button.text
             assert "Bảo hành: 7 ngày" not in package_button.text
 
-            package_update = FakeUpdate(f"pkg:{OFFICE_CODE}:{OFFICE_CODE}")
+            package_update = FakeUpdate(f"pkg:{OFFICE_CATEGORY}:{OFFICE_CODE}")
             asyncio.run(bot._on_menu_impl(package_update, context))
             quantity_text = package_update.callback_query.edits[-1][0]
             assert "Bảo hành: Trọn đời" in quantity_text
@@ -302,15 +483,15 @@ def test_office_2024_lifetime_callback_payment_and_delivery_with_software_catego
             assert "Bảo hành: 7 ngày" not in quantity_text
             quantity_markup = package_update.callback_query.edits[-1][1]
             quantity_buttons = [button for row in quantity_markup.inline_keyboard for button in row]
-            assert any(button.callback_data == f"qty:{OFFICE_CODE}:{OFFICE_CODE}:1" for button in quantity_buttons)
-            assert any(button.callback_data == f"qty:{OFFICE_CODE}:{OFFICE_CODE}:2" for button in quantity_buttons)
+            assert any(button.callback_data == f"qty:{OFFICE_CATEGORY}:{OFFICE_CODE}:1" for button in quantity_buttons)
+            assert any(button.callback_data == f"qty:{OFFICE_CATEGORY}:{OFFICE_CODE}:2" for button in quantity_buttons)
 
             bot._make_order_id = lambda _product_name: "ORD-OFFICE-CB-1"
-            qty_update = FakeUpdate(f"qty:{OFFICE_CODE}:{OFFICE_CODE}:1")
+            qty_update = FakeUpdate(f"qty:{OFFICE_CATEGORY}:{OFFICE_CODE}:1")
             asyncio.run(bot._on_menu_impl(qty_update, context))
             assert "dtkd_order_ref" in context.user_data
             assert context.user_data["dtkd_order_ref"] == {
-                "product_code": OFFICE_CODE,
+                "product_code": OFFICE_CATEGORY,
                 "package_code": OFFICE_CODE,
                 "quantity": 1,
             }
@@ -376,7 +557,7 @@ def test_office_2024_lifetime_callback_payment_and_delivery_with_software_catego
             assert repo.get_stock_count(OFFICE_CODE) == 14
 
             bot._make_order_id = lambda _product_name: "ORD-OFFICE-CB-2"
-            qty_two_update = FakeUpdate(f"qty:{OFFICE_CODE}:{OFFICE_CODE}:2")
+            qty_two_update = FakeUpdate(f"qty:{OFFICE_CATEGORY}:{OFFICE_CODE}:2")
             asyncio.run(bot._on_menu_impl(qty_two_update, context))
             skip_two_update = FakeUpdate("dtkd_order_ref_skip")
             asyncio.run(bot._on_menu_impl(skip_two_update, context))
