@@ -4853,30 +4853,54 @@ async def _reply_with_gemini(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return False
     try:
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-        response = await asyncio.wait_for(
-            client.aio.models.generate_content(
-                model=context.application.bot_data["gemini_model"],
-                contents=text,
-                config=genai_types.GenerateContentConfig(
-                    system_instruction=_gemini_system_instruction(
-                        context.application.bot_data["store_db_path"]
+        response = None
+        last_error = None
+        configured_model = context.application.bot_data["gemini_model"]
+        models_to_try = [configured_model, "gemini-3.1-flash-lite"]
+        for attempt, model_name in enumerate(models_to_try, start=1):
+            try:
+                response = await asyncio.wait_for(
+                    client.aio.models.generate_content(
+                        model=model_name,
+                        contents=text,
+                        config=genai_types.GenerateContentConfig(
+                            system_instruction=_gemini_system_instruction(
+                                context.application.bot_data["store_db_path"]
+                            ),
+                            temperature=0.2,
+                            max_output_tokens=512,
+                            thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+                        ),
                     ),
-                    temperature=0.2,
-                    max_output_tokens=300,
-                ),
-            ),
-            timeout=35,
-        )
+                    timeout=35,
+                )
+                break
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "Gemini request failed telegram_user_id=%s model=%s attempt=%s/%s error_type=%s error=%s",
+                    getattr(update.effective_user, "id", None),
+                    model_name,
+                    attempt,
+                    len(models_to_try),
+                    type(exc).__name__,
+                    str(exc)[:1000],
+                )
+                if attempt < len(models_to_try):
+                    await asyncio.sleep(1)
+        if response is None:
+            raise last_error or RuntimeError("Gemini request failed without an exception")
         reply = str(getattr(response, "text", "") or "").strip()
         if not reply:
             raise ValueError("Gemini returned an empty response")
         await update.effective_message.reply_text(reply[:4000])
         return True
     except Exception as exc:
-        logger.warning(
-            "Gemini sales assistant failed telegram_user_id=%s error=%s",
+        logger.exception(
+            "Gemini sales assistant failed telegram_user_id=%s error_type=%s error=%s",
             getattr(update.effective_user, "id", None),
             type(exc).__name__,
+            str(exc)[:1000],
         )
         await update.effective_message.reply_text(GEMINI_FALLBACK_TEXT)
         return True
@@ -6182,7 +6206,7 @@ def _load_config() -> dict[str, str]:
         "TOOL_DOWNLOAD_URL": os.environ.get("TOOL_DOWNLOAD_URL", "").strip(),
         "SUPPORT_USERNAME": os.environ.get("SUPPORT_USERNAME", "").strip(),
         "GEMINI_API_KEY": os.environ.get("GEMINI_API_KEY", "").strip(),
-        "GEMINI_MODEL": os.environ.get("GEMINI_MODEL", "gemini-3.8-flash").strip() or "gemini-3.8-flash",
+        "GEMINI_MODEL": os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite").strip() or "gemini-3.1-flash-lite",
     }
 
 
