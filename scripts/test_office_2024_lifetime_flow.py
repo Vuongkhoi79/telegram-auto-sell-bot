@@ -88,7 +88,7 @@ def _write_office_workbook(path: Path, count: int = 15) -> list[str]:
                 "Microsoft Office LTSC 2024 Professional Plus  Trọn đời",
                 "license_key",
                 "LIFETIME",
-                198000,
+                259000,
                 "LIFETIME",
                 credential,
                 "",
@@ -116,7 +116,7 @@ def _write_office_365_workbook(path: Path, count: int = 3) -> list[str]:
                 OFFICE_365_NAME,
                 "account",
                 "1M+11M_GIFT",
-                299000,
+                389000,
                 365,
                 credential,
                 "",
@@ -153,7 +153,7 @@ def test_office_2024_lifetime_import_menu_order_and_delivery() -> None:
             product = repo.get_product_details(OFFICE_CODE)
             assert product is not None
             assert product["code"] == OFFICE_CODE
-            assert product["price_vnd"] == 198000
+            assert product["price_vnd"] == 259000
             assert product["duration"] == "LIFETIME"
             assert product["warranty_days"] == 0
             assert repo.get_stock_count(OFFICE_CODE) == 15
@@ -180,8 +180,8 @@ def test_office_2024_lifetime_import_menu_order_and_delivery() -> None:
             bot._make_order_id = lambda _product_name: "ORD-OFFICE-1"
             order_one = bot._create_sales_order(fake_update, OFFICE_NAME, OFFICE_CODE, 1)
             assert order_one["product_code"] == OFFICE_CODE
-            assert order_one["unit_price"] == 198000
-            assert order_one["total"] == 198000
+            assert order_one["unit_price"] == 259000
+            assert order_one["total"] == 259000
 
             assert repo.mark_order_paid("ORD-OFFICE-1", "TX-OFFICE-1")
             delivered_one = repo.deliver_reserved_items("ORD-OFFICE-1")
@@ -221,8 +221,8 @@ def test_office_2024_lifetime_import_menu_order_and_delivery() -> None:
             bot._make_order_id = lambda _product_name: "ORD-OFFICE-2"
             order_two = bot._create_sales_order(fake_update, OFFICE_NAME, OFFICE_CODE, 2)
             assert order_two["product_code"] == OFFICE_CODE
-            assert order_two["unit_price"] == 198000
-            assert order_two["total"] == 396000
+            assert order_two["unit_price"] == 259000
+            assert order_two["total"] == 518000
 
             with closing(sqlite3.connect(db_path)) as connection:
                 old_or_other = connection.execute(
@@ -296,7 +296,7 @@ def test_office_365_plus_import_menu_payment_and_account_delivery_is_separate_fr
             assert office_365_product is not None
             assert office_365_product["account_type"] == "account"
             assert office_365_product["duration"] == "1M+11M_GIFT"
-            assert office_365_product["price_vnd"] == 299000
+            assert office_365_product["price_vnd"] == 389000
             assert office_365_product["warranty_days"] == 365
             assert repo.get_stock_count(OFFICE_CODE) == 15
             assert repo.get_stock_count(OFFICE_365_CODE) == 2
@@ -353,8 +353,8 @@ def test_office_365_plus_import_menu_payment_and_account_delivery_is_separate_fr
             assert order is not None
             assert order["product_code"] == OFFICE_365_CODE
             assert order["package_code"] == OFFICE_365_CODE
-            assert order["unit_price"] == 299000
-            assert order["total"] == 299000
+            assert order["unit_price"] == 389000
+            assert order["total"] == 389000
 
             repo.mark_order_paid("ORD-OFFICE365-CB-1", "TX-OFFICE365-CB-1")
 
@@ -521,8 +521,8 @@ def test_office_2024_lifetime_callback_payment_and_delivery_with_software_catego
             assert order_one["product_code"] == OFFICE_CODE
             assert order_one["package_code"] == OFFICE_CODE
             assert order_one["quantity"] == 1
-            assert order_one["unit_price"] == 198000
-            assert order_one["total"] == 198000
+            assert order_one["unit_price"] == 259000
+            assert order_one["total"] == 259000
 
             qr_update = FakeUpdate("pay_acb:ORD-OFFICE-CB-1")
             asyncio.run(bot._on_menu_impl(qr_update, context))
@@ -565,8 +565,8 @@ def test_office_2024_lifetime_callback_payment_and_delivery_with_software_catego
             assert order_two is not None
             assert order_two["product_code"] == OFFICE_CODE
             assert order_two["quantity"] == 2
-            assert order_two["unit_price"] == 198000
-            assert order_two["total"] == 396000
+            assert order_two["unit_price"] == 259000
+            assert order_two["total"] == 518000
             with closing(sqlite3.connect(db_path)) as connection:
                 other_reserved = connection.execute(
                     """
@@ -606,7 +606,7 @@ def test_office_import_updates_existing_product_warranty_to_lifetime_without_tou
                      category_key, product_group)
                 VALUES
                     ('office-product', ?, ?, 1, 'account', ?, ?,
-                     'SOFTWARE', 'license_key', 'LIFETIME', 198000, 7, '',
+                     'SOFTWARE', 'license_key', 'LIFETIME', 259000, 7, '',
                      'SOFTWARE', 'account')
                 """,
                 (OFFICE_CODE, OFFICE_NAME, now, now),
@@ -619,7 +619,7 @@ def test_office_import_updates_existing_product_warranty_to_lifetime_without_tou
                      delivery_type, payment_status, order_status, created_at)
                 VALUES
                     ('existing-order', 'ORD-OLD-OFFICE', 42, 'old', 'office-product', ?,
-                     ?, ?, 1, 198000, 198000, 'account', 'paid', 'delivered', ?)
+                     ?, ?, 1, 259000, 259000, 'account', 'paid', 'delivered', ?)
                 """,
                 (OFFICE_CODE, OFFICE_NAME, OFFICE_NAME, now),
             )
@@ -636,7 +636,7 @@ def test_office_import_updates_existing_product_warranty_to_lifetime_without_tou
         assert product is not None
         assert product["warranty_days"] == 0
         assert product["duration"] == "LIFETIME"
-        assert product["price_vnd"] == 198000
+        assert product["price_vnd"] == 259000
         assert repo.get_stock_count(OFFICE_CODE) == 15
         with closing(sqlite3.connect(db_path)) as connection:
             order_count = connection.execute("SELECT COUNT(*) FROM orders WHERE order_id = 'ORD-OLD-OFFICE'").fetchone()[0]

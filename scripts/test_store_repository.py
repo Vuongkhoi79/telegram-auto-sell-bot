@@ -736,8 +736,8 @@ class StoreRepositoryTest(unittest.TestCase):
                 now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
                 for code, name, price, order in (
                     ("CATALOG-WINDOWS", "WINDOWS", 0, 19),
-                    ("WINDOWS_10", "Windows 10", 350000, 19),
-                    ("WINDOWS_11", "Windows 11", 500000, 20),
+                    ("WINDOWS_10", "Windows 10", 459000, 19),
+                    ("WINDOWS_11", "Windows 11", 650000, 20),
                 ):
                     connection.execute(
                         """
@@ -765,8 +765,8 @@ class StoreRepositoryTest(unittest.TestCase):
             package_buttons = [button for row in bot._package_keyboard("WINDOWS").inline_keyboard for button in row]
             labels = [button.text for button in package_buttons]
             callbacks = [button.callback_data for button in package_buttons]
-            self.assertTrue(any("Windows 10" in label and "350.000" in label for label in labels))
-            self.assertTrue(any("Windows 11" in label and "500.000" in label for label in labels))
+            self.assertTrue(any("Windows 10" in label and "459.000" in label for label in labels))
+            self.assertTrue(any("Windows 11" in label and "650.000" in label for label in labels))
             self.assertIn("pkg:WINDOWS:WINDOWS_10", callbacks)
             self.assertIn("pkg:WINDOWS:WINDOWS_11", callbacks)
 
@@ -774,8 +774,8 @@ class StoreRepositoryTest(unittest.TestCase):
             windows11 = bot._get_package_info("WINDOWS", "WINDOWS_11")
             self.assertIsNotNone(windows10)
             self.assertIsNotNone(windows11)
-            self.assertEqual((windows10["price_vnd"], windows10["available_count"]), (350000, 1))
-            self.assertEqual((windows11["price_vnd"], windows11["available_count"]), (500000, 1))
+            self.assertEqual((windows10["price_vnd"], windows10["available_count"]), (459000, 1))
+            self.assertEqual((windows11["price_vnd"], windows11["available_count"]), (650000, 1))
 
             bot._make_order_id = lambda _product_name: "ORD-WINDOWS-10"
             fake_update = type(
@@ -784,7 +784,7 @@ class StoreRepositoryTest(unittest.TestCase):
                 {"effective_user": type("FakeUser", (), {"id": 42, "full_name": "Test User", "username": ""})()},
             )()
             order = bot._create_sales_order(fake_update, "WINDOWS", "WINDOWS_10", 1)
-            self.assertEqual((order["unit_price"], order["total"], order["product_code"]), (350000, 350000, "WINDOWS_10"))
+            self.assertEqual((order["unit_price"], order["total"], order["product_code"]), (459000, 459000, "WINDOWS_10"))
             self.assertEqual(StoreRepository(self.db_path).get_stock_count("WINDOWS_10"), 0)
             self.assertEqual(StoreRepository(self.db_path).get_stock_count("WINDOWS_11"), 1)
             delivered = public_delivery_credential("WINDOWS_10", "AAAAA-BBBBB-CCCCC-DDDDD-EEEEE|Windows-10")
@@ -819,8 +819,8 @@ class StoreRepositoryTest(unittest.TestCase):
         self.assertEqual(len(rows), 3)
         by_code = {row[0]: row for row in rows}
         self.assertEqual((by_code["CATALOG-WINDOWS"][1], by_code["CATALOG-WINDOWS"][2], by_code["CATALOG-WINDOWS"][3]), ("WINDOWS", "WINDOWS", 0))
-        self.assertEqual((by_code["WINDOWS_10"][1], by_code["WINDOWS_10"][2], by_code["WINDOWS_10"][3]), ("Windows 10", "WINDOWS", 350000))
-        self.assertEqual((by_code["WINDOWS_11"][1], by_code["WINDOWS_11"][2], by_code["WINDOWS_11"][3]), ("Windows 11", "WINDOWS", 500000))
+        self.assertEqual((by_code["WINDOWS_10"][1], by_code["WINDOWS_10"][2], by_code["WINDOWS_10"][3]), ("Windows 10", "WINDOWS", 459000))
+        self.assertEqual((by_code["WINDOWS_11"][1], by_code["WINDOWS_11"][2], by_code["WINDOWS_11"][3]), ("Windows 11", "WINDOWS", 650000))
 
     def test_quantity_reservation_boundaries_follow_available_stock(self) -> None:
         def fresh_repo_with_stock(stock: int) -> StoreRepository:

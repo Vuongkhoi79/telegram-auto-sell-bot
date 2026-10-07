@@ -42,9 +42,10 @@ CANONICAL_CATALOG_PRODUCTS = {
     "CAPCUT_30D": {"name": "CAPCUT PRO 30 ngay", "price_vnd": 45000},
     "GEMINI": {"name": "Gemini AI Pro", "price_vnd": 70000},
     "GROK_75K": {"name": "SUPERGROK AI", "price_vnd": 75000},
-    "OFFICE_365_PLUS_12M": {"name": "Microsoft Office 365 Plus 1 Month + 11 Months (GIFT)", "price_vnd": 299000, "category_key": "OFFICE"},
-    "WINDOWS_10": {"name": "Windows 10", "price_vnd": 350000, "category_key": "WINDOWS"},
-    "WINDOWS_11": {"name": "Windows 11", "price_vnd": 500000, "category_key": "WINDOWS"},
+    "OFFICE_2024_LIFETIME": {"name": "Microsoft Office LTSC 2024 Professional Plus", "price_vnd": 259000, "category_key": "OFFICE"},
+    "OFFICE_365_PLUS_12M": {"name": "Microsoft Office 365 Plus 1 Month + 11 Months (GIFT)", "price_vnd": 389000, "category_key": "OFFICE"},
+    "WINDOWS_10": {"name": "Windows 10", "price_vnd": 459000, "category_key": "WINDOWS"},
+    "WINDOWS_11": {"name": "Windows 11", "price_vnd": 650000, "category_key": "WINDOWS"},
 }
 
 WINDOWS_STARTUP_PRODUCTS = (
@@ -64,7 +65,7 @@ WINDOWS_STARTUP_PRODUCTS = (
         "category_key": "WINDOWS",
         "category": "account",
         "duration": "LIFETIME",
-        "price_vnd": 350000,
+        "price_vnd": 459000,
         "warranty_days": 0,
         "menu_order": 19,
     },
@@ -74,7 +75,7 @@ WINDOWS_STARTUP_PRODUCTS = (
         "category_key": "WINDOWS",
         "category": "account",
         "duration": "LIFETIME",
-        "price_vnd": 500000,
+        "price_vnd": 650000,
         "warranty_days": 0,
         "menu_order": 20,
     },

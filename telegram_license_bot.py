@@ -434,6 +434,49 @@ def _initialize_store_db(store_db_path: Path) -> None:
                 connection.execute(f"ALTER TABLE products ADD COLUMN {name} {definition}")
 
 
+PRICE_UPDATE_20261007 = {
+    "WINDOWS_10": 459000,
+    "WINDOWS_11": 650000,
+    "OFFICE_2024_LIFETIME": 259000,
+    "OFFICE_365_PLUS_12M": 389000,
+}
+
+
+def _backup_and_apply_price_update_20261007(store_db_path: Path) -> Path | None:
+    """Back up the live store once, then update only existing target products."""
+    if not store_db_path.is_file():
+        return None
+    placeholders = ",".join("?" for _ in PRICE_UPDATE_20261007)
+    with closing(sqlite3.connect(store_db_path)) as connection:
+        current = dict(
+            connection.execute(
+                f"SELECT UPPER(code), price_vnd FROM products WHERE UPPER(code) IN ({placeholders})",
+                tuple(PRICE_UPDATE_20261007),
+            ).fetchall()
+        )
+    pending = {
+        code: price
+        for code, price in PRICE_UPDATE_20261007.items()
+        if code in current and current[code] != price
+    }
+    if not pending:
+        return None
+
+    backup_path = store_db_path.with_name(f"{store_db_path.name}.bak_before_price_update_20261007")
+    if not backup_path.exists():
+        with closing(sqlite3.connect(store_db_path)) as source, closing(sqlite3.connect(backup_path)) as target:
+            source.backup(target)
+
+    now = _utc_now_iso()
+    with closing(sqlite3.connect(store_db_path)) as connection, connection:
+        for code, price in pending.items():
+            connection.execute(
+                "UPDATE products SET price_vnd = ?, updated_at = ? WHERE UPPER(code) = ?",
+                (price, now, code),
+            )
+    logger.info("Applied 2026-10-07 product price update to %s; backup=%s", sorted(pending), backup_path)
+    return backup_path
+
 def _format_vnd(amount: int) -> str:
     return f"{int(amount):,}".replace(",", ".")
 
@@ -6078,6 +6121,7 @@ def build_application() -> Application:
         store_db_path = PROJECT_ROOT / store_db_path
     try:
         _initialize_store_db(store_db_path)
+        _backup_and_apply_price_update_20261007(store_db_path)
     except sqlite3.Error as exc:
         raise SystemExit(f"Cannot initialize store database at {store_db_path}: {exc}") from exc
     migrated_orders = _migrate_legacy_orders_to_sqlite(store_db_path)

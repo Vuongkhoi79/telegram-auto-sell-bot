@@ -60,10 +60,10 @@ EXPECTED_PRODUCT_TERMS = {
     "CAPCUT_30D": {"price_vnd": 45000, "warranty_days": 30},
     "CHATGPT_SHARED": {"price_vnd": 45000, "warranty_days": 7},
     "GROK_75K": {"price_vnd": 75000, "warranty_days": 7},
-    "OFFICE_2024_LIFETIME": {"price_vnd": 198000, "warranty": "LIFETIME", "duration": "LIFETIME"},
-    "OFFICE_365_PLUS_12M": {"price_vnd": 299000, "warranty_days": 365, "duration": "1M+11M_GIFT"},
-    "WINDOWS_10": {"price_vnd": 350000, "warranty": "LIFETIME", "duration": "LIFETIME"},
-    "WINDOWS_11": {"price_vnd": 500000, "warranty": "LIFETIME", "duration": "LIFETIME"},
+    "OFFICE_2024_LIFETIME": {"price_vnd": 259000, "warranty": "LIFETIME", "duration": "LIFETIME"},
+    "OFFICE_365_PLUS_12M": {"price_vnd": 389000, "warranty_days": 365, "duration": "1M+11M_GIFT"},
+    "WINDOWS_10": {"price_vnd": 459000, "warranty": "LIFETIME", "duration": "LIFETIME"},
+    "WINDOWS_11": {"price_vnd": 650000, "warranty": "LIFETIME", "duration": "LIFETIME"},
 }
 ALLOWED_PRODUCT_CODES = {
     "CHATGPT",
