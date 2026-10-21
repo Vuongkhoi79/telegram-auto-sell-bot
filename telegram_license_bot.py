@@ -3835,12 +3835,11 @@ async def _send_purchase_error(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     message = query.message if query and getattr(query, "message", None) else update.effective_message
     logger.error(
-        "FALLBACK_MENU_TRIGGERED user_id=%s chat_id=%s message_id=%s order_id=%s reason=%s",
+        "FALLBACK_MENU_TRIGGERED user_id=%s chat_id=%s message_id=%s order_id=%s",
         getattr(getattr(update, "effective_user", None), "id", None),
         getattr(getattr(message, "chat", None), "id", None),
         getattr(message, "message_id", None),
         order_id,
-        reason,
     )
     text = "Đã giữ hàng nhưng lỗi tạo thanh toán. Vui lòng liên hệ admin."
     if query:
@@ -3895,19 +3894,16 @@ async def _send_acb_qr(update: Update, context: ContextTypes.DEFAULT_TYPE, order
     payment_service: PaymentService = context.application.bot_data["payment_service"]
     if not payment_service.config.bank_name or not payment_service.config.bank_account or not payment_service.config.bank_account_name:
         logger.error(
-            "QR_RENDER_FAIL callback_data=%s order_id=%s exception_type=%s exception_message=%s bank_name=%s bank_account=%s bank_account_name=%s",
+            "QR_RENDER_FAIL callback_data=%s order_id=%s exception_type=%s exception_message=%s",
             callback_data,
             order_id,
             "RuntimeError",
             "Payment configuration missing",
-            payment_service.config.bank_name,
-            payment_service.config.bank_account,
-            payment_service.config.bank_account_name,
         )
         raise RuntimeError("Thanh toán chưa được cấu hình.")
 
     logger.debug(
-        "QR_RENDER_OK callback_data=%s user_id=%s database_path=%s order_id=%s product_code=%s package_code=%s quantity=%s order_status=%s bank_account=%s amount_vnd=%s",
+        "QR_RENDER_OK callback_data=%s user_id=%s database_path=%s order_id=%s product_code=%s package_code=%s quantity=%s order_status=%s amount_vnd=%s",
         callback_data,
         user_id,
         _resolve_store_db_path(context.application.bot_data.get("store_db_path")),
@@ -3916,7 +3912,6 @@ async def _send_acb_qr(update: Update, context: ContextTypes.DEFAULT_TYPE, order
         str(order.get("package_code", "")),
         int(order.get("quantity", 0) or 0),
         str(order.get("order_status", "")),
-        payment_service.config.bank_account,
         int(order.get("total", 0) or 0),
     )
     order = _update_order(order_id, payment_method="ACB") or order
@@ -3938,14 +3933,29 @@ async def _send_acb_qr(update: Update, context: ContextTypes.DEFAULT_TYPE, order
             order_id,
         )
     except Exception as exc:
-        logger.exception(
-            "TELEGRAM_SEND_FAIL callback_data=%s order_id=%s exception_type=%s exception_message=%s",
+        # Telegram fetches URL-based photos itself. VietQR/CDN/content-type failures
+        # must not turn an already reserved order into another order attempt.
+        logger.warning(
+            "TELEGRAM_QR_PHOTO_SEND_FAIL callback_data=%s order_id=%s exception_type=%s; attempting_text_fallback",
             callback_data,
             order_id,
             type(exc).__name__,
-            exc,
         )
-        raise
+        try:
+            await message.reply_text(caption, reply_markup=_qr_payment_keyboard(order_id))
+            logger.info(
+                "TELEGRAM_SEND_OK callback_data=%s order_id=%s branch=qr_text_fallback",
+                callback_data,
+                order_id,
+            )
+        except Exception as fallback_exc:
+            logger.error(
+                "TELEGRAM_QR_TEXT_FALLBACK_FAIL callback_data=%s order_id=%s exception_type=%s",
+                callback_data,
+                order_id,
+                type(fallback_exc).__name__,
+            )
+            raise
 
 
 async def _notify_admins_order_pending(context: ContextTypes.DEFAULT_TYPE, order: dict[str, object]) -> None:
@@ -6073,13 +6083,12 @@ async def _on_menu_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         try:
             await _send_acb_qr(update, context, order_id)
         except Exception as exc:
-            logger.exception(
-                "EXCEPTION_CAUGHT callback_data=%s user_id=%s order_id=%s exception_type=%s exception_message=%s",
+            logger.error(
+                "EXCEPTION_CAUGHT callback_data=%s user_id=%s order_id=%s exception_type=%s",
                 data,
                 getattr(getattr(update, "effective_user", None), "id", None),
                 order_id,
                 type(exc).__name__,
-                exc,
             )
             await _send_purchase_error(update, context, reason=str(exc), order_id=order_id)
     elif data.startswith("pay_wallet:"):
