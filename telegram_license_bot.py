@@ -19,6 +19,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import httpx
+from PIL import Image, ImageDraw
 
 try:
     from dotenv import load_dotenv
@@ -3517,8 +3518,8 @@ async def _download_vietqr_png(qr_url: str) -> bytes:
         png_bytes = payload
         source_format = "jpeg"
     elif content_type == "image/svg+xml" or b"<svg" in payload[:1024].lower():
-        png_bytes = _extract_largest_embedded_vietqr_image(payload)
-        source_format = "svg_embedded_raster"
+        png_bytes = _render_vietqr_svg_png(payload)
+        source_format = "svg_rendered"
     else:
         raise ValueError(f"Unsupported VietQR content type: {content_type or 'missing'}")
 
@@ -3537,24 +3538,150 @@ async def _download_vietqr_png(qr_url: str) -> bytes:
     return png_bytes
 
 
-def _extract_largest_embedded_vietqr_image(svg_payload: bytes) -> bytes:
+def _decode_svg_data_image(href: str) -> bytes:
+    if not href.startswith(("data:image/png;base64,", "data:image/jpeg;base64,")):
+        raise ValueError("Unsupported SVG data image")
+    raster = base64.b64decode(href.split(",", 1)[1], validate=True)
+    if not (raster.startswith(b"\x89PNG\r\n\x1a\n") or raster.startswith(b"\xff\xd8\xff")):
+        raise ValueError("Invalid embedded raster signature")
+    return raster
+
+
+def _render_vietqr_svg_png(svg_payload: bytes) -> bytes:
     root = ET.fromstring(svg_payload)
-    candidates: list[bytes] = []
-    for element in root.iter():
-        if element.tag.rsplit("}", 1)[-1] != "image":
-            continue
-        href = element.attrib.get("href") or element.attrib.get("{http://www.w3.org/1999/xlink}href", "")
-        if not href.startswith(("data:image/png;base64,", "data:image/jpeg;base64,")):
-            continue
-        try:
-            raster = base64.b64decode(href.split(",", 1)[1], validate=True)
-        except (ValueError, TypeError):
-            continue
-        if raster.startswith(b"\x89PNG\r\n\x1a\n") or raster.startswith(b"\xff\xd8\xff"):
-            candidates.append(raster)
-    if not candidates:
-        raise ValueError("VietQR SVG contains no supported embedded raster image")
-    return max(candidates, key=len)
+    if root.tag.rsplit("}", 1)[-1] != "svg":
+        raise ValueError("VietQR response is not SVG")
+    width = int(float(root.attrib.get("width", "0")))
+    height = int(float(root.attrib.get("height", "0")))
+    if width <= 0 or height <= 0 or width > 2000 or height > 2000:
+        raise ValueError(f"Invalid VietQR SVG dimensions: {width}x{height}")
+
+    elements = list(root.iter())
+    images = [element for element in elements if element.tag.rsplit("}", 1)[-1] == "image"]
+    qr_group = next(
+        (element for element in elements if element.tag.rsplit("}", 1)[-1] == "g" and "scale(" in element.attrib.get("transform", "")),
+        None,
+    )
+    if not images or qr_group is None:
+        raise ValueError("VietQR SVG is missing background or QR group")
+
+    background_href = images[0].attrib.get("href") or images[0].attrib.get("{http://www.w3.org/1999/xlink}href", "")
+    background = Image.open(io.BytesIO(_decode_svg_data_image(background_href))).convert("RGB")
+    if background.size != (width, height):
+        background = background.resize((width, height), Image.Resampling.LANCZOS)
+
+    transform = qr_group.attrib.get("transform", "")
+    match = re.fullmatch(
+        r"\s*translate\(([-+\d.]+)[ ,]+([-+\d.]+)\)\s*scale\(([-+\d.]+)(?:[ ,]+([-+\d.]+))?\)\s*",
+        transform,
+    )
+    if not match:
+        raise ValueError(f"Unsupported VietQR transform: {transform[:80]}")
+    translate_x, translate_y, scale_x = (float(match.group(index)) for index in (1, 2, 3))
+    scale_y = float(match.group(4) or scale_x)
+
+    path = next((element for element in qr_group if element.tag.rsplit("}", 1)[-1] == "path"), None)
+    qr_rect = next((element for element in qr_group if element.tag.rsplit("}", 1)[-1] == "rect"), None)
+    if path is None or qr_rect is None:
+        raise ValueError("VietQR SVG is missing QR modules")
+    modules = int(float(qr_rect.attrib.get("width", "0")))
+    if modules < 21 or modules > 177 or int(float(qr_rect.attrib.get("height", "0"))) != modules:
+        raise ValueError(f"Invalid VietQR module size: {modules}")
+
+    module_rects = re.findall(r"M(\d+) (\d+)h(\d+)v1h-(\d+)z", path.attrib.get("d", ""))
+    if len(module_rects) < 100:
+        raise ValueError("VietQR path does not contain enough QR modules")
+    render_scale = 10
+    qr = Image.new("RGB", (modules * render_scale, modules * render_scale), "white")
+    draw = ImageDraw.Draw(qr)
+    for raw_x, raw_y, raw_width, raw_negative_width in module_rects:
+        x, y, run_width, negative_width = map(int, (raw_x, raw_y, raw_width, raw_negative_width))
+        if run_width != negative_width or x + run_width > modules or y >= modules:
+            raise ValueError("Invalid VietQR path segment")
+        draw.rectangle(
+            (x * render_scale, y * render_scale, (x + run_width) * render_scale - 1, (y + 1) * render_scale - 1),
+            fill="#111111",
+        )
+
+    logo = next((element for element in images if element.attrib.get("id") == "vietqr-logo"), None)
+    if logo is not None:
+        logo_href = logo.attrib.get("href") or logo.attrib.get("{http://www.w3.org/1999/xlink}href", "")
+        logo_image = Image.open(io.BytesIO(_decode_svg_data_image(logo_href))).convert("RGB")
+        logo_x = int(round(float(logo.attrib["x"]) * render_scale))
+        logo_y = int(round(float(logo.attrib["y"]) * render_scale))
+        logo_width = int(round(float(logo.attrib["width"]) * render_scale))
+        logo_height = int(round(float(logo.attrib["height"]) * render_scale))
+        logo_image = logo_image.resize((logo_width, logo_height), Image.Resampling.LANCZOS)
+        qr.paste(logo_image, (logo_x, logo_y))
+
+    target_width = int(round(modules * scale_x))
+    target_height = int(round(modules * scale_y))
+    qr = qr.resize((target_width, target_height), Image.Resampling.NEAREST)
+    background.paste(qr, (int(round(translate_x)), int(round(translate_y))))
+    output = io.BytesIO()
+    background.save(output, format="PNG", optimize=True)
+    return output.getvalue()
+
+
+def _parse_emv_tlv(value: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    offset = 0
+    while offset + 4 <= len(value):
+        tag = value[offset : offset + 2]
+        raw_length = value[offset + 2 : offset + 4]
+        if not raw_length.isdigit():
+            raise ValueError("Invalid VietQR TLV length")
+        length = int(raw_length)
+        start = offset + 4
+        end = start + length
+        if end > len(value):
+            raise ValueError("Truncated VietQR TLV payload")
+        fields[tag] = value[start:end]
+        offset = end
+    if offset != len(value):
+        raise ValueError("Trailing data in VietQR TLV payload")
+    return fields
+
+
+def _validate_vietqr_png(
+    png_bytes: bytes,
+    order: dict[str, object],
+    payment_service: PaymentService,
+) -> str:
+    import cv2
+    import numpy as np
+
+    image = cv2.imdecode(np.frombuffer(png_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError("Rendered VietQR PNG cannot be decoded as an image")
+    decoded, points, _ = cv2.QRCodeDetector().detectAndDecode(image)
+    if not decoded or points is None:
+        raise ValueError("Rendered VietQR PNG does not contain a decodable QR code")
+
+    top_level = _parse_emv_tlv(decoded)
+    merchant = _parse_emv_tlv(top_level.get("38", ""))
+    beneficiary = _parse_emv_tlv(merchant.get("01", ""))
+    additional = _parse_emv_tlv(top_level.get("62", ""))
+    actual_account = beneficiary.get("01", "")
+    expected_account = str(payment_service.config.bank_account or "").strip()
+    if actual_account != expected_account:
+        raise ValueError("Rendered VietQR account does not match payment configuration")
+
+    raw_amount = top_level.get("54", "")
+    try:
+        actual_amount = int(float(raw_amount))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Rendered VietQR amount is invalid") from exc
+    expected_amount = _order_payable_amount(order)
+    if actual_amount != expected_amount:
+        raise ValueError("Rendered VietQR amount does not match order")
+
+    normalize_content = lambda value: re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+    actual_content = normalize_content(additional.get("08", ""))
+    expected_content = normalize_content(order.get("order_id", ""))
+    if not expected_content or actual_content != expected_content:
+        raise ValueError("Rendered VietQR transfer content does not match order")
+    return decoded
 
 
 def _qr_caption(order: dict[str, object], payment_service: PaymentService) -> str:
@@ -3994,7 +4121,9 @@ async def _send_acb_qr(update: Update, context: ContextTypes.DEFAULT_TYPE, order
         int(order.get("total", 0) or 0),
     )
     try:
-        qr_image = io.BytesIO(await _download_vietqr_png(qr_url))
+        qr_png = await _download_vietqr_png(qr_url)
+        _validate_vietqr_png(qr_png, order, payment_service)
+        qr_image = io.BytesIO(qr_png)
         qr_image.name = f"vietqr-{order_id}.png"
         await message.reply_photo(photo=qr_image, caption=caption, reply_markup=_qr_payment_keyboard(order_id))
         logger.debug(

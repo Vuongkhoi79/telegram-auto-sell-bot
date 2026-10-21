@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import sqlite3
 from contextlib import closing
 from unittest.mock import AsyncMock, patch
+
+import cv2
+from PIL import Image
 
 import telegram_license_bot as bot
 from scripts.test_telegram_callback_flow import FakeUpdate, TelegramCallbackFlowTest
@@ -21,16 +25,51 @@ class PhotoFailureUpdate(FakeUpdate):
 
 
 class QrTextFallbackTest(TelegramCallbackFlowTest):
-    def test_extracts_largest_valid_embedded_image_from_vietqr_svg(self) -> None:
-        small_jpeg = b"\xff\xd8\xffsmall"
-        qr_png = b"\x89PNG\r\n\x1a\n" + (b"qr" * 50)
-        svg = (
-            b'<svg xmlns="http://www.w3.org/2000/svg">'
-            b'<image href="data:image/jpeg;base64,' + base64.b64encode(small_jpeg) + b'"/>'
-            b'<image href="data:image/png;base64,' + base64.b64encode(qr_png) + b'"/>'
-            b"</svg>"
+    def test_rendered_svg_qr_decodes_and_matches_payment_fields(self) -> None:
+        payload = (
+            "00020101021238530010A0000007270123000697041601091234567890208QRIBFTTA"
+            "53037045405700005802VN62150811ORDTEST00016304ABCD"
         )
-        self.assertEqual(bot._extract_largest_embedded_vietqr_image(svg), qr_png)
+        matrix = cv2.QRCodeEncoder_create().encode(payload)
+        modules = matrix.shape[0]
+        path_parts: list[str] = []
+        for y, row in enumerate(matrix):
+            x = 0
+            while x < modules:
+                if row[x] != 0:
+                    x += 1
+                    continue
+                start = x
+                while x < modules and row[x] == 0:
+                    x += 1
+                width = x - start
+                path_parts.append(f"M{start} {y}h{width}v1h-{width}z")
+        background = Image.new("RGB", (540, 640), "white")
+        background_bytes = io.BytesIO()
+        background.save(background_bytes, format="PNG")
+        background_data = base64.b64encode(background_bytes.getvalue()).decode("ascii")
+        svg = (
+            f'<svg width="540" height="640" viewBox="0 0 540 640" xmlns="http://www.w3.org/2000/svg">'
+            f'<image x="0" y="0" width="540" height="640" href="data:image/png;base64,{background_data}"/>'
+            f'<g transform="translate(92 94) scale({357 / modules})">'
+            f'<rect width="{modules}" height="{modules}" fill="#fff"/>'
+            f'<path fill="#111" d="{"".join(path_parts)}"/></g></svg>'
+        ).encode("utf-8")
+        png = bot._render_vietqr_svg_png(svg)
+        order = {"order_id": "ORD-TEST-0001", "total": 70000}
+        decoded = bot._validate_vietqr_png(png, order, self.context.application.bot_data["payment_service"])
+        self.assertEqual(decoded, payload)
+
+    def test_blank_or_logo_only_image_is_rejected(self) -> None:
+        blank = Image.new("RGB", (540, 640), "white")
+        output = io.BytesIO()
+        blank.save(output, format="PNG")
+        with self.assertRaisesRegex(ValueError, "decodable QR code"):
+            bot._validate_vietqr_png(
+                output.getvalue(),
+                {"order_id": "ORD-TEST-0001", "total": 70000},
+                self.context.application.bot_data["payment_service"],
+            )
 
     def test_qr_is_uploaded_as_validated_server_bytes(self) -> None:
         update = FakeUpdate("qty:GEMINI:GEMINI:1")
@@ -43,7 +82,10 @@ class QrTextFallbackTest(TelegramCallbackFlowTest):
 
         qr_update = FakeUpdate(f"pay_acb:{order_id}")
         png = b"\x89PNG\r\n\x1a\n" + b"test-png"
-        with patch.object(bot, "_download_vietqr_png", new=AsyncMock(return_value=png)):
+        with (
+            patch.object(bot, "_download_vietqr_png", new=AsyncMock(return_value=png)),
+            patch.object(bot, "_validate_vietqr_png"),
+        ):
             asyncio.run(bot._send_acb_qr(qr_update, self.context, order_id))
 
         self.assertEqual(len(qr_update.callback_query.photos), 1)
@@ -65,7 +107,10 @@ class QrTextFallbackTest(TelegramCallbackFlowTest):
 
         qr_update = PhotoFailureUpdate(f"pay_acb:{order_id}")
         png = b"\x89PNG\r\n\x1a\n" + b"test-png"
-        with patch.object(bot, "_download_vietqr_png", new=AsyncMock(return_value=png)):
+        with (
+            patch.object(bot, "_download_vietqr_png", new=AsyncMock(return_value=png)),
+            patch.object(bot, "_validate_vietqr_png"),
+        ):
             asyncio.run(bot._send_acb_qr(qr_update, self.context, order_id))
 
         self.assertEqual(len(qr_update.callback_query.replies), 1)
