@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 import json
 import logging
 import os
@@ -10,10 +12,13 @@ import sqlite3
 import tempfile
 import uuid
 import csv
+import xml.etree.ElementTree as ET
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
+
+import httpx
 
 try:
     from dotenv import load_dotenv
@@ -3489,6 +3494,69 @@ def _build_vietqr_url(order: dict[str, object], payment_service: PaymentService)
     )
 
 
+async def _download_vietqr_png(qr_url: str) -> bytes:
+    max_download_bytes = 5 * 1024 * 1024
+    async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(20.0)) as client:
+        response = await client.get(
+            qr_url,
+            headers={
+                "Accept": "image/png,image/jpeg,image/svg+xml,image/*;q=0.9",
+                "User-Agent": "telegram-auto-sell-bot/1.0",
+            },
+        )
+        response.raise_for_status()
+        payload = response.content
+    if not payload or len(payload) > max_download_bytes:
+        raise ValueError(f"Invalid VietQR response size: {len(payload)} bytes")
+
+    content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        png_bytes = payload
+        source_format = "png"
+    elif payload.startswith(b"\xff\xd8\xff"):
+        png_bytes = payload
+        source_format = "jpeg"
+    elif content_type == "image/svg+xml" or b"<svg" in payload[:1024].lower():
+        png_bytes = _extract_largest_embedded_vietqr_image(payload)
+        source_format = "svg_embedded_raster"
+    else:
+        raise ValueError(f"Unsupported VietQR content type: {content_type or 'missing'}")
+
+    if source_format != "jpeg" and not png_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError("VietQR conversion did not produce a valid PNG")
+    if len(png_bytes) > 10 * 1024 * 1024:
+        raise ValueError(f"Converted VietQR image is too large: {len(png_bytes)} bytes")
+    logger.info(
+        "VIETQR_IMAGE_READY http_status=%s content_type=%s source_format=%s source_bytes=%s upload_bytes=%s",
+        response.status_code,
+        content_type,
+        source_format,
+        len(payload),
+        len(png_bytes),
+    )
+    return png_bytes
+
+
+def _extract_largest_embedded_vietqr_image(svg_payload: bytes) -> bytes:
+    root = ET.fromstring(svg_payload)
+    candidates: list[bytes] = []
+    for element in root.iter():
+        if element.tag.rsplit("}", 1)[-1] != "image":
+            continue
+        href = element.attrib.get("href") or element.attrib.get("{http://www.w3.org/1999/xlink}href", "")
+        if not href.startswith(("data:image/png;base64,", "data:image/jpeg;base64,")):
+            continue
+        try:
+            raster = base64.b64decode(href.split(",", 1)[1], validate=True)
+        except (ValueError, TypeError):
+            continue
+        if raster.startswith(b"\x89PNG\r\n\x1a\n") or raster.startswith(b"\xff\xd8\xff"):
+            candidates.append(raster)
+    if not candidates:
+        raise ValueError("VietQR SVG contains no supported embedded raster image")
+    return max(candidates, key=len)
+
+
 def _qr_caption(order: dict[str, object], payment_service: PaymentService) -> str:
     gross_amount = int(order.get("gross_amount", _order_payable_amount(order)) or 0)
     payable_amount = _order_payable_amount(order)
@@ -3926,7 +3994,9 @@ async def _send_acb_qr(update: Update, context: ContextTypes.DEFAULT_TYPE, order
         int(order.get("total", 0) or 0),
     )
     try:
-        await message.reply_photo(photo=qr_url, caption=caption, reply_markup=_qr_payment_keyboard(order_id))
+        qr_image = io.BytesIO(await _download_vietqr_png(qr_url))
+        qr_image.name = f"vietqr-{order_id}.png"
+        await message.reply_photo(photo=qr_image, caption=caption, reply_markup=_qr_payment_keyboard(order_id))
         logger.debug(
             "TELEGRAM_SEND_OK callback_data=%s order_id=%s branch=qr",
             callback_data,
